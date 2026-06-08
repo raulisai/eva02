@@ -75,6 +75,11 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     });
   }
 
+  /** Send a command to org-scoped nodes; nodes must verify target nodeId locally. */
+  emitNodeCommand(orgId: string, payload: Record<string, unknown>) {
+    this.server.to(`org:${orgId}`).emit('node.command', payload);
+  }
+
   /** Ping/pong for liveness checks from dashboard. */
   @SubscribeMessage('ping')
   handlePing(@ConnectedSocket() client: Socket, @MessageBody() _data: unknown) {

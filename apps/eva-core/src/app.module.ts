@@ -12,6 +12,7 @@ import { ModelRouterModule } from './model-router/model-router.module';
 import { IntentRouterModule } from './intent-router/intent-router.module';
 import { PlannerModule } from './planner/planner.module';
 import { ToolRouterModule } from './tool-router/tool-router.module';
+import { DevControlModule } from './dev-control/dev-control.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { ToolRouterModule } from './tool-router/tool-router.module';
     IntentRouterModule,
     PlannerModule,
     ToolRouterModule,
+    DevControlModule,
   ],
   providers: [
     {
