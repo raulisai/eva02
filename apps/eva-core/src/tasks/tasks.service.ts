@@ -1,0 +1,67 @@
+import { Injectable, BadRequestException } from '@nestjs/common';
+import { TasksRepository } from './tasks.repository';
+import { EventBusService } from '../events/event-bus.service';
+import { Task, TaskStatus, isValidTransition } from './task.types';
+import { CreateTaskDto } from './dto/create-task.dto';
+
+@Injectable()
+export class TasksService {
+  constructor(
+    private readonly repo: TasksRepository,
+    private readonly events: EventBusService,
+  ) {}
+
+  async createTask(dto: CreateTaskDto, userId: string, orgId: string): Promise<Task> {
+    const task = await this.repo.create(dto, userId, orgId);
+
+    await this.events.publish({
+      type: 'task.created',
+      orgId,
+      taskId: task.id,
+      payload: { taskId: task.id, title: task.title },
+    });
+
+    return task;
+  }
+
+  async getTask(taskId: string, orgId: string): Promise<Task> {
+    return this.repo.findByIdOrThrow(taskId, orgId);
+  }
+
+  async transition(taskId: string, orgId: string, nextStatus: TaskStatus): Promise<Task> {
+    const task = await this.repo.findByIdOrThrow(taskId, orgId);
+
+    if (!isValidTransition(task.status, nextStatus)) {
+      throw new BadRequestException(
+        `Cannot transition task from '${task.status}' to '${nextStatus}'`,
+      );
+    }
+
+    const now = new Date().toISOString();
+    const extras: Parameters<typeof this.repo.updateStatus>[3] = {};
+
+    if (nextStatus === 'running' && !task.started_at) extras.started_at = now;
+    if (nextStatus === 'completed' || nextStatus === 'failed') extras.completed_at = now;
+
+    const updated = await this.repo.updateStatus(taskId, orgId, nextStatus, extras);
+
+    const eventTypeMap: Partial<Record<TaskStatus, 'task.started' | 'task.completed' | 'task.failed' | 'task.cancelled'>> = {
+      running:   'task.started',
+      completed: 'task.completed',
+      failed:    'task.failed',
+      cancelled: 'task.cancelled',
+    };
+
+    const eventType = eventTypeMap[nextStatus];
+    if (eventType) {
+      await this.events.publish({
+        type: eventType,
+        orgId,
+        taskId,
+        payload: { taskId, status: nextStatus },
+      });
+    }
+
+    return updated;
+  }
+}

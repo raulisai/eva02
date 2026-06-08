@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg: 9 9 11;
+    --surface: 24 24 27;
+    --border: 39 39 42;
+    --text: 244 244 245;
+    --dim: 113 113 122;
+  }
+
+  * { @apply border-zinc-800; }
+
+  body {
+    @apply bg-zinc-950 text-zinc-100 antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  /* scrollbar — ultra-thin, dark */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { @apply bg-transparent; }
+  ::-webkit-scrollbar-thumb { @apply bg-zinc-700 rounded-full; }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-zinc-600; }
+}
+
+@layer components {
+  .mono { @apply font-mono text-xs tracking-tight; }
+  .dim   { @apply text-zinc-500; }
+
+  /* Status LED dots */
+  .led {
+    @apply inline-block w-1.5 h-1.5 rounded-full flex-shrink-0;
+  }
+  .led-pending  { @apply bg-amber-500; }
+  .led-planning { @apply bg-blue-500; }
+  .led-running  { @apply bg-cyan-400 animate-pulse; }
+  .led-waiting  { @apply bg-orange-400; }
+  .led-completed { @apply bg-emerald-500; }
+  .led-failed   { @apply bg-red-500; }
+  .led-cancelled { @apply bg-zinc-600; }
+
+  /* Table rows */
+  .data-row {
+    @apply border-b border-zinc-800/60 hover:bg-zinc-800/30 transition-colors cursor-pointer;
+  }
+  .data-row.running {
+    @apply border-l-2 border-l-cyan-500/60;
+  }
+
+  /* New event flash */
+  .event-new { @apply animate-fade-in; }
+
+  /* Panel */
+  .panel {
+    @apply bg-zinc-900 border border-zinc-800 rounded-sm;
+  }
+}
