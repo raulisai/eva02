@@ -3,9 +3,10 @@
   "compilerOptions": {
     "baseUrl": "./",
     "paths": {
-      "@eva/*": ["src/*"]
+      "@eva/*": ["src/*"],
+      "@eva/browser-runtime": ["../../packages/browser-runtime/src"]
     }
   },
-  "include": ["src/**/*", "test/**/*"],
+  "include": ["src/**/*", "test/**/*", "../../packages/browser-runtime/src/**/*"],
   "exclude": ["node_modules", "dist"]
 }

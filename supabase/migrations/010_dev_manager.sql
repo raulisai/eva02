@@ -30,7 +30,7 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS projects (
   id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id        UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  org_id        UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   name          TEXT NOT NULL,
   repo_path     TEXT,
   node_id       UUID,
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE TABLE IF NOT EXISTS dev_tasks (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id       UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  org_id       UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   project_id   UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   title        TEXT NOT NULL,
   status       dev_task_status NOT NULL DEFAULT 'backlog',
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS dev_tasks (
 
 CREATE TABLE IF NOT EXISTS claude_code_sessions (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id       UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  org_id       UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   project_id   UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   dev_task_id  UUID REFERENCES dev_tasks(id) ON DELETE SET NULL,
   node_id      UUID,
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS claude_code_sessions (
 
 CREATE TABLE IF NOT EXISTS build_runs (
   id          BIGSERIAL PRIMARY KEY,
-  org_id      UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  org_id      UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   dev_task_id UUID REFERENCES dev_tasks(id) ON DELETE SET NULL,
   command     TEXT,
@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS build_runs (
 
 CREATE TABLE IF NOT EXISTS test_runs (
   id          BIGSERIAL PRIMARY KEY,
-  org_id      UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  org_id      UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   dev_task_id UUID REFERENCES dev_tasks(id) ON DELETE SET NULL,
   command     TEXT,
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS test_runs (
 
 CREATE TABLE IF NOT EXISTS code_reviews (
   id          BIGSERIAL PRIMARY KEY,
-  org_id      UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  org_id      UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   dev_task_id UUID REFERENCES dev_tasks(id) ON DELETE SET NULL,
   risk        TEXT,
@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS code_reviews (
 
 CREATE TABLE IF NOT EXISTS roadmap_items (
   id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id      UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  org_id      UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   title       TEXT NOT NULL,
   status      TEXT NOT NULL DEFAULT 'todo',

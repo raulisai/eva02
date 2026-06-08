@@ -133,6 +133,51 @@ CREATE POLICY "intent_routes_select" ON intent_routes
 CREATE POLICY "intent_routes_insert" ON intent_routes
   FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
 
+-- ── Browser Agent ─────────────────────────────────────────
+ALTER TABLE browser_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE browser_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE browser_screenshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE browser_action_preparations ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "browser_profiles_select" ON browser_profiles
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "browser_profiles_insert" ON browser_profiles
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "browser_profiles_update" ON browser_profiles
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "browser_sessions_select" ON browser_sessions
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "browser_sessions_insert" ON browser_sessions
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "browser_sessions_update" ON browser_sessions
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "browser_screenshots_select" ON browser_screenshots
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "browser_screenshots_insert" ON browser_screenshots
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "browser_preparations_select" ON browser_action_preparations
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "browser_preparations_insert" ON browser_action_preparations
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "browser_preparations_update" ON browser_action_preparations
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
 -- ── projects ──────────────────────────────────────────────
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 
@@ -214,11 +259,12 @@ GRANT USAGE ON SCHEMA public TO authenticated, anon;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   organizations, users, tasks, task_steps, task_events,
   approvals, memories, memory_embeddings, intent_routes,
+  browser_profiles, browser_sessions, browser_action_preparations,
   projects, dev_tasks, roadmap_items
 TO authenticated;
 
 GRANT SELECT, INSERT ON
-  build_runs, test_runs, code_reviews
+  browser_screenshots, build_runs, test_runs, code_reviews
 TO authenticated;
 
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;
