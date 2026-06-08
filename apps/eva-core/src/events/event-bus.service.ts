@@ -12,7 +12,8 @@ export type EvaEventType =
   | 'dev.task.created'
   | 'dev.task.updated'
   | 'dev.task.completed'
-  | 'dev.task.failed';
+  | 'dev.task.failed'
+  | 'browser.screenshot.created';
 
 export interface EvaEvent<T = Record<string, unknown>> {
   id?: string;        // Stream entry ID, set on consume

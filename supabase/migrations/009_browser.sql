@@ -1,8 +1,8 @@
 -- Browser Agent (Phase 7)
 
 CREATE TABLE IF NOT EXISTS browser_profiles (
-  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id          UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id          UUID NOT NULL,
   service         TEXT NOT NULL,
   label           TEXT,
   encrypted_state TEXT,
@@ -13,8 +13,8 @@ CREATE TABLE IF NOT EXISTS browser_profiles (
 );
 
 CREATE TABLE IF NOT EXISTS browser_sessions (
-  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id      UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id      UUID NOT NULL,
   profile_id  UUID NOT NULL REFERENCES browser_profiles(id) ON DELETE CASCADE,
   task_id     UUID REFERENCES tasks(id) ON DELETE SET NULL,
   status      TEXT NOT NULL DEFAULT 'open'
@@ -26,8 +26,8 @@ CREATE TABLE IF NOT EXISTS browser_sessions (
 );
 
 CREATE TABLE IF NOT EXISTS browser_screenshots (
-  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id      UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id      UUID NOT NULL,
   session_id  UUID NOT NULL REFERENCES browser_sessions(id) ON DELETE CASCADE,
   task_id     UUID REFERENCES tasks(id) ON DELETE SET NULL,
   image_base64 TEXT NOT NULL,
@@ -36,8 +36,8 @@ CREATE TABLE IF NOT EXISTS browser_screenshots (
 );
 
 CREATE TABLE IF NOT EXISTS browser_action_preparations (
-  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id        UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id        UUID NOT NULL,
   session_id    UUID NOT NULL REFERENCES browser_sessions(id) ON DELETE CASCADE,
   task_id       UUID REFERENCES tasks(id) ON DELETE SET NULL,
   approval_id   UUID REFERENCES approvals(id) ON DELETE SET NULL,

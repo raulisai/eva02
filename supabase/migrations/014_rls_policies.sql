@@ -95,6 +95,9 @@ CREATE POLICY "approvals_update" ON approvals
   USING (org_id = ANY(public.user_org_ids()))
   WITH CHECK (org_id = ANY(public.user_org_ids()));
 
+CREATE POLICY "approvals_delete" ON approvals
+  FOR DELETE USING (org_id = ANY(public.user_org_ids()));
+
 -- ── memories ──────────────────────────────────────────────
 ALTER TABLE memories ENABLE ROW LEVEL SECURITY;
 
