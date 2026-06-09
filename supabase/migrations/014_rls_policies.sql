@@ -136,6 +136,63 @@ CREATE POLICY "intent_routes_select" ON intent_routes
 CREATE POLICY "intent_routes_insert" ON intent_routes
   FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
 
+-- ── Communication Hub ─────────────────────────────────────
+ALTER TABLE communication_channels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE communication_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "communication_channels_select" ON communication_channels
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "communication_channels_insert" ON communication_channels
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "communication_channels_update" ON communication_channels
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "communication_accounts_select" ON communication_accounts
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "communication_accounts_insert" ON communication_accounts
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "communication_accounts_update" ON communication_accounts
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "conversations_select" ON conversations
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "conversations_insert" ON conversations
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "conversations_update" ON conversations
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "messages_select" ON messages
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "messages_insert" ON messages
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "notifications_select" ON notifications
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "notifications_insert" ON notifications
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "notifications_update" ON notifications
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
 -- ── Browser Agent ─────────────────────────────────────────
 ALTER TABLE browser_profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE browser_sessions ENABLE ROW LEVEL SECURITY;
@@ -352,6 +409,8 @@ GRANT USAGE ON SCHEMA public TO authenticated, anon;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   organizations, users, tasks, task_steps, task_events,
   approvals, memories, memory_embeddings, intent_routes,
+  communication_channels, communication_accounts, conversations,
+  messages, notifications,
   browser_profiles, browser_sessions, browser_action_preparations,
   skills, skill_versions, tools, tool_calls,
   projects, dev_tasks, roadmap_items,

@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { EventBusService } from '../../events/event-bus.service';
+import { CommunicationService } from '../../communication/communication.service';
 import { ApprovalClassifierService } from '../approval-classifier.service';
 import { hashApprovalAction } from '../approval-hash';
 import { Approval } from '../approval.types';
@@ -47,6 +48,7 @@ describe('ApprovalsService', () => {
   let service: ApprovalsService;
   let repo: jest.Mocked<ApprovalsRepository>;
   let events: jest.Mocked<EventBusService>;
+  let communication: jest.Mocked<CommunicationService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -66,12 +68,17 @@ describe('ApprovalsService', () => {
           provide: EventBusService,
           useValue: { publish: jest.fn().mockResolvedValue('0-1') } satisfies Partial<EventBusService>,
         },
+        {
+          provide: CommunicationService,
+          useValue: { sendApprovalRequest: jest.fn().mockResolvedValue({}) } satisfies Partial<CommunicationService>,
+        },
       ],
     }).compile();
 
     service = module.get(ApprovalsService);
     repo = module.get(ApprovalsRepository);
     events = module.get(EventBusService);
+    communication = module.get(CommunicationService);
   });
 
   it('blocks sensitive actions requested from Fast Path', async () => {
@@ -140,6 +147,20 @@ describe('ApprovalsService', () => {
     expect(second.completed).toBe(true);
     expect(second.approval.status).toBe('approved');
     expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({ type: 'approval.resolved' }));
+  });
+
+  it('notifies Communication Hub for pending approvals', async () => {
+    const approval = makeApproval({ level: 1, status: 'pending' });
+    repo.create.mockResolvedValue(approval);
+
+    await service.request({
+      task_id: TASK,
+      action_type: 'telegram.send_message',
+      payload: { chat_id: '100', text: 'hola' },
+      level: 1,
+    }, ORG, USER_A);
+
+    expect(communication.sendApprovalRequest).toHaveBeenCalledWith(approval, ORG);
   });
 
   it('rejects resolving non-pending approvals', async () => {

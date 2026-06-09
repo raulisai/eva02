@@ -1,6 +1,7 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Optional } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { EventBusService } from '../events/event-bus.service';
+import { CommunicationService } from '../communication/communication.service';
 import { ApprovalClassifierService } from './approval-classifier.service';
 import { hashApprovalAction } from './approval-hash';
 import { ApprovalsRepository } from './approvals.repository';
@@ -13,6 +14,7 @@ export class ApprovalsService {
     private readonly repo: ApprovalsRepository,
     private readonly classifier: ApprovalClassifierService,
     private readonly events: EventBusService,
+    @Optional() private readonly communication?: CommunicationService,
   ) {}
 
   async request(dto: RequestApprovalDto, orgId: string, userId: string): Promise<Approval> {
@@ -56,6 +58,7 @@ export class ApprovalsService {
         taskId: approval.task_id ?? undefined,
         payload: { approvalId: approval.id, level, action_hash: approval.action_hash },
       });
+      await this.communication?.sendApprovalRequest(approval, orgId);
     }
 
     return approval;
