@@ -15,6 +15,7 @@ import { ToolRouterModule } from './tool-router/tool-router.module';
 import { DevControlModule } from './dev-control/dev-control.module';
 import { BrowserModule } from './browser/browser.module';
 import { ApprovalsModule } from './approvals/approvals.module';
+import { WearFastPathModule } from './wear-fast-path/wear-fast-path.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { ApprovalsModule } from './approvals/approvals.module';
     DevControlModule,
     BrowserModule,
     ApprovalsModule,
+    WearFastPathModule,
   ],
   providers: [
     {

@@ -1,0 +1,5 @@
+{
+  "examples": [
+    { "name": "Send status", "input": "Tell me on Telegram when task is complete", "expected_tool": "telegram.send_message" }
+  ]
+}

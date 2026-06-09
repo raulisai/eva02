@@ -1,0 +1,5 @@
+{
+  "tests": [
+    { "name": "approval notifications allowed", "input": { "tool": "telegram.send_approval_request" }, "expect": { "approval_level": 0 } }
+  ]
+}

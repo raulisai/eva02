@@ -1,0 +1,5 @@
+{
+  "examples": [
+    { "name": "Find travel email", "input": "Find my latest flight email", "expected_tool": "gmail.search" }
+  ]
+}

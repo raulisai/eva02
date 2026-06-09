@@ -1,0 +1,5 @@
+{
+  "tests": [
+    { "name": "status summary is notification", "input": { "tool": "discord.send_task_summary" }, "expect": { "approval_level": 0 } }
+  ]
+}

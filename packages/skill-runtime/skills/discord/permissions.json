@@ -1,0 +1,7 @@
+{
+  "scopes": ["discord.bot", "discord.webhook"],
+  "tools": ["discord.send_message", "discord.send_task_summary"],
+  "network": ["discord.com"],
+  "secrets": ["DISCORD_BOT_TOKEN", "DISCORD_WEBHOOK_SECRET"],
+  "filesystem": []
+}

@@ -1,0 +1,5 @@
+{
+  "tests": [
+    { "name": "read-only extraction", "input": { "tool": "browser_research.extract_text" }, "expect": { "approval_level": 0 } }
+  ]
+}

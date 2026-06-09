@@ -1,0 +1,9 @@
+{
+  "name": "telegram",
+  "display_name": "Telegram",
+  "version": "0.1.0",
+  "description": "Send Telegram status updates and approval notifications.",
+  "author": "eva",
+  "capabilities": ["telegram.send", "telegram.notify"],
+  "tags": ["communication"]
+}

@@ -1,0 +1,7 @@
+{
+  "scopes": ["dev.manager", "claude_code"],
+  "tools": ["claude_code.start_session", "claude_code.send_task", "claude_code.read_status"],
+  "network": [],
+  "secrets": [],
+  "filesystem": []
+}

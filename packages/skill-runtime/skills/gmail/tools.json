@@ -1,0 +1,25 @@
+{
+  "tools": [
+    {
+      "name": "gmail.search",
+      "capability": "email.read",
+      "description": "Search Gmail messages.",
+      "input_schema": { "query": "string" },
+      "approval_level": 0
+    },
+    {
+      "name": "gmail.draft",
+      "capability": "email.draft",
+      "description": "Create a draft email.",
+      "input_schema": { "to": "string", "subject": "string", "body": "string" },
+      "approval_level": 1
+    },
+    {
+      "name": "gmail.send",
+      "capability": "email.send",
+      "description": "Send an email.",
+      "input_schema": { "draft_id": "string" },
+      "approval_level": 2
+    }
+  ]
+}

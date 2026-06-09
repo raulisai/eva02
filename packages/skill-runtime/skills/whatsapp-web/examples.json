@@ -1,0 +1,5 @@
+{
+  "examples": [
+    { "name": "Prepare reply", "input": "Reply to Ana that I am on my way", "expected_tool": "whatsapp_web.prepare_message" }
+  ]
+}

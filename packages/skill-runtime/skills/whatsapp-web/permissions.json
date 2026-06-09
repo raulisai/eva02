@@ -1,0 +1,7 @@
+{
+  "scopes": ["browser.profile.whatsapp", "messaging.read", "messaging.send"],
+  "tools": ["whatsapp_web.search_chat", "whatsapp_web.prepare_message", "whatsapp_web.send_message"],
+  "network": ["web.whatsapp.com"],
+  "secrets": [],
+  "filesystem": []
+}

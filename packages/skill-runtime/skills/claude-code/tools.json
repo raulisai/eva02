@@ -1,0 +1,25 @@
+{
+  "tools": [
+    {
+      "name": "claude_code.start_session",
+      "capability": "claude_code.start_session",
+      "description": "Start a Claude Code session.",
+      "input_schema": { "project_id": "string", "dev_task_id": "string" },
+      "approval_level": 0
+    },
+    {
+      "name": "claude_code.send_task",
+      "capability": "claude_code.send_task",
+      "description": "Send a task to Claude Code.",
+      "input_schema": { "session_id": "string", "prompt": "string" },
+      "approval_level": 1
+    },
+    {
+      "name": "claude_code.read_status",
+      "capability": "dev.status",
+      "description": "Read Claude Code session status.",
+      "input_schema": { "session_id": "string" },
+      "approval_level": 0
+    }
+  ]
+}

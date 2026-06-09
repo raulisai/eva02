@@ -1,0 +1,18 @@
+{
+  "tools": [
+    {
+      "name": "discord.send_message",
+      "capability": "discord.send",
+      "description": "Send a Discord message.",
+      "input_schema": { "channel_id": "string", "text": "string" },
+      "approval_level": 1
+    },
+    {
+      "name": "discord.send_task_summary",
+      "capability": "discord.notify",
+      "description": "Send a task summary.",
+      "input_schema": { "task_id": "string" },
+      "approval_level": 0
+    }
+  ]
+}

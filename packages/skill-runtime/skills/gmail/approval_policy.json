@@ -1,0 +1,7 @@
+{
+  "default_level": 1,
+  "rules": [
+    { "match": "gmail\\.search", "level": 0, "reason": "read-only search" },
+    { "match": "gmail\\.send", "level": 2, "reason": "external communication" }
+  ]
+}

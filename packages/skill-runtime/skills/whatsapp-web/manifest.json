@@ -1,0 +1,9 @@
+{
+  "name": "whatsapp-web",
+  "display_name": "WhatsApp Web",
+  "version": "0.1.0",
+  "description": "Read and prepare WhatsApp Web messages through browser sessions.",
+  "author": "eva",
+  "capabilities": ["messaging.read", "messaging.prepare", "messaging.send"],
+  "tags": ["communication", "browser"]
+}

@@ -1,0 +1,5 @@
+{
+  "tests": [
+    { "name": "send needs approval", "input": { "tool": "whatsapp_web.send_message" }, "expect": { "approval_level": 2 } }
+  ]
+}

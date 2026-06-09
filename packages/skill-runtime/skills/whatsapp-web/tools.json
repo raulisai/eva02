@@ -1,0 +1,25 @@
+{
+  "tools": [
+    {
+      "name": "whatsapp_web.search_chat",
+      "capability": "messaging.read",
+      "description": "Search visible WhatsApp chats.",
+      "input_schema": { "query": "string" },
+      "approval_level": 0
+    },
+    {
+      "name": "whatsapp_web.prepare_message",
+      "capability": "messaging.prepare",
+      "description": "Prepare a WhatsApp message for approval.",
+      "input_schema": { "chat": "string", "body": "string" },
+      "approval_level": 1
+    },
+    {
+      "name": "whatsapp_web.send_message",
+      "capability": "messaging.send",
+      "description": "Send an approved WhatsApp message.",
+      "input_schema": { "chat": "string", "body": "string" },
+      "approval_level": 2
+    }
+  ]
+}

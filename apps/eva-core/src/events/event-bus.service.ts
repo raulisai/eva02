@@ -13,7 +13,12 @@ export type EvaEventType =
   | 'dev.task.updated'
   | 'dev.task.completed'
   | 'dev.task.failed'
-  | 'browser.screenshot.created';
+  | 'browser.screenshot.created'
+  | 'wear.fast_path.started'
+  | 'wear.fast_path.completed'
+  | 'wear.fast_path.fallback'
+  | 'wear.token.created'
+  | 'wear.token.expired';
 
 export interface EvaEvent<T = Record<string, unknown>> {
   id?: string;        // Stream entry ID, set on consume

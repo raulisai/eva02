@@ -1,0 +1,6 @@
+{
+  "default_level": 1,
+  "rules": [
+    { "match": "send_approval_request", "level": 0, "reason": "approval notification" }
+  ]
+}

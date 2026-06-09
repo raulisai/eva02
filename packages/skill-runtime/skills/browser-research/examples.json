@@ -1,0 +1,5 @@
+{
+  "examples": [
+    { "name": "Research page", "input": "Summarize this web page", "expected_tool": "browser_research.extract_text" }
+  ]
+}

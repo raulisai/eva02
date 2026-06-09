@@ -1,0 +1,5 @@
+{
+  "examples": [
+    { "name": "Implement phase", "input": "Ask Claude Code to implement the next EVA phase", "expected_tool": "claude_code.send_task" }
+  ]
+}

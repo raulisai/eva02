@@ -1,0 +1,6 @@
+{
+  "read": true,
+  "write": true,
+  "retention": "long_term",
+  "allowed_types": ["decision", "procedural", "working"]
+}

@@ -1,0 +1,7 @@
+{
+  "scopes": ["browser.readonly"],
+  "tools": ["browser_research.open", "browser_research.extract_text", "browser_research.extract_table"],
+  "network": ["https://*"],
+  "secrets": [],
+  "filesystem": []
+}

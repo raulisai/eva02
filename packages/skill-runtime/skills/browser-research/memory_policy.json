@@ -1,0 +1,6 @@
+{
+  "read": true,
+  "write": false,
+  "retention": "session",
+  "allowed_types": ["preference", "working"]
+}

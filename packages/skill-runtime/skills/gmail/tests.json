@@ -1,0 +1,5 @@
+{
+  "tests": [
+    { "name": "search requires read scope", "input": { "tool": "gmail.search" }, "expect": { "allowed": true } }
+  ]
+}

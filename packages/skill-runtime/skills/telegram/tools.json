@@ -1,0 +1,18 @@
+{
+  "tools": [
+    {
+      "name": "telegram.send_message",
+      "capability": "telegram.send",
+      "description": "Send a Telegram message.",
+      "input_schema": { "chat_id": "string", "text": "string" },
+      "approval_level": 1
+    },
+    {
+      "name": "telegram.send_approval_request",
+      "capability": "telegram.notify",
+      "description": "Send an approval request notification.",
+      "input_schema": { "approval_id": "string" },
+      "approval_level": 0
+    }
+  ]
+}

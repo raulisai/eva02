@@ -1,0 +1,25 @@
+{
+  "tools": [
+    {
+      "name": "browser_research.open",
+      "capability": "browser.open",
+      "description": "Open a URL for research.",
+      "input_schema": { "url": "string" },
+      "approval_level": 0
+    },
+    {
+      "name": "browser_research.extract_text",
+      "capability": "browser.extract_text",
+      "description": "Extract page text as data.",
+      "input_schema": { "selector": "string" },
+      "approval_level": 0
+    },
+    {
+      "name": "browser_research.extract_table",
+      "capability": "browser.extract_table",
+      "description": "Extract a table as data.",
+      "input_schema": { "selector": "string" },
+      "approval_level": 0
+    }
+  ]
+}

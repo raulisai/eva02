@@ -1,0 +1,9 @@
+{
+  "name": "claude-code",
+  "display_name": "Claude Code",
+  "version": "0.1.0",
+  "description": "Send development tasks to Claude Code through the Dev Manager.",
+  "author": "eva",
+  "capabilities": ["claude_code.start_session", "claude_code.send_task", "dev.status"],
+  "tags": ["development", "coding"]
+}

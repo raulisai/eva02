@@ -1,0 +1,9 @@
+{
+  "name": "browser-research",
+  "display_name": "Browser Research",
+  "version": "0.1.0",
+  "description": "Research web pages with Browser Agent read-only actions.",
+  "author": "eva",
+  "capabilities": ["browser.open", "browser.extract_text", "browser.extract_table", "browser.screenshot"],
+  "tags": ["browser", "research"]
+}

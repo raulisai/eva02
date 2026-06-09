@@ -1,0 +1,7 @@
+{
+  "default_level": 1,
+  "rules": [
+    { "match": "deploy|production|migration|delete|reset|secret", "level": 2, "reason": "sensitive development action" },
+    { "match": "drop\\s+table|rotate\\s+secret", "level": 3, "reason": "destructive infrastructure action" }
+  ]
+}

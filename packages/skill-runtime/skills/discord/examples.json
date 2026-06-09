@@ -1,0 +1,5 @@
+{
+  "examples": [
+    { "name": "Send task summary", "input": "Post the task result to Discord", "expected_tool": "discord.send_task_summary" }
+  ]
+}

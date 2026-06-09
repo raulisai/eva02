@@ -1,0 +1,7 @@
+{
+  "scopes": ["telegram.bot"],
+  "tools": ["telegram.send_message", "telegram.send_approval_request"],
+  "network": ["api.telegram.org"],
+  "secrets": ["TELEGRAM_BOT_TOKEN"],
+  "filesystem": []
+}

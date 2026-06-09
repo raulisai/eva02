@@ -1,0 +1,5 @@
+{
+  "tests": [
+    { "name": "destructive prompt requires approval", "input": { "tool": "claude_code.send_task", "prompt": "deploy production" }, "expect": { "approval_level": 2 } }
+  ]
+}

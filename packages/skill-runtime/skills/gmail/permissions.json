@@ -1,0 +1,7 @@
+{
+  "scopes": ["gmail.readonly", "gmail.compose", "gmail.send"],
+  "tools": ["gmail.search", "gmail.draft", "gmail.send"],
+  "network": ["gmail.googleapis.com"],
+  "secrets": ["GMAIL_OAUTH_TOKEN"],
+  "filesystem": []
+}

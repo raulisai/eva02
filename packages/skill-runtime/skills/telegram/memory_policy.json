@@ -1,0 +1,6 @@
+{
+  "read": false,
+  "write": false,
+  "retention": "none",
+  "allowed_types": []
+}

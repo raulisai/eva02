@@ -181,6 +181,51 @@ CREATE POLICY "browser_preparations_update" ON browser_action_preparations
   USING (org_id = ANY(public.user_org_ids()))
   WITH CHECK (org_id = ANY(public.user_org_ids()));
 
+-- ── Skill System ──────────────────────────────────────────
+ALTER TABLE skills ENABLE ROW LEVEL SECURITY;
+ALTER TABLE skill_versions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tools ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tool_calls ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "skills_select" ON skills
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "skills_insert" ON skills
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "skills_update" ON skills
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "skill_versions_select" ON skill_versions
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "skill_versions_insert" ON skill_versions
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "tools_select" ON tools
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "tools_insert" ON tools
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "tools_update" ON tools
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "tool_calls_select" ON tool_calls
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "tool_calls_insert" ON tool_calls
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "tool_calls_update" ON tool_calls
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
 -- ── projects ──────────────────────────────────────────────
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 
@@ -256,6 +301,51 @@ CREATE POLICY "roadmap_items_update" ON roadmap_items
   USING (org_id = ANY(public.user_org_ids()))
   WITH CHECK (org_id = ANY(public.user_org_ids()));
 
+-- ── Wear Fast Path ────────────────────────────────────────
+ALTER TABLE wear_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE wear_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE wear_fast_path_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE fast_path_policies ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "wear_sessions_select" ON wear_sessions
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "wear_sessions_insert" ON wear_sessions
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "wear_sessions_update" ON wear_sessions
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "wear_tokens_select" ON wear_tokens
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "wear_tokens_insert" ON wear_tokens
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "wear_tokens_update" ON wear_tokens
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "wear_fast_path_logs_select" ON wear_fast_path_logs
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "wear_fast_path_logs_insert" ON wear_fast_path_logs
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "fast_path_policies_select" ON fast_path_policies
+  FOR SELECT USING (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "fast_path_policies_insert" ON fast_path_policies
+  FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()));
+
+CREATE POLICY "fast_path_policies_update" ON fast_path_policies
+  FOR UPDATE
+  USING (org_id = ANY(public.user_org_ids()))
+  WITH CHECK (org_id = ANY(public.user_org_ids()));
+
 -- ── Grants: allow authenticated role to access tables via Data API ─────────
 GRANT USAGE ON SCHEMA public TO authenticated, anon;
 
@@ -263,11 +353,14 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   organizations, users, tasks, task_steps, task_events,
   approvals, memories, memory_embeddings, intent_routes,
   browser_profiles, browser_sessions, browser_action_preparations,
-  projects, dev_tasks, roadmap_items
+  skills, skill_versions, tools, tool_calls,
+  projects, dev_tasks, roadmap_items,
+  wear_sessions, wear_tokens, fast_path_policies
 TO authenticated;
 
 GRANT SELECT, INSERT ON
-  browser_screenshots, build_runs, test_runs, code_reviews
+  browser_screenshots, build_runs, test_runs, code_reviews,
+  wear_fast_path_logs
 TO authenticated;
 
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;

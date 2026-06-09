@@ -1,0 +1,6 @@
+{
+  "default_level": 1,
+  "rules": [
+    { "match": "send_task_summary", "level": 0, "reason": "internal status notification" }
+  ]
+}
