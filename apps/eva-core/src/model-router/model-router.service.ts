@@ -6,6 +6,7 @@ import {
   EmbedResult,
   RealtimeTokenResult,
   ModelBackend,
+  ModelBudget,
   MODEL_CATALOGUE,
   EMBED_MODELS,
 } from './model-router.types';
@@ -13,6 +14,7 @@ import {
 interface ResolvedKeys {
   openai?: string;
   claude?: string;
+  google?: string;
 }
 
 @Injectable()
@@ -23,7 +25,9 @@ export class ModelRouterService {
 
   private get openaiKey()     { return process.env.OPENAI_API_KEY; }
   private get anthropicKey()  { return process.env.ANTHROPIC_API_KEY; }
+  private get googleKey()     { return process.env.GOOGLE_API_KEY; }
   private get preferredBackend(): ModelBackend {
+    if (this.googleKey)    return 'google';
     if (this.openaiKey)    return 'openai';
     if (this.anthropicKey) return 'claude';
     return 'openai'; // fallback still selected, generate() will use stub
@@ -31,15 +35,17 @@ export class ModelRouterService {
 
   /** Org-stored keys (dashboard /settings/models) take precedence over env. */
   private async resolveKeys(orgId?: string): Promise<ResolvedKeys> {
-    const keys: ResolvedKeys = { openai: this.openaiKey, claude: this.anthropicKey };
+    const keys: ResolvedKeys = { openai: this.openaiKey, claude: this.anthropicKey, google: this.googleKey };
     if (!orgId || !this.integrations) return keys;
     try {
-      const [anthropic, openai] = await Promise.all([
+      const [anthropic, openai, google] = await Promise.all([
         this.integrations.getSecret(orgId, 'model', 'anthropic'),
         this.integrations.getSecret(orgId, 'model', 'openai'),
+        this.integrations.getSecret(orgId, 'model', 'google'),
       ]);
       if (anthropic) keys.claude = anthropic;
       if (openai) keys.openai = openai;
+      if (google) keys.google = google;
     } catch (error) {
       this.logger.warn(`Org key lookup failed, falling back to env keys: ${(error as Error).message}`);
     }
@@ -50,9 +56,12 @@ export class ModelRouterService {
 
   async generate(prompt: string, opts: GenerateOptions = {}): Promise<GenerateResult> {
     const keys = await this.resolveKeys(opts.orgId);
-    const backend = this.resolveBackend(opts.backend, keys);
-    const budget  = opts.budget ?? 'balanced';
+    const budget  = opts.budget ?? this.inferBudget(prompt, opts);
+    const backend = this.resolveBackend(opts.backend, keys, budget);
 
+    if (backend === 'google' && keys.google) {
+      return this.generateGoogle(prompt, opts, budget, keys.google);
+    }
     if (backend === 'claude' && keys.claude) {
       return this.generateClaude(prompt, opts, budget, keys.claude);
     }
@@ -221,6 +230,61 @@ export class ModelRouterService {
     };
   }
 
+  // ── private: Google Gemini generate ───────────────────────────────────────
+
+  private async generateGoogle(
+    prompt: string,
+    opts: GenerateOptions,
+    budget: string,
+    apiKey?: string,
+  ): Promise<GenerateResult> {
+    const key = apiKey ?? this.googleKey;
+    const model = opts.model ?? MODEL_CATALOGUE[budget as keyof typeof MODEL_CATALOGUE]?.google ?? 'gemini-2.5-flash-lite';
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+    const parts = opts.systemPrompt
+      ? [{ text: `${opts.systemPrompt}\n\n${prompt}` }]
+      : [{ text: prompt }];
+    const body: Record<string, unknown> = {
+      contents: [{ role: 'user', parts }],
+      generationConfig: {
+        temperature: opts.temperature ?? 0.7,
+        maxOutputTokens: opts.maxTokens ?? 1024,
+        responseMimeType: opts.responseFormat === 'json' ? 'application/json' : 'text/plain',
+      },
+    };
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Google generate failed ${res.status}: ${err}`);
+    }
+
+    const data = (await res.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number };
+      modelVersion?: string;
+    };
+    const text = data.candidates?.[0]?.content?.parts?.map(part => part.text ?? '').join('') ?? '';
+    const promptTokens = data.usageMetadata?.promptTokenCount ?? 0;
+    const completionTokens = data.usageMetadata?.candidatesTokenCount ?? 0;
+
+    return {
+      text,
+      model: data.modelVersion ?? model,
+      backend: 'google',
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens: data.usageMetadata?.totalTokenCount ?? promptTokens + completionTokens,
+      },
+    };
+  }
+
   // ── private: OpenAI embed ─────────────────────────────────────────────────
 
   private async embedOpenAI(text: string): Promise<EmbedResult> {
@@ -257,11 +321,33 @@ export class ModelRouterService {
     };
   }
 
-  private resolveBackend(requested?: ModelBackend, keys?: ResolvedKeys): ModelBackend {
+  private resolveBackend(requested?: ModelBackend, keys?: ResolvedKeys, budget: ModelBudget = 'cheap'): ModelBackend {
     if (requested && requested !== 'auto') return requested;
+    if (budget === 'cheap' || budget === 'balanced') {
+      if (keys?.google) return 'google';
+      if (keys?.openai) return 'openai';
+      if (keys?.claude) return 'claude';
+    }
+    if (budget === 'powerful') {
+      if (keys?.claude) return 'claude';
+      if (keys?.openai) return 'openai';
+      if (keys?.google) return 'google';
+    }
     if (keys?.claude && !keys?.openai) return 'claude';
     if (keys?.openai) return 'openai';
     return this.preferredBackend;
+  }
+
+  private inferBudget(prompt: string, opts: GenerateOptions): ModelBudget {
+    if (opts.responseFormat === 'json' || (opts.maxTokens ?? 0) <= 400) return 'cheap';
+    const text = `${opts.systemPrompt ?? ''}\n${prompt}`.toLowerCase();
+    if (
+      text.length > 4000 ||
+      /\b(refactor|arquitectura|architecture|debug|production|security|migraci[oó]n|multi-step|varios pasos|plan completo)\b/.test(text)
+    ) {
+      return 'balanced';
+    }
+    return 'cheap';
   }
 
   // Deterministic L2-normalised 1536-dim vector for dev/test

@@ -6,6 +6,7 @@ import { TasksService } from '../../tasks/tasks.service';
 import { ToolRouterService } from '../../tool-router/tool-router.service';
 import { AgentRunnerService } from '../agent-runner.service';
 import { MediaService } from '../media.service';
+import { MissingInformationError, ResearchToolsService } from '../research-tools.service';
 import { ScriptForgeService } from '../script-forge.service';
 import { classifyTier } from '../tier';
 import { Task } from '../../tasks/task.types';
@@ -44,6 +45,12 @@ describe('classifyTier', () => {
     expect(classifyTier('¿cuánto cuesta el dólar?').tier).toBe('quick');
   });
 
+  it('routes current-information requests to quick instead of chat', () => {
+    expect(classifyTier('que esta pasando ahora con OpenAI').tier).toBe('quick');
+    expect(classifyTier('dame lo ultimo de bitcoin').tier).toBe('quick');
+    expect(classifyTier('cual es el clima de manana').tier).toBe('quick');
+  });
+
   it('routes automation/code orders to long (background)', () => {
     expect(classifyTier('crea un script que limpie mis descargas').tier).toBe('long');
     expect(classifyTier('automatiza un reporte cada día').tier).toBe('long');
@@ -62,6 +69,7 @@ describe('AgentRunnerService', () => {
   let intentRouter: jest.Mocked<IntentRouterService>;
   let modelRouter: jest.Mocked<ModelRouterService>;
   let media: jest.Mocked<MediaService>;
+  let research: jest.Mocked<ResearchToolsService>;
   let forge: jest.Mocked<ScriptForgeService>;
 
   beforeEach(async () => {
@@ -119,6 +127,17 @@ describe('AgentRunnerService', () => {
           },
         },
         {
+          provide: ResearchToolsService,
+          useValue: {
+            canAnswer: jest.fn().mockReturnValue(true),
+            answer: jest.fn().mockResolvedValue({
+              text: 'Consulte Chromium: manana 18-24 °C con lluvia ligera.',
+              tool: 'chromium:wttr.in',
+              sources: ['https://wttr.in/Ciudad%20de%20Mexico?lang=es'],
+            }),
+          },
+        },
+        {
           provide: ScriptForgeService,
           useValue: {
             isScriptTask: jest.fn().mockReturnValue(false),
@@ -141,6 +160,7 @@ describe('AgentRunnerService', () => {
     intentRouter = module.get(IntentRouterService);
     modelRouter = module.get(ModelRouterService);
     media = module.get(MediaService);
+    research = module.get(ResearchToolsService);
     forge = module.get(ScriptForgeService);
   });
 
@@ -168,7 +188,19 @@ describe('AgentRunnerService', () => {
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
   });
 
-  it('runs quick lookups with the "espera" filler and transparent logs', async () => {
+  it('runs quick lookups with the search tool instead of answering from the model', async () => {
+    modelRouter.generate.mockResolvedValueOnce({
+      text: JSON.stringify({
+        query: 'pronostico clima hoy Ciudad de Mexico',
+        intent: 'weather',
+        source_hint: 'both',
+        reason: 'Necesita ubicacion y fecha explicitas para la consulta.',
+      }),
+      model: 'gpt-4o-mini',
+      backend: 'openai',
+      usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70 },
+    });
+
     await service.run(ORG, TASK); // "Busca el clima de hoy en CDMX"
 
     const published = events.publish.mock.calls.map(([event]) => event);
@@ -179,13 +211,15 @@ describe('AgentRunnerService', () => {
     expect(logs.some((message) => message.includes('tier=quick'))).toBe(true);
     expect(logs.some((message) => message.includes('intent=fast_path'))).toBe(true);
     expect(logs.some((message) => message.includes('tool-router'))).toBe(true);
-    expect(logs.some((message) => message.includes('buscando en internet'))).toBe(true);
-    expect(logs.some((message) => message.includes('model claude-haiku'))).toBe(true);
+    expect(logs.some((message) => message.includes('research-plan: query="pronostico clima hoy Ciudad de Mexico"'))).toBe(true);
+    expect(logs.some((message) => message.includes('buscando en internet con Chromium'))).toBe(true);
+    expect(logs.some((message) => message.includes('tool chromium:wttr.in'))).toBe(true);
 
+    expect(research.answer).toHaveBeenCalledWith('pronostico clima hoy Ciudad de Mexico', ORG);
     expect(publishedTypes()).toContain('task.result');
-    expect(modelRouter.generate).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
-      orgId: ORG,
+    expect(modelRouter.generate).toHaveBeenCalledWith('Busca el clima de hoy en CDMX', expect.objectContaining({
       budget: 'cheap',
+      responseFormat: 'json',
     }));
   });
 
@@ -246,7 +280,7 @@ describe('AgentRunnerService', () => {
   it('marks the task failed and logs the error when the model call blows up', async () => {
     modelRouter.generate.mockRejectedValue(new Error('provider down'));
     tasks.getTask
-      .mockResolvedValueOnce(makeTask())                       // run() initial read
+      .mockResolvedValueOnce(makeTask({ description: 'resume este texto' })) // run() initial read
       .mockResolvedValueOnce(makeTask({ status: 'running' }))  // failSafely current
       .mockResolvedValueOnce(makeTask({ status: 'running' })); // failSafely refreshed
 
@@ -254,6 +288,115 @@ describe('AgentRunnerService', () => {
 
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'failed', { error: 'provider down' });
     expect(publishedLogs().some((message) => message.includes('ERROR: provider down'))).toBe(true);
+  });
+
+  it('rejects useless model answers and recovers with available tools', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'analiza el estado actual de OpenAI',
+    }));
+    modelRouter.generate
+      .mockResolvedValueOnce({
+      text: 'Como modelo no tengo acceso a informacion en tiempo real. Consulta un sitio externo.',
+      model: 'gpt-4o-mini',
+      backend: 'openai',
+      usage: { promptTokens: 20, completionTokens: 20, totalTokens: 40 },
+      })
+      .mockResolvedValueOnce({
+        text: JSON.stringify({
+          query: 'OpenAI latest news current status',
+          intent: 'news',
+          source_hint: 'chromium',
+          reason: 'La solicitud pide estado actual y requiere fuentes recientes.',
+        }),
+        model: 'gpt-4o-mini',
+        backend: 'openai',
+        usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70 },
+      });
+
+    await service.run(ORG, TASK);
+
+    expect(research.answer).toHaveBeenCalledWith('OpenAI latest news current status', ORG);
+    expect(publishedLogs().some((message) => message.includes('model answer rejected as non-actionable'))).toBe(true);
+    expect(publishedLogs().some((message) => message.includes('research-plan: query="OpenAI latest news current status"'))).toBe(true);
+    expect(publishedLogs().some((message) => message.includes('recovery tool chromium:wttr.in'))).toBe(true);
+    const resultEvent = events.publish.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'task.result');
+    expect((resultEvent!.payload as { text: string }).text).toContain('Consulte Chromium');
+  });
+
+  it('does not publish the useless model answer when all recovery tools fail', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'analiza el estado actual de OpenAI',
+    }));
+    modelRouter.generate
+      .mockResolvedValueOnce({
+      text: 'Como modelo no tengo acceso a informacion en tiempo real. Consulta un sitio externo.',
+      model: 'gpt-4o-mini',
+      backend: 'openai',
+      usage: { promptTokens: 20, completionTokens: 20, totalTokens: 40 },
+      })
+      .mockResolvedValueOnce({
+        text: JSON.stringify({
+          query: 'OpenAI current status latest updates',
+          intent: 'news',
+          source_hint: 'chromium',
+          reason: 'Necesita buscar informacion actual.',
+        }),
+        model: 'gpt-4o-mini',
+        backend: 'openai',
+        usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70 },
+      });
+    research.answer.mockRejectedValue(new Error('browser unavailable'));
+
+    await service.run(ORG, TASK);
+
+    const resultEvent = events.publish.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'task.result');
+    const text = (resultEvent!.payload as { text: string }).text;
+    expect(text).toContain('No voy a cerrar esta tarea con una respuesta genérica');
+    expect(text).toContain('browser unavailable');
+    expect(text).not.toContain('Como modelo no tengo acceso');
+  });
+
+  it('requests a renderable form when a tool needs missing personal context', async () => {
+    modelRouter.generate.mockResolvedValueOnce({
+      text: JSON.stringify({
+        query: 'clima de ayer en la ubicacion actual',
+        intent: 'weather',
+        source_hint: 'public_api',
+        reason: 'Necesita ubicacion actual del usuario.',
+      }),
+      model: 'gpt-4o-mini',
+      backend: 'openai',
+      usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70 },
+    });
+    research.answer.mockRejectedValue(new MissingInformationError(
+      'Necesito tu ubicacion actual para consultar el clima.',
+      {
+        form_key: 'personal_profile.location',
+        title: 'Falta tu ubicacion',
+        description: 'Guarda tu ubicacion actual.',
+        fields: [{ id: 'current_location', type: 'text', label: 'Ubicacion actual', required: true }],
+      },
+    ));
+
+    await service.run(ORG, TASK);
+
+    const formEvent = events.publish.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'task.form_request');
+    expect(formEvent).toEqual(expect.objectContaining({
+      orgId: ORG,
+      taskId: TASK,
+      payload: expect.objectContaining({
+        message: 'Necesito tu ubicacion actual para consultar el clima.',
+        form: expect.objectContaining({ form_key: 'personal_profile.location' }),
+      }),
+    }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval');
+    expect(publishedTypes()).not.toContain('task.failed');
   });
 
   it('ignores tasks that are no longer pending', async () => {

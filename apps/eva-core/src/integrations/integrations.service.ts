@@ -15,7 +15,7 @@ import { WEAR_COMMANDS, WEAR_DEFAULT_ENABLED } from './wear-catalog';
 
 const KNOWN_MODEL_PROVIDERS = ['anthropic', 'openai', 'google', 'groq', 'openrouter'];
 const KNOWN_CHANNEL_PROVIDERS = ['wear', 'telegram', 'discord', 'slack', 'whatsapp', 'email', 'sms'];
-const KNOWN_CREDENTIAL_PROVIDERS = ['google', 'uber', 'github', 'amazon', 'custom'];
+const KNOWN_CREDENTIAL_PROVIDERS = ['google', 'uber', 'github', 'amazon', 'brave_search', 'tavily', 'serpapi', 'custom'];
 
 @Injectable()
 export class IntegrationsService {

@@ -60,6 +60,7 @@ export function WsProvider({ token, children }: { token: string; children: React
       { name: 'task.log' },
       { name: 'task.result' },
       { name: 'task.media' },
+      { name: 'task.form_request' },
       { name: 'approval.requested' },
     ];
 

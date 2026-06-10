@@ -6,6 +6,7 @@ import { ToolRouterService } from '../tool-router/tool-router.service';
 import { TasksService } from '../tasks/tasks.service';
 import { Task } from '../tasks/task.types';
 import { MediaService } from './media.service';
+import { MissingInformationError, ResearchToolsService } from './research-tools.service';
 import { ScriptForgeService } from './script-forge.service';
 import { classifyTier } from './tier';
 
@@ -50,6 +51,28 @@ exactamente qué harías paso a paso.`;
 const CHAT_PROMPT = `Eres EVA, asistente personal. Conversación casual: responde en español,
 cálida y breve (1-3 frases). Sin listas ni formalidades.`;
 
+const RESEARCH_PLANNER_PROMPT = `Eres el planificador de busqueda de EVA.
+Convierte la peticion del usuario en la busqueda mas eficiente para internet o APIs publicas.
+Debes distinguir contexto, tema, ubicacion, fecha/ventana temporal, entidad principal e idioma.
+No respondas la pregunta final. Solo decide como buscar.
+
+Responde JSON estricto:
+{
+  "query": "consulta optimizada, concreta y sin relleno",
+  "intent": "weather|news|price|lookup|research|api",
+  "source_hint": "chromium|public_api|both",
+  "reason": "una frase breve"
+}`;
+
+const USELESS_ANSWER_PATTERNS = [
+  /\bno (tengo|cuento con) acceso\b/i,
+  /\bno puedo (acceder|consultar|buscar|navegar|verificar)\b/i,
+  /\bcomo (modelo|ia|inteligencia artificial)\b/i,
+  /\bconsulta (una app|un sitio|una aplicaci[oó]n|fuentes externas)\b/i,
+  /\binformaci[oó]n en tiempo real\b/i,
+  /\bno dispongo de informaci[oó]n actualizada\b/i,
+];
+
 @Injectable()
 export class AgentRunnerService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AgentRunnerService.name);
@@ -61,6 +84,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly modelRouter: ModelRouterService,
     private readonly toolRouter: ToolRouterService,
     private readonly media: MediaService,
+    private readonly research: ResearchToolsService,
     private readonly forge: ScriptForgeService,
   ) {}
 
@@ -167,7 +191,16 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       }
 
       if (ack.hint === 'search') {
-        await this.log(orgId, taskId, 'buscando en internet… (web-search tool)', 'web');
+        await this.log(orgId, taskId, 'buscando en internet con Chromium… (web-search tool)', 'web');
+        const researchInput = await this.planResearchInput(orgId, taskId, input);
+        const t0 = Date.now();
+        const answer = await this.research.answer(researchInput, orgId);
+        const elapsed = Date.now() - t0;
+        await this.log(orgId, taskId, `tool ${answer.tool} answered in ${elapsed}ms`, 'tools');
+        await this.deliver(orgId, taskId, answer.text, answer.tool, elapsed);
+        await this.maybeAttachMedia(orgId, taskId, input, answer.text);
+        await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+        return;
       }
 
       // Model call — quick rides the cheap tier for speed
@@ -187,10 +220,20 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         'model',
       );
 
+      if (this.isUselessAnswer(result.text)) {
+        await this.log(orgId, taskId, 'model answer rejected as non-actionable; trying project tools', 'model');
+        const recovered = await this.recoverWithTools(orgId, taskId, input, startedAt);
+        if (recovered) return;
+      }
+
       await this.deliver(orgId, taskId, result.text, result.model, elapsed);
       await this.maybeAttachMedia(orgId, taskId, input, result.text);
       await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
     } catch (error) {
+      if (error instanceof MissingInformationError) {
+        await this.requestMissingInformation(orgId, taskId, error);
+        return;
+      }
       const message = (error as Error).message;
       this.logger.error(`Agent run failed for task ${taskId}: ${message}`);
       await this.log(orgId, taskId, `ERROR: ${message}`, 'pipeline');
@@ -225,8 +268,117 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     }
   }
 
+  private isUselessAnswer(text: string): boolean {
+    return USELESS_ANSWER_PATTERNS.some((pattern) => pattern.test(text));
+  }
+
+  private async recoverWithTools(orgId: string, taskId: string, input: string, startedAt: number): Promise<boolean> {
+    const errors: string[] = [];
+
+    if (this.forge.isScriptTask(input)) {
+      try {
+        await this.log(orgId, taskId, 'recovery: intentando script-forge en sandbox', 'tools');
+        const outcome = await this.forge.forge(orgId, taskId, input, (message, scope) => this.log(orgId, taskId, message, scope));
+        const summary = [
+          `Generé el script **${outcome.filename}** (${outcome.language}): ${outcome.description}`,
+          outcome.skillSlug ? `Quedó registrado como skill \`${outcome.skillSlug}\` y como artifact.` : 'Quedó guardado como artifact.',
+          outcome.executed
+            ? `Lo ejecuté en un sandbox Docker (sin red) y esta fue la salida:\n\n${outcome.output || '(sin salida)'}`
+            : outcome.note ?? '',
+        ].filter(Boolean).join('\n\n');
+        await this.deliver(orgId, taskId, summary, 'script-forge', Date.now() - startedAt);
+        return true;
+      } catch (error) {
+        errors.push(`script-forge: ${(error as Error).message}`);
+      }
+    }
+
+    if (this.research.canAnswer(input)) {
+      try {
+        await this.log(orgId, taskId, 'recovery: buscando con Chromium / APIs publicas', 'tools');
+        const researchInput = await this.planResearchInput(orgId, taskId, input);
+        const t0 = Date.now();
+        const answer = await this.research.answer(researchInput, orgId);
+        const elapsed = Date.now() - t0;
+        await this.log(orgId, taskId, `recovery tool ${answer.tool} answered in ${elapsed}ms`, 'tools');
+        await this.deliver(orgId, taskId, answer.text, answer.tool, elapsed);
+        await this.maybeAttachMedia(orgId, taskId, input, answer.text);
+        await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+        return true;
+      } catch (error) {
+        if (error instanceof MissingInformationError) {
+          await this.requestMissingInformation(orgId, taskId, error);
+          return true;
+        }
+        errors.push(`research: ${(error as Error).message}`);
+      }
+    }
+
+    await this.log(
+      orgId,
+      taskId,
+      `all recovery tools failed: ${errors.join(' | ') || 'no tool accepted the request'}`,
+      'tools',
+    );
+    const text = [
+      'No voy a cerrar esta tarea con una respuesta genérica del modelo.',
+      'Intenté resolverla con las herramientas disponibles del proyecto, pero todas fallaron.',
+      errors.length > 0 ? `Errores: ${errors.join(' | ')}` : 'No hubo una herramienta aplicable.',
+      'Siguiente acción: agrega una integración/API en Credentials o define una ruta de herramienta específica para esta capacidad, y la tarea se puede reintentar.',
+    ].join('\n');
+    await this.deliver(orgId, taskId, text, 'tool-recovery', Date.now() - startedAt);
+    return true;
+  }
+
+  private async planResearchInput(orgId: string, taskId: string, input: string): Promise<string> {
+    try {
+      const result = await this.modelRouter.generate(input, {
+        orgId,
+        budget: 'cheap',
+        responseFormat: 'json',
+        temperature: 0,
+        maxTokens: 220,
+        systemPrompt: RESEARCH_PLANNER_PROMPT,
+      });
+      const parsed = JSON.parse(result.text) as {
+        query?: unknown;
+        intent?: unknown;
+        source_hint?: unknown;
+        reason?: unknown;
+      };
+      const query = typeof parsed.query === 'string' && parsed.query.trim().length > 0
+        ? parsed.query.trim()
+        : input;
+      await this.log(
+        orgId,
+        taskId,
+        `research-plan: query="${query}" intent=${String(parsed.intent ?? 'unknown')} source=${String(parsed.source_hint ?? 'unknown')} — ${String(parsed.reason ?? 'no reason')}`,
+        'tools',
+      );
+      return query;
+    } catch (error) {
+      await this.log(orgId, taskId, `research-plan failed; using original input — ${(error as Error).message}`, 'tools');
+      return input;
+    }
+  }
+
   private say(orgId: string, taskId: string, text: string) {
     return this.events.publish({ type: 'task.say', orgId, taskId, payload: { text } });
+  }
+
+  private async requestMissingInformation(orgId: string, taskId: string, error: MissingInformationError) {
+    await this.log(orgId, taskId, `missing information: ${error.message}`, 'forms');
+    await this.events.publish({
+      type: 'task.form_request',
+      orgId,
+      taskId,
+      payload: {
+        message: error.message,
+        form: error.form,
+      },
+    });
+    await this.say(orgId, taskId, error.message);
+    await this.tasks.transition(taskId, orgId, 'waiting_for_approval');
   }
 
   private log(orgId: string, taskId: string, message: string, scope: string) {

@@ -1,4 +1,4 @@
-export type ModelBackend = 'openai' | 'claude' | 'auto';
+export type ModelBackend = 'openai' | 'claude' | 'google' | 'auto';
 
 export type ModelBudget = 'cheap' | 'balanced' | 'powerful';
 
@@ -38,10 +38,10 @@ export interface RealtimeTokenResult {
 }
 
 // Model catalogue — updated here when adding new models
-export const MODEL_CATALOGUE: Record<ModelBudget, { openai: string; claude: string }> = {
-  cheap:     { openai: 'gpt-4o-mini',          claude: 'claude-haiku-4-5-20251001' },
-  balanced:  { openai: 'gpt-4o',               claude: 'claude-sonnet-4-6' },
-  powerful:  { openai: 'o3',                   claude: 'claude-opus-4-8' },
+export const MODEL_CATALOGUE: Record<ModelBudget, { google: string; openai: string; claude: string }> = {
+  cheap:     { google: 'gemini-2.5-flash-lite', openai: 'gpt-4.1-nano', claude: 'claude-haiku-4-5-20251001' },
+  balanced:  { google: 'gemini-2.5-flash',      openai: 'gpt-4.1-mini', claude: 'claude-sonnet-4-6' },
+  powerful:  { google: 'gemini-2.5-pro',        openai: 'gpt-4.1',      claude: 'claude-opus-4-8' },
 };
 
 export const EMBED_MODELS = {

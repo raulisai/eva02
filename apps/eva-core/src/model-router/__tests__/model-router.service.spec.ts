@@ -16,6 +16,7 @@ describe('ModelRouterService', () => {
     jest.clearAllMocks();
     delete process.env.OPENAI_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
   });
 
   // ── embed() ───────────────────────────────────────────────────────────────
@@ -126,6 +127,7 @@ describe('ModelRouterService', () => {
       await service.generate('prompt', { responseFormat: 'json' });
       const body = JSON.parse((fetch as jest.Mock).mock.calls[0][1].body);
       expect(body.response_format).toEqual({ type: 'json_object' });
+      expect(body.model).toBe('gpt-4.1-nano');
     });
 
     it('throws on non-ok response', async () => {
@@ -133,6 +135,37 @@ describe('ModelRouterService', () => {
         ok: false, status: 429, text: async () => 'rate limit',
       });
       await expect(service.generate('hi')).rejects.toThrow(/429/);
+    });
+  });
+
+  // ── generate() — Google backend ───────────────────────────────────────────
+
+  describe('generate() — Google backend', () => {
+    beforeEach(async () => {
+      process.env.GOOGLE_API_KEY = 'google-test';
+      service = await build();
+    });
+
+    it('uses Gemini Flash-Lite as the cheapest useful default', async () => {
+      (fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: 'Gemini response' }] } }],
+          usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 7, totalTokenCount: 12 },
+          modelVersion: 'gemini-2.5-flash-lite',
+        }),
+      });
+
+      const result = await service.generate('clasifica esto', { responseFormat: 'json' });
+
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/models/gemini-2.5-flash-lite:generateContent?key=google-test'),
+        expect.objectContaining({ method: 'POST' }),
+      );
+      const body = JSON.parse((fetch as jest.Mock).mock.calls[0][1].body);
+      expect(body.generationConfig.responseMimeType).toBe('application/json');
+      expect(result.backend).toBe('google');
+      expect(result.model).toBe('gemini-2.5-flash-lite');
     });
   });
 
@@ -194,9 +227,9 @@ describe('ModelRouterService', () => {
     });
 
     const cases: Array<['cheap' | 'balanced' | 'powerful', string]> = [
-      ['cheap',    'gpt-4o-mini'],
-      ['balanced', 'gpt-4o'],
-      ['powerful', 'o3'],
+      ['cheap',    'gpt-4.1-nano'],
+      ['balanced', 'gpt-4.1-mini'],
+      ['powerful', 'gpt-4.1'],
     ];
 
     test.each(cases)('budget=%s → model contains "%s"', async (budget, expectedModel) => {
@@ -212,6 +245,46 @@ describe('ModelRouterService', () => {
       await service.generate('test', { budget });
       const body = JSON.parse((fetch as jest.Mock).mock.calls[0][1].body);
       expect(body.model).toBe(expectedModel);
+    });
+  });
+
+  describe('cost-first provider selection', () => {
+    it('prefers Google over OpenAI for cheap/balanced when both are configured', async () => {
+      process.env.GOOGLE_API_KEY = 'google-test';
+      process.env.OPENAI_API_KEY = 'sk-openai-test';
+      service = await build();
+      (fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+          usageMetadata: { totalTokenCount: 1 },
+        }),
+      });
+
+      await service.generate('short task', { budget: 'cheap' });
+
+      expect((fetch as jest.Mock).mock.calls[0][0]).toContain('gemini-2.5-flash-lite');
+    });
+
+    it('uses Claude first only for powerful budget when configured', async () => {
+      process.env.GOOGLE_API_KEY = 'google-test';
+      process.env.OPENAI_API_KEY = 'sk-openai-test';
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+      service = await build();
+      (fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          content: [{ type: 'text', text: 'ok' }],
+          model: 'claude-opus-4-8',
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+      });
+
+      await service.generate('hard task', { budget: 'powerful' });
+
+      expect((fetch as jest.Mock).mock.calls[0][0]).toBe('https://api.anthropic.com/v1/messages');
+      const body = JSON.parse((fetch as jest.Mock).mock.calls[0][1].body);
+      expect(body.model).toBe('claude-opus-4-8');
     });
   });
 

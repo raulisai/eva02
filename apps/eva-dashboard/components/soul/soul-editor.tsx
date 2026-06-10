@@ -20,9 +20,29 @@ interface SoulEditorProps {
   initialSoul: AgentSoul | null;
 }
 
+const PROFILE_FIELDS = [
+  { key: 'full_name', label: 'Nombre', placeholder: 'Tu nombre completo' },
+  { key: 'age', label: 'Edad', placeholder: 'Ej. 34' },
+  { key: 'current_location', label: 'Ubicacion actual', placeholder: 'Ej. Ciudad de Mexico, Roma Norte' },
+  { key: 'address', label: 'Direccion', placeholder: 'Direccion habitual' },
+  { key: 'workplace', label: 'Lugar de trabajo', placeholder: 'Empresa, zona o direccion laboral' },
+  { key: 'likes', label: 'Gustos', placeholder: 'Comida, hobbies, preferencias' },
+  { key: 'dislikes', label: 'No me gusta', placeholder: 'Cosas a evitar' },
+  { key: 'allergies', label: 'Alergias', placeholder: 'Alergias o restricciones medicas' },
+  { key: 'weight', label: 'Peso', placeholder: 'Ej. 78 kg' },
+  { key: 'height', label: 'Altura', placeholder: 'Ej. 1.78 m' },
+] as const;
+
+type ProfileKey = typeof PROFILE_FIELDS[number]['key'];
+type PersonalProfile = Record<ProfileKey, string>;
+
 export function SoulEditor({ orgId, initialSoul }: SoulEditorProps) {
+  const initialProfile = (initialSoul?.model_prefs?.['personal_profile'] ?? {}) as Partial<PersonalProfile>;
   const [name, setName] = useState(initialSoul?.name ?? 'EVA');
   const [persona, setPersona] = useState(initialSoul?.persona ?? '');
+  const [profile, setProfile] = useState<PersonalProfile>(() => Object.fromEntries(
+    PROFILE_FIELDS.map(({ key }) => [key, initialProfile[key] ?? '']),
+  ) as PersonalProfile);
   const [directivesText, setDirectivesText] = useState(
     Array.isArray(initialSoul?.directives) ? (initialSoul!.directives as string[]).join('\n') : '',
   );
@@ -44,7 +64,10 @@ export function SoulEditor({ orgId, initialSoul }: SoulEditorProps) {
           persona,
           directives,
           autonomy_level: autonomy,
-          model_prefs: initialSoul?.model_prefs ?? {},
+          model_prefs: {
+            ...(initialSoul?.model_prefs ?? {}),
+            personal_profile: profile,
+          },
         }, { onConflict: 'org_id' });
       if (error) throw error;
       setFeedback({ ok: true, text: 'Soul updated' });
@@ -97,6 +120,28 @@ export function SoulEditor({ orgId, initialSoul }: SoulEditorProps) {
             placeholder={'Never spend money without approval\nAlways answer in Spanish'}
             className="w-full bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs font-mono text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60 resize-y"
           />
+        </section>
+
+        <section className="space-y-3">
+          <div>
+            <span className="block text-xs text-zinc-300">Personal profile</span>
+            <p className="text-[11px] text-zinc-600 mt-1">
+              Contexto personal para clima local, salud, comida, rutas, compras y preferencias.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {PROFILE_FIELDS.map(({ key, label, placeholder }) => (
+              <label key={key} className="space-y-1">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">{label}</span>
+                <input
+                  value={profile[key]}
+                  onChange={(event) => setProfile((prev) => ({ ...prev, [key]: event.target.value }))}
+                  placeholder={placeholder}
+                  className="w-full bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60"
+                />
+              </label>
+            ))}
+          </div>
         </section>
 
         <section className="space-y-3">

@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import {
   Fingerprint, Mail, Calendar, HardDrive, Contact, Car, Github, ShoppingCart,
-  Loader2, Trash2, PlugZap, ShieldCheck,
+  Loader2, Trash2, PlugZap, ShieldCheck, Search,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -39,6 +39,24 @@ const SIMPLE_PROVIDERS = [
     blurb: 'Account credential for purchase flows — every purchase requires L2 approval (action_hash + nonce).',
     capabilities: ['Buscar productos', 'Comprar (con aprobación)'],
     placeholder: 'API token',
+  },
+  {
+    provider: 'brave_search', label: 'Brave Search', icon: Search,
+    blurb: 'Optional web-search API key. EVA tries Chromium first; this is only a faster fallback for current web lookups.',
+    capabilities: ['Búsqueda web actual', 'Fallback sin navegación', 'Read-only'],
+    placeholder: 'BSA…',
+  },
+  {
+    provider: 'tavily', label: 'Tavily', icon: Search,
+    blurb: 'Optional research API key. Chromium remains the default path; this helps when search pages block automation.',
+    capabilities: ['Búsqueda web actual', 'Research snippets', 'Read-only'],
+    placeholder: 'tvly-…',
+  },
+  {
+    provider: 'serpapi', label: 'SerpAPI', icon: Search,
+    blurb: 'Optional Google results API key used only as fallback when Chromium search extraction fails.',
+    capabilities: ['Resultados Google', 'Fallback de búsqueda', 'Read-only'],
+    placeholder: 'SerpAPI key',
   },
 ];
 

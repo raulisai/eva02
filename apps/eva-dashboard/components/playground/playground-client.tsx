@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Inbox, BrainCircuit, Cog, ShieldCheck, Flag, Send, Loader2,
-  ChevronRight, AlertTriangle, Clock,
+  ChevronRight, AlertTriangle, Clock, ClipboardList,
 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { coreFetch } from '@/lib/core-api';
@@ -130,7 +130,7 @@ export function PlaygroundClient() {
   const terminalVariant = selectedStatus === 'completed' ? 'completed' : selectedStatus === 'failed' ? 'failed' : 'cancelled';
 
   const actionLog = selectedEvents.filter((event) =>
-    ['task.log', 'task.created', 'task.started', 'task.completed', 'task.failed', 'task.waiting_approval'].includes(event.type));
+    ['task.log', 'task.created', 'task.started', 'task.completed', 'task.failed', 'task.waiting_approval', 'task.form_request'].includes(event.type));
 
   return (
     <div className="flex flex-col h-full">
@@ -310,6 +310,7 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
     : (entry.task.result as Record<string, unknown> | null)?.['text'] as string | undefined;
   const resultMeta = resultEvent?.payload as { model?: string; latency_ms?: number } | undefined;
   const mediaEvents = events.filter((event) => event.type === 'task.media');
+  const formEvents = events.filter((event) => event.type === 'task.form_request');
   const working = !TERMINAL.includes(status) && !resultText;
   const failed = status === 'failed';
 
@@ -369,6 +370,53 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
                 <audio controls src={payload.url} className="h-8 w-64" />
               )}
               <p className="text-[9px] font-mono text-zinc-600 break-all">{payload.url}</p>
+            </div>
+          </div>
+        );
+      })}
+
+      {formEvents.map((event, index) => {
+        const payload = event.payload as {
+          message?: string;
+          form?: {
+            title?: string;
+            description?: string;
+            fields?: Array<{ id: string; type?: string; label?: string; placeholder?: string; required?: boolean }>;
+          };
+        };
+        const form = payload.form;
+        return (
+          <div key={`form-${index}`} className="flex justify-start animate-slide-up">
+            <div className="max-w-[85%] border border-amber-500/30 bg-amber-500/5 rounded-sm p-3 space-y-3">
+              <div className="flex items-center gap-2 text-amber-200">
+                <ClipboardList className="w-3.5 h-3.5" />
+                <span className="text-xs font-medium">{form?.title ?? 'Falta informacion'}</span>
+              </div>
+              {(payload.message || form?.description) && (
+                <p className="text-xs text-zinc-300 leading-relaxed">{payload.message ?? form?.description}</p>
+              )}
+              <div className="space-y-2">
+                {(form?.fields ?? []).map((field) => (
+                  <label key={field.id} className="block space-y-1">
+                    <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                      {field.label ?? field.id}{field.required ? ' *' : ''}
+                    </span>
+                    {field.type === 'textarea' ? (
+                      <textarea
+                        placeholder={field.placeholder}
+                        rows={2}
+                        className="w-full bg-zinc-950 border border-zinc-700 rounded-sm px-2.5 py-2 text-xs text-zinc-100 placeholder:text-zinc-600"
+                      />
+                    ) : (
+                      <input
+                        type={field.type === 'number' ? 'number' : 'text'}
+                        placeholder={field.placeholder}
+                        className="w-full bg-zinc-950 border border-zinc-700 rounded-sm px-2.5 py-2 text-xs text-zinc-100 placeholder:text-zinc-600"
+                      />
+                    )}
+                  </label>
+                ))}
+              </div>
             </div>
           </div>
         );

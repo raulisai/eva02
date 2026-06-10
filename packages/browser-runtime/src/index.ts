@@ -14,6 +14,7 @@ export interface BrowserRuntimeSession {
 export interface BrowserRuntimeOptions {
   profilesRoot?: string;
   headless?: boolean;
+  channel?: string;
 }
 
 export interface ExtractedTable {
@@ -58,10 +59,12 @@ export class PlaywrightBrowserRuntime {
   private readonly sessions = new Map<string, BrowserRuntimeSession>();
   private readonly profilesRoot: string;
   private readonly headless: boolean;
+  private readonly channel?: string;
 
   constructor(options: BrowserRuntimeOptions = {}) {
     this.profilesRoot = options.profilesRoot ?? join(tmpdir(), 'eva-browser-profiles');
     this.headless = options.headless ?? true;
+    this.channel = options.channel ?? process.env.BROWSER_CHANNEL;
   }
 
   async open(input: { sessionId: string; profileId: string; url: string }): Promise<{ url: string; title: string }> {
@@ -128,13 +131,32 @@ export class PlaywrightBrowserRuntime {
 
     const userDataDir = join(this.profilesRoot, profileId);
     await mkdir(userDataDir, { recursive: true });
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: this.headless,
-    });
+    const context = await this.launchContext(userDataDir);
     const page = context.pages()[0] ?? await context.newPage();
     const session = { id: sessionId, profileId, context, page };
     this.sessions.set(sessionId, session);
     return session;
+  }
+
+  private async launchContext(userDataDir: string): Promise<BrowserContext> {
+    const attempts = this.channel
+      ? [{ headless: this.headless, channel: this.channel }]
+      : [
+          { headless: this.headless },
+          { headless: this.headless, channel: 'chrome' },
+          ...(process.platform === 'darwin' && this.headless
+            ? [{ headless: false, channel: 'chrome' }]
+            : []),
+        ];
+    let lastError: unknown;
+    for (const attempt of attempts) {
+      try {
+        return await chromium.launchPersistentContext(userDataDir, attempt);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('Browser failed to launch');
   }
 
   private requireSession(sessionId: string): BrowserRuntimeSession {
