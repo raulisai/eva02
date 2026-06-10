@@ -11,11 +11,17 @@ import { coreFetch } from '@/lib/core-api';
 import type { Integration } from '@/lib/types';
 
 const PROVIDERS = [
-  { provider: 'anthropic',  label: 'Anthropic',  placeholder: 'sk-ant-…', blurb: 'Claude models (planner, intent router, memory agent).' },
-  { provider: 'openai',     label: 'OpenAI',     placeholder: 'sk-…',     blurb: 'GPT models and embeddings.' },
-  { provider: 'google',     label: 'Google',     placeholder: 'AIza…',    blurb: 'Gemini models.' },
+  { provider: 'google',     label: 'Google',     placeholder: 'AIza…',    blurb: 'Cheapest-first default: Gemini 2.5 Flash-Lite for most planning, routing and simple answers.' },
+  { provider: 'openai',     label: 'OpenAI',     placeholder: 'sk-…',     blurb: 'GPT-4.1 Nano is the OpenAI cheap tier; embeddings still use OpenAI when configured.' },
+  { provider: 'anthropic',  label: 'Anthropic',  placeholder: 'sk-ant-…', blurb: 'Claude is reserved for high-complexity or explicitly powerful tasks.' },
   { provider: 'groq',       label: 'Groq',       placeholder: 'gsk_…',    blurb: 'Low-latency open models (fast path).' },
   { provider: 'openrouter', label: 'OpenRouter', placeholder: 'sk-or-…',  blurb: 'Fallback multi-provider routing.' },
+];
+
+const ROUTING_POLICY = [
+  'cheap: Gemini 2.5 Flash-Lite -> GPT-4.1 Nano -> Claude Haiku',
+  'balanced: Gemini 2.5 Flash -> GPT-4.1 Mini -> Claude Sonnet',
+  'powerful: Claude Opus -> GPT-4.1 -> Gemini 2.5 Pro',
 ];
 
 interface ModelsClientProps {
@@ -100,6 +106,14 @@ export function ModelsClient({ initialIntegrations }: ModelsClientProps) {
           Keys are encrypted with AES-256-GCM before touching the database and are never returned to the browser —
           only the last 4 characters are shown.
         </p>
+        <div className="border border-zinc-800 rounded-sm p-3 space-y-2">
+          <p className="text-xs text-zinc-300">Cost policy</p>
+          <div className="space-y-1">
+            {ROUTING_POLICY.map((line) => (
+              <p key={line} className="text-[11px] font-mono text-zinc-500">{line}</p>
+            ))}
+          </div>
+        </div>
 
         {PROVIDERS.map(({ provider, label, placeholder, blurb }) => {
           const current = integrations.find((integration) => integration.provider === provider);

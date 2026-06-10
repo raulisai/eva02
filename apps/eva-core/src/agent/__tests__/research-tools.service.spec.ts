@@ -70,4 +70,79 @@ describe('ResearchToolsService', () => {
       'Another useful result with enough context for a human',
     ]);
   });
+
+  it('filters DuckDuckGo anti-bot challenges out of browser search results', () => {
+    const raw = [
+      'DuckDuckGo',
+      'Unfortunately, bots use DuckDuckGo too.',
+      'Please complete the following challenge to confirm this search was made by a human.',
+      'Select all squares containing a duck:',
+    ].join('\n');
+
+    const lines = (service as unknown as {
+      formatBrowserSearchText(text: string, limit: number): string[];
+    }).formatBrowserSearchText(raw, 5);
+
+    expect(lines).toEqual([]);
+  });
+
+  it('falls back to a configured search API when DuckDuckGo blocks Chromium', async () => {
+    jest.spyOn(service as unknown as { extractWithBrowser(url: string): Promise<string> }, 'extractWithBrowser')
+      .mockResolvedValue([
+        'Unfortunately, bots use DuckDuckGo too.',
+        'Please complete the following challenge to confirm this search was made by a human.',
+        'Select all squares containing a duck:',
+      ].join('\n'));
+    jest.spyOn(service as unknown as { searchKey(orgId: string | undefined, provider: string, fallback?: string): Promise<string | undefined> }, 'searchKey')
+      .mockImplementation(async (_orgId, provider) => provider === 'brave_search' ? 'brave-key' : undefined);
+    jest.spyOn(service as unknown as { searchBrave(query: string, key: string): Promise<Array<{ title: string; url: string; snippet: string }>> }, 'searchBrave')
+      .mockResolvedValue([
+        {
+          title: 'Calendario oficial FIFA',
+          url: 'https://www.fifa.com/',
+          snippet: 'Mexico juega en el partido inaugural del Mundial 2026.',
+        },
+      ]);
+
+    const result = await (service as unknown as {
+      answerWebSearch(input: string, orgId?: string): Promise<{ text: string; tool: string; sources: string[] }>;
+    }).answerWebSearch('cuando juega mexico en el mundial', 'org-1');
+
+    expect(result.tool).toBe('web-search');
+    expect(result.text).toContain('Mundial 2026');
+    expect(result.text).toContain('Fuentes:');
+    expect(result.text).not.toContain('Select all squares');
+    expect(result.sources).toEqual(['https://www.fifa.com/']);
+  });
+
+  it('answers World Cup date questions directly instead of returning raw search snippets', async () => {
+    jest.spyOn(service as unknown as { extractWithBrowser(url: string): Promise<string> }, 'extractWithBrowser')
+      .mockRejectedValue(new Error('browser unavailable'));
+    jest.spyOn(service as unknown as { searchKey(orgId: string | undefined, provider: string, fallback?: string): Promise<string | undefined> }, 'searchKey')
+      .mockImplementation(async (_orgId, provider) => provider === 'brave_search' ? 'brave-key' : undefined);
+    jest.spyOn(service as unknown as { searchBrave(query: string, key: string): Promise<Array<{ title: string; url: string; snippet: string }>> }, 'searchBrave')
+      .mockResolvedValue([
+        {
+          title: 'Copa Mundial de la FIFA 2026',
+          url: 'https://www.fifa.com/es/tournaments/mens/worldcup/canadamexicousa2026/',
+          snippet: 'Pagina oficial del Mundial 2026.',
+        },
+        {
+          title: 'Calendario del Mundial 2026',
+          url: 'https://example.com/calendario',
+          snippet: '<strong>El domingo 19 de julio</strong> se disputara la Gran Final.',
+        },
+      ]);
+
+    const result = await (service as unknown as {
+      answerWebSearch(input: string, orgId?: string): Promise<{ text: string; tool: string; sources: string[] }>;
+    }).answerWebSearch('cuando es el mundial?', 'org-1');
+
+    expect(result.text).toContain('Inicio: 11 de junio de 2026');
+    expect(result.text).toContain('Final: 19 de julio de 2026');
+    expect(result.text).toContain('Canada, Mexico y Estados Unidos');
+    expect(result.text).toContain('Fuentes:');
+    expect(result.text).not.toContain('Encontre estos resultados actuales');
+    expect(result.text).not.toContain('<strong>');
+  });
 });

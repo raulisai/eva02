@@ -8,6 +8,7 @@ import { AgentRunnerService } from '../agent-runner.service';
 import { MediaService } from '../media.service';
 import { MissingInformationError, ResearchToolsService } from '../research-tools.service';
 import { ScriptForgeService } from '../script-forge.service';
+import { SoulContextService } from '../soul-context.service';
 import { classifyTier } from '../tier';
 import { Task } from '../../tasks/task.types';
 
@@ -43,12 +44,15 @@ describe('classifyTier', () => {
   it('routes lookups to quick (<1 min)', () => {
     expect(classifyTier('busca el clima de hoy').tier).toBe('quick');
     expect(classifyTier('¿cuánto cuesta el dólar?').tier).toBe('quick');
+    expect(classifyTier('puedes decirme un restaurante de comida argentina rico para ir').tier).toBe('quick');
+    expect(classifyTier('crea una imagen de un gato conduciendo').tier).toBe('quick');
   });
 
   it('routes current-information requests to quick instead of chat', () => {
     expect(classifyTier('que esta pasando ahora con OpenAI').tier).toBe('quick');
     expect(classifyTier('dame lo ultimo de bitcoin').tier).toBe('quick');
     expect(classifyTier('cual es el clima de manana').tier).toBe('quick');
+    expect(classifyTier('que partidos del munidal jugara primero').tier).toBe('quick');
   });
 
   it('routes automation/code orders to long (background)', () => {
@@ -71,6 +75,7 @@ describe('AgentRunnerService', () => {
   let media: jest.Mocked<MediaService>;
   let research: jest.Mocked<ResearchToolsService>;
   let forge: jest.Mocked<ScriptForgeService>;
+  let soul: jest.Mocked<SoulContextService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -151,6 +156,15 @@ describe('AgentRunnerService', () => {
             }),
           },
         },
+        {
+          provide: SoulContextService,
+          useValue: {
+            getPersonalProfile: jest.fn().mockResolvedValue({}),
+            getCoworkContext: jest.fn().mockResolvedValue({}),
+            getAgentContext: jest.fn().mockResolvedValue({ personal_profile: {}, cowork_context: {} }),
+            resolveCurrentLocation: jest.fn().mockResolvedValue(null),
+          },
+        },
       ],
     }).compile();
 
@@ -162,6 +176,7 @@ describe('AgentRunnerService', () => {
     media = module.get(MediaService);
     research = module.get(ResearchToolsService);
     forge = module.get(ScriptForgeService);
+    soul = module.get(SoulContextService);
   });
 
   function publishedTypes() {
@@ -186,6 +201,79 @@ describe('AgentRunnerService', () => {
     }));
     expect(publishedTypes()).toContain('task.result');
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
+  });
+
+  it('adds Soul cowork context to model prompts without changing greeting routing', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'hola' }));
+    soul.getAgentContext.mockResolvedValue({
+      personal_profile: { full_name: 'Diego' },
+      cowork_context: {
+        pending_tasks: 'Preparar reporte semanal',
+        work_hours: 'Lun-vie 9:00-18:00',
+      },
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(intentRouter.classify).not.toHaveBeenCalled();
+    expect(modelRouter.generate).toHaveBeenCalledWith(
+      expect.stringContaining('Contexto privado de Soul disponible para EVA'),
+      expect.objectContaining({ budget: 'cheap' }),
+    );
+    expect(modelRouter.generate).toHaveBeenCalledWith(
+      expect.stringContaining('Tareas pendientes: Preparar reporte semanal'),
+      expect.objectContaining({ budget: 'cheap' }),
+    );
+  });
+
+  it('answers personal profile questions from Soul instead of inventing placeholders', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'sabes mi nombre y mi edad ?' }));
+    soul.getPersonalProfile.mockResolvedValue({ full_name: 'Diego', age: '34' });
+
+    await service.run(ORG, TASK);
+
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(intentRouter.classify).not.toHaveBeenCalled();
+    const resultEvent = events.publish.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'task.result');
+    expect(resultEvent).toEqual(expect.objectContaining({
+      payload: expect.objectContaining({
+        model: 'soul-profile',
+        text: expect.stringContaining('Diego'),
+      }),
+    }));
+    expect((resultEvent!.payload as { text: string }).text).toContain('34');
+    expect((resultEvent!.payload as { text: string }).text).not.toContain('[Nombre]');
+    expect((resultEvent!.payload as { text: string }).text).not.toContain('[Edad]');
+  });
+
+  it('requests a Soul form when personal profile facts are missing', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'sabes mi nombre y mi edad ?' }));
+    soul.getPersonalProfile.mockResolvedValue({});
+
+    await service.run(ORG, TASK);
+
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    const formEvent = events.publish.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'task.form_request');
+    expect(formEvent).toEqual(expect.objectContaining({
+      orgId: ORG,
+      taskId: TASK,
+      payload: expect.objectContaining({
+        message: expect.stringContaining('Me faltan estos datos en tu Soul'),
+        form: expect.objectContaining({
+          form_key: 'personal_profile.identity',
+          fields: expect.arrayContaining([
+            expect.objectContaining({ id: 'full_name', label: 'Nombre' }),
+            expect.objectContaining({ id: 'age', label: 'Edad', type: 'number' }),
+          ]),
+        }),
+      }),
+    }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval');
+    expect(publishedTypes()).not.toContain('task.result');
   });
 
   it('runs quick lookups with the search tool instead of answering from the model', async () => {
@@ -221,6 +309,148 @@ describe('AgentRunnerService', () => {
       budget: 'cheap',
       responseFormat: 'json',
     }));
+  });
+
+  it('uses freshness guard for short volatile questions that would otherwise be chat', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'quien es el presidente de Mexico?',
+    }));
+    modelRouter.generate.mockResolvedValueOnce({
+      text: JSON.stringify({
+        query: 'presidente de Mexico actual fuente oficial',
+        intent: 'lookup',
+        source_hint: 'chromium',
+        reason: 'Cargo publico vigente que puede cambiar despues del corte del modelo.',
+      }),
+      model: 'gemini-2.5-flash-lite',
+      backend: 'google',
+      usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70 },
+    });
+
+    await service.run(ORG, TASK);
+
+    const published = events.publish.mock.calls.map(([event]) => event);
+    expect(published[0].type).toBe('task.say');
+    expect((published[0].payload as { text: string }).text).toContain('buscar en internet');
+    expect(modelRouter.generate).toHaveBeenCalledTimes(1);
+    expect(research.answer).toHaveBeenCalledWith('presidente de Mexico actual fuente oficial', ORG);
+    expect(publishedLogs().some((message) => message.includes('freshness guard'))).toBe(true);
+    expect(publishedTypes()).toContain('task.result');
+  });
+
+  it('routes sports schedules through search instead of trusting stale model memory', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'que partidos del munidal jugara primero',
+    }));
+    modelRouter.generate.mockResolvedValueOnce({
+      text: JSON.stringify({
+        query: 'Mundial FIFA 2026 primeros partidos calendario oficial',
+        intent: 'lookup',
+        source_hint: 'chromium',
+        reason: 'Calendario deportivo actual que debe verificarse en fuentes recientes.',
+      }),
+      model: 'gemini-2.5-flash-lite',
+      backend: 'google',
+      usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70 },
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(intentRouter.classify).toHaveBeenCalled();
+    expect(modelRouter.generate).toHaveBeenCalledTimes(1);
+    expect(modelRouter.generate).toHaveBeenCalledWith(
+      'que partidos del munidal jugara primero',
+      expect.objectContaining({ budget: 'cheap', responseFormat: 'json' }),
+    );
+    expect(research.answer).toHaveBeenCalledWith('Mundial FIFA 2026 primeros partidos calendario oficial', ORG);
+    expect(publishedLogs().some((message) => message.includes('buscando en internet con Chromium'))).toBe(true);
+    expect(publishedTypes()).toContain('task.result');
+  });
+
+  it('normalizes ambiguous Mexico World Cup lookups to FIFA 2026 even if the planner returns Qatar 2022', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'cuando juega mexico en el mundial ?',
+    }));
+    modelRouter.generate.mockResolvedValueOnce({
+      text: JSON.stringify({
+        query: 'calendario mundial de fútbol Qatar 2022 partidos México',
+        intent: 'lookup',
+        source_hint: 'chromium',
+        reason: 'El modelo uso una edicion pasada.',
+      }),
+      model: 'gemini-2.5-flash-lite',
+      backend: 'google',
+      usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70 },
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(research.answer).toHaveBeenCalledWith('Mexico Mundial FIFA 2026 calendario oficial partidos', ORG);
+    expect(publishedLogs().some((message) => message.includes('research-plan: query="Mexico Mundial FIFA 2026 calendario oficial partidos"'))).toBe(true);
+    expect(publishedTypes()).toContain('task.result');
+  });
+
+  it('routes latest episode questions through search instead of stale model memory', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'cual es el ultimo capitulo d eone piece el anime ?',
+    }));
+    modelRouter.generate.mockResolvedValueOnce({
+      text: JSON.stringify({
+        query: 'ultimo episodio emitido One Piece anime fecha oficial',
+        intent: 'lookup',
+        source_hint: 'chromium',
+        reason: 'La pregunta pide el ultimo episodio emitido y cambia con el tiempo.',
+      }),
+      model: 'gemini-2.5-flash-lite',
+      backend: 'google',
+      usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70 },
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(modelRouter.generate).toHaveBeenCalledTimes(1);
+    expect(modelRouter.generate).toHaveBeenCalledWith(
+      'cual es el ultimo capitulo d eone piece el anime ?',
+      expect.objectContaining({ budget: 'cheap', responseFormat: 'json' }),
+    );
+    expect(research.answer).toHaveBeenCalledWith('ultimo episodio emitido One Piece anime fecha oficial', ORG);
+    expect(publishedLogs().some((message) => message.includes('tool-router: capability "search"'))).toBe(true);
+    expect(publishedLogs().some((message) => message.includes('buscando en internet con Chromium'))).toBe(true);
+    expect(publishedTypes()).toContain('task.result');
+  });
+
+  it('uses playground conversation context for short follow-up lookups', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'la direccion',
+      metadata: {
+        source: 'playground',
+        conversation_context: [
+          { role: 'user', text: 'puedes decirme un restauran de comida argentina rico para ir' },
+          { role: 'assistant', text: 'Te recomiendo El Gaucho, su bife de chorizo es muy bueno.' },
+        ],
+      },
+    }));
+    modelRouter.generate.mockResolvedValueOnce({
+      text: JSON.stringify({
+        query: 'direccion restaurante El Gaucho comida argentina',
+        intent: 'lookup',
+        source_hint: 'chromium',
+        reason: 'El usuario pide la direccion del restaurante recomendado en el turno anterior.',
+      }),
+      model: 'gemini-2.5-flash-lite',
+      backend: 'google',
+      usage: { promptTokens: 60, completionTokens: 25, totalTokens: 85 },
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(modelRouter.generate).toHaveBeenCalledWith(
+      expect.stringContaining('Contexto reciente de la conversacion'),
+      expect.objectContaining({ budget: 'cheap', responseFormat: 'json' }),
+    );
+    expect(research.answer).toHaveBeenCalledWith('direccion restaurante El Gaucho comida argentina', ORG);
+    expect(publishedLogs().some((message) => message.includes('tool-router: capability "search"'))).toBe(true);
+    expect(publishedTypes()).toContain('task.result');
   });
 
   it('announces background mode for long tasks so the chat stays free', async () => {
@@ -260,6 +490,23 @@ describe('AgentRunnerService', () => {
     expect(publishedLogs().some((message) => message.includes('eva-media'))).toBe(true);
   });
 
+  it('generates media directly for pure image requests instead of answering with text imagination', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'crea una imagen de un gato conduciendo' }));
+    media.wantsImage.mockReturnValue(true);
+
+    await service.run(ORG, TASK);
+
+    expect(intentRouter.classify).not.toHaveBeenCalled();
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(media.sendImage).toHaveBeenCalledWith(ORG, TASK, 'crea una imagen de un gato conduciendo');
+    const resultEvent = events.publish.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'task.result');
+    expect((resultEvent!.payload as { text: string; model: string }).model).toBe('media:image');
+    expect((resultEvent!.payload as { text: string }).text).toContain('https://bucket/eva-media/img.svg');
+    expect(publishedLogs().some((message) => message.includes('image generation'))).toBe(true);
+  });
+
   it('parks sensitive orders at the approval gate without executing', async () => {
     tasks.getTask.mockResolvedValue(makeTask({ description: 'compra el dominio eva.dev' }));
     intentRouter.classify.mockResolvedValue({
@@ -292,7 +539,7 @@ describe('AgentRunnerService', () => {
 
   it('rejects useless model answers and recovers with available tools', async () => {
     tasks.getTask.mockResolvedValue(makeTask({
-      description: 'analiza el estado actual de OpenAI',
+      description: 'resume este texto sobre OpenAI',
     }));
     modelRouter.generate
       .mockResolvedValueOnce({
@@ -327,7 +574,7 @@ describe('AgentRunnerService', () => {
 
   it('does not publish the useless model answer when all recovery tools fail', async () => {
     tasks.getTask.mockResolvedValue(makeTask({
-      description: 'analiza el estado actual de OpenAI',
+      description: 'resume este texto sobre OpenAI',
     }));
     modelRouter.generate
       .mockResolvedValueOnce({

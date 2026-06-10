@@ -43,6 +43,11 @@ interface SessionEntry {
   order: string;
 }
 
+interface ConversationContextTurn {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
 export function PlaygroundClient() {
   const { events, taskPatches } = useWs();
   const [order, setOrder] = useState('');
@@ -96,6 +101,7 @@ export function PlaygroundClient() {
   async function submit() {
     if (!order.trim() || busy) return;
     const text = order.trim();
+    const conversationContext = buildConversationContext(session, chronological);
     setBusy(true);
     setError(null);
     try {
@@ -104,7 +110,7 @@ export function PlaygroundClient() {
         body: JSON.stringify({
           title: text.length > 80 ? `${text.slice(0, 77)}...` : text,
           description: text,
-          metadata: { source: 'playground' },
+          metadata: { source: 'playground', conversation_context: conversationContext },
         }),
       });
       setSession((prev) => [...prev, { task: created, order: text }]);
@@ -291,6 +297,26 @@ export function PlaygroundClient() {
       )}
     </div>
   );
+}
+
+function buildConversationContext(session: SessionEntry[], chronological: EvaEvent[]): ConversationContextTurn[] {
+  const turns = session.slice(-4).flatMap((entry): ConversationContextTurn[] => {
+    const taskEvents = chronological.filter((event) => event.taskId === entry.task.id);
+    const resultEvent = taskEvents.find((event) => event.type === 'task.result');
+    const resultText = resultEvent
+      ? String((resultEvent.payload as Record<string, unknown>)['text'] ?? '')
+      : (entry.task.result as Record<string, unknown> | null)?.['text'] as string | undefined;
+
+    return [
+      { role: 'user', text: entry.order },
+      ...(resultText ? [{ role: 'assistant' as const, text: resultText }] : []),
+    ];
+  });
+
+  return turns
+    .map((turn) => ({ ...turn, text: turn.text.trim().slice(0, 1200) }))
+    .filter((turn) => turn.text.length > 0)
+    .slice(-8);
 }
 
 /** One order + EVA's bubbles (acks, media, result) for a session task. */

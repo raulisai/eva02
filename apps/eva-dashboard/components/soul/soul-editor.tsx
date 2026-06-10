@@ -22,6 +22,7 @@ interface SoulEditorProps {
 
 const PROFILE_FIELDS = [
   { key: 'full_name', label: 'Nombre', placeholder: 'Tu nombre completo' },
+  { key: 'preferred_address', label: 'Como debe llamarte', placeholder: 'Ej. Diego, jefe, amo, doctor' },
   { key: 'age', label: 'Edad', placeholder: 'Ej. 34' },
   { key: 'current_location', label: 'Ubicacion actual', placeholder: 'Ej. Ciudad de Mexico, Roma Norte' },
   { key: 'address', label: 'Direccion', placeholder: 'Direccion habitual' },
@@ -36,13 +37,35 @@ const PROFILE_FIELDS = [
 type ProfileKey = typeof PROFILE_FIELDS[number]['key'];
 type PersonalProfile = Record<ProfileKey, string>;
 
+const COWORK_FIELDS = [
+  { key: 'calendars', label: 'Calendarios', placeholder: 'Calendarios conectados, cuentas, reglas de uso' },
+  { key: 'upcoming_appointments', label: 'Proximas citas', placeholder: 'Citas importantes, medicos, reuniones, viajes' },
+  { key: 'pending_tasks', label: 'Tareas pendientes', placeholder: 'Pendientes personales y laborales que EVA debe recordar' },
+  { key: 'work_hours', label: 'Horarios de trabajo', placeholder: 'Ej. Lun-vie 9:00-18:00, bloques de enfoque' },
+  { key: 'days_off', label: 'Dias libres', placeholder: 'Fines de semana, vacaciones, dias que no quieres agendar' },
+  { key: 'goals', label: 'Metas', placeholder: 'Metas de salud, trabajo, dinero, aprendizaje, proyectos' },
+  { key: 'family', label: 'Familia y relaciones', placeholder: 'Personas importantes, cumpleaños, responsabilidades' },
+  { key: 'social_media', label: 'Redes sociales', placeholder: 'Usuarios, plataformas, estilo, limites y cuentas relevantes' },
+  { key: 'projects', label: 'Proyectos activos', placeholder: 'Proyectos donde EVA puede ayudarte como coworker' },
+  { key: 'routines', label: 'Rutinas', placeholder: 'Rutina diaria/semanal, habitos, horarios preferidos' },
+  { key: 'communication_preferences', label: 'Comunicacion', placeholder: 'Como quieres recordatorios, resumenes, tono y frecuencia' },
+  { key: 'important_links', label: 'Links importantes', placeholder: 'URLs de docs, tableros, perfiles, calendarios publicos' },
+] as const;
+
+type CoworkKey = typeof COWORK_FIELDS[number]['key'];
+type CoworkContext = Record<CoworkKey, string>;
+
 export function SoulEditor({ orgId, initialSoul }: SoulEditorProps) {
   const initialProfile = (initialSoul?.model_prefs?.['personal_profile'] ?? {}) as Partial<PersonalProfile>;
+  const initialCowork = (initialSoul?.model_prefs?.['cowork_context'] ?? {}) as Partial<CoworkContext>;
   const [name, setName] = useState(initialSoul?.name ?? 'EVA');
   const [persona, setPersona] = useState(initialSoul?.persona ?? '');
   const [profile, setProfile] = useState<PersonalProfile>(() => Object.fromEntries(
     PROFILE_FIELDS.map(({ key }) => [key, initialProfile[key] ?? '']),
   ) as PersonalProfile);
+  const [cowork, setCowork] = useState<CoworkContext>(() => Object.fromEntries(
+    COWORK_FIELDS.map(({ key }) => [key, initialCowork[key] ?? '']),
+  ) as CoworkContext);
   const [directivesText, setDirectivesText] = useState(
     Array.isArray(initialSoul?.directives) ? (initialSoul!.directives as string[]).join('\n') : '',
   );
@@ -67,6 +90,7 @@ export function SoulEditor({ orgId, initialSoul }: SoulEditorProps) {
           model_prefs: {
             ...(initialSoul?.model_prefs ?? {}),
             personal_profile: profile,
+            cowork_context: cowork,
           },
         }, { onConflict: 'org_id' });
       if (error) throw error;
@@ -81,6 +105,14 @@ export function SoulEditor({ orgId, initialSoul }: SoulEditorProps) {
   return (
     <ScrollArea className="h-full">
       <div className="max-w-2xl p-6 space-y-6">
+        <section className="space-y-1">
+          <p className="text-xs text-zinc-300">Soul identity</p>
+          <p className="text-[11px] text-zinc-600 leading-relaxed">
+            Define quien es EVA, como debe comportarse y a quien sirve. La identidad del agente vive aqui; tus datos personales
+            se guardan abajo como contexto privado para tomar mejores decisiones.
+          </p>
+        </section>
+
         <section className="space-y-2">
           <label className="flex items-center gap-2 text-xs text-zinc-300" htmlFor="soul-name">
             <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
@@ -95,23 +127,23 @@ export function SoulEditor({ orgId, initialSoul }: SoulEditorProps) {
         </section>
 
         <section className="space-y-2">
-          <label className="block text-xs text-zinc-300" htmlFor="soul-persona">Persona</label>
+          <label className="block text-xs text-zinc-300" htmlFor="soul-persona">Identity & behavior</label>
           <p className="text-[11px] text-zinc-600">
-            Injected into every planner / intent prompt. Who is EVA, what tone, what priorities.
+            Quien es EVA, tono, prioridades, limites y forma de comportarse.
           </p>
           <textarea
             id="soul-persona"
             value={persona}
             onChange={(event) => setPersona(event.target.value)}
             rows={6}
-            placeholder="EVA is a pragmatic operations agent. Direct, concise, security-first…"
+            placeholder="EVA es mi agente personal. Es directa, cuidadosa, leal a mis preferencias, security-first y siempre intenta resolver antes de rendirse…"
             className="w-full bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60 resize-y"
           />
         </section>
 
         <section className="space-y-2">
           <label className="block text-xs text-zinc-300" htmlFor="soul-directives">Standing directives</label>
-          <p className="text-[11px] text-zinc-600">One per line. Always-on rules the agent must obey.</p>
+          <p className="text-[11px] text-zinc-600">Reglas permanentes, una por linea. Siempre se aplican.</p>
           <textarea
             id="soul-directives"
             value={directivesText}
@@ -124,9 +156,9 @@ export function SoulEditor({ orgId, initialSoul }: SoulEditorProps) {
 
         <section className="space-y-3">
           <div>
-            <span className="block text-xs text-zinc-300">Personal profile</span>
+            <span className="block text-xs text-zinc-300">A quien sirve</span>
             <p className="text-[11px] text-zinc-600 mt-1">
-              Contexto personal para clima local, salud, comida, rutas, compras y preferencias.
+              Perfil personal del dueño/usuario de EVA: nombre, como debe llamarte, ubicacion, salud, trabajo y preferencias.
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2">
@@ -138,6 +170,29 @@ export function SoulEditor({ orgId, initialSoul }: SoulEditorProps) {
                   onChange={(event) => setProfile((prev) => ({ ...prev, [key]: event.target.value }))}
                   placeholder={placeholder}
                   className="w-full bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60"
+                />
+              </label>
+            ))}
+          </div>
+        </section>
+
+        <section className="space-y-3">
+          <div>
+            <span className="block text-xs text-zinc-300">Cowork context</span>
+            <p className="text-[11px] text-zinc-600 mt-1">
+              Informacion operativa para que EVA pueda ayudarte como coworker: agenda, pendientes, metas, familia, redes y rutinas.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {COWORK_FIELDS.map(({ key, label, placeholder }) => (
+              <label key={key} className="space-y-1">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">{label}</span>
+                <textarea
+                  value={cowork[key]}
+                  onChange={(event) => setCowork((prev) => ({ ...prev, [key]: event.target.value }))}
+                  placeholder={placeholder}
+                  rows={3}
+                  className="w-full bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60 resize-y"
                 />
               </label>
             ))}
