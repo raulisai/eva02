@@ -1,0 +1,31 @@
+{
+  "tools": [
+    {
+      "name": "public_api.weather_forecast",
+      "capability": "public_api.weather_forecast",
+      "description": "Get a daily weather forecast for a location and exact date range through Open-Meteo.",
+      "input_schema": {
+        "location": "string",
+        "date": "YYYY-MM-DD | today | tomorrow",
+        "start": "YYYY-MM-DD",
+        "end": "YYYY-MM-DD",
+        "days": "number"
+      },
+      "approval_level": 0
+    },
+    {
+      "name": "public_api.recipe_search",
+      "capability": "public_api.recipe_search",
+      "description": "Find a recipe by text, ingredient, category, area, or random meal through TheMealDB.",
+      "input_schema": {
+        "query": "string",
+        "ingredient": "string",
+        "category": "string",
+        "area": "string",
+        "random": "boolean",
+        "limit": "number"
+      },
+      "approval_level": 0
+    }
+  ]
+}

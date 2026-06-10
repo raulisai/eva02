@@ -16,6 +16,17 @@ describe('skill-runtime', () => {
     expect(skill.checksum).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it('loads the public APIs skill for weather and recipes', async () => {
+    const skill = await new SkillLoader().loadSkill(join(fixturesRoot, 'public-apis'));
+
+    expect(skill.manifest.name).toBe('public-apis');
+    expect(skill.tools.map((tool) => tool.name)).toEqual([
+      'public_api.weather_forecast',
+      'public_api.recipe_search',
+    ]);
+    expect(skill.permissions.secrets).toEqual([]);
+  });
+
   it('rejects an invalid manifest', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'eva-skill-'));
     await Promise.all([

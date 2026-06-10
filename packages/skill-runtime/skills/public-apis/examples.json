@@ -1,0 +1,14 @@
+{
+  "examples": [
+    {
+      "name": "Weather tomorrow",
+      "input": "Clima manana en Ciudad de Mexico",
+      "expected_tool": "public_api.weather_forecast"
+    },
+    {
+      "name": "Recipe by ingredient",
+      "input": "Dame una receta con pollo",
+      "expected_tool": "public_api.recipe_search"
+    }
+  ]
+}

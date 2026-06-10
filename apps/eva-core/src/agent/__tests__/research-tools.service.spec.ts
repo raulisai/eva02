@@ -7,6 +7,50 @@ describe('ResearchToolsService', () => {
     service = new ResearchToolsService();
   });
 
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('routes weather queries straight to Open-Meteo without browser extraction', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch' as never)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          results: [{
+            name: 'Ciudad de Mexico',
+            admin1: 'Ciudad de Mexico',
+            country: 'Mexico',
+            latitude: 19.43,
+            longitude: -99.13,
+            timezone: 'America/Mexico_City',
+          }],
+        }),
+      } as never)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          daily: {
+            time: ['2026-06-11'],
+            weather_code: [0],
+            temperature_2m_min: [17],
+            temperature_2m_max: [26],
+            precipitation_probability_max: [10],
+            wind_speed_10m_max: [12],
+          },
+        }),
+      } as never);
+    const browserSpy = jest.spyOn(service as unknown as {
+      extractWithBrowser(url: string): Promise<string>;
+    }, 'extractWithBrowser');
+
+    const result = await service.answer('clima manana en Ciudad de Mexico');
+
+    expect(result.tool).toBe('open-meteo');
+    expect(result.text).toContain('Pronostico para Ciudad de Mexico');
+    expect(browserSpy).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('formats weather API data as a human-readable answer', async () => {
     const fetchMock = jest.spyOn(global, 'fetch' as never)
       .mockResolvedValueOnce({
@@ -144,5 +188,41 @@ describe('ResearchToolsService', () => {
     expect(result.text).toContain('Fuentes:');
     expect(result.text).not.toContain('Encontre estos resultados actuales');
     expect(result.text).not.toContain('<strong>');
+  });
+
+  it('answers recipe requests with TheMealDB and a compact reusable format', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch' as never)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          meals: [{ idMeal: '52795', strMeal: 'Chicken Handi' }],
+        }),
+      } as never)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          meals: [{
+            idMeal: '52795',
+            strMeal: 'Chicken Handi',
+            strCategory: 'Chicken',
+            strArea: 'Indian',
+            strIngredient1: 'Chicken',
+            strMeasure1: '1.2 kg',
+            strIngredient2: 'Onion',
+            strMeasure2: '5 thinly sliced',
+            strInstructions: 'Heat oil in a large pan. Cook onions until golden. Add chicken and spices. Simmer until cooked.',
+            strSource: 'https://www.themealdb.com/meal/52795',
+          }],
+        }),
+      } as never);
+
+    const result = await service.answer('dame una receta con pollo');
+
+    expect(result.tool).toBe('themealdb');
+    expect(result.text).toContain('Receta: Chicken Handi');
+    expect(result.text).toContain('Ingredientes: 1.2 kg Chicken, 5 thinly sliced Onion.');
+    expect(result.text).toContain('Pasos:');
+    expect(result.sources[0]).toContain('filter.php?i=chicken_breast');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

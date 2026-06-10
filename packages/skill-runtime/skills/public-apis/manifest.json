@@ -1,0 +1,9 @@
+{
+  "name": "public-apis",
+  "display_name": "Public APIs",
+  "version": "0.1.0",
+  "description": "Use free public APIs for deterministic weather forecasts and recipe lookup without spending model tokens on repeated research.",
+  "author": "eva",
+  "capabilities": ["public_api.weather_forecast", "public_api.recipe_search"],
+  "tags": ["automation", "public-api", "weather", "recipes"]
+}

@@ -108,6 +108,14 @@ export class CommunicationService implements OnApplicationBootstrap {
         target: { external_user_id: externalUserId, chat_id: chatId },
         status: 'skipped',
       });
+      // Tell the user their Telegram ID so they can link from the dashboard.
+      if (settings?.secret && chatId) {
+        await this.telegram.sendMessage(
+          { chat_id: chatId },
+          `👋 Hola! EVA recibió tu mensaje, pero tu cuenta de Telegram no está vinculada aún.\n\nTu *Telegram ID* es: \`${externalUserId}\`\n\nVe al dashboard de EVA → Integraciones → Telegram → *Vincular cuenta* e ingresa ese ID para empezar.`,
+          settings.secret,
+        );
+      }
       return { ok: false, ignored: true, reason: 'telegram_account_not_linked' };
     }
 

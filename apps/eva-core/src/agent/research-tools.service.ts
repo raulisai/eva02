@@ -59,6 +59,101 @@ interface WebResult {
   snippet: string;
 }
 
+interface PublicApiCatalogEntry {
+  id: 'open-meteo' | 'themealdb';
+  capability: 'weather.forecast' | 'recipes.lookup';
+  patterns: RegExp[];
+}
+
+interface MealDbMeal {
+  idMeal?: string;
+  strMeal?: string;
+  strCategory?: string;
+  strArea?: string;
+  strInstructions?: string;
+  strSource?: string;
+  strYoutube?: string;
+  strMealThumb?: string;
+  [key: string]: string | null | undefined;
+}
+
+interface MealDbResult {
+  meals?: MealDbMeal[] | null;
+}
+
+type RecipeRequest =
+  | { mode: 'random' }
+  | { mode: 'ingredient' | 'category' | 'area' | 'search'; value: string };
+
+const PUBLIC_API_CATALOG: PublicApiCatalogEntry[] = [
+  {
+    id: 'open-meteo',
+    capability: 'weather.forecast',
+    patterns: [/\b(clima|weather|temperatura|pron[oó]stico|lluvia|llover|calor|fr[ií]o)\b/i],
+  },
+  {
+    id: 'themealdb',
+    capability: 'recipes.lookup',
+    patterns: [/\b(receta|recetas|recipe|recipes|cocina|cocinar|prepara(?:r)?|platillo|ingredientes?)\b/i],
+  },
+];
+
+const RECIPE_TERM_MAP: Record<string, string> = {
+  atun: 'tuna',
+  arroz: 'rice',
+  camarones: 'prawns',
+  carne: 'beef',
+  cerdo: 'pork',
+  champinones: 'mushrooms',
+  huevo: 'egg',
+  huevos: 'egg',
+  jamon: 'ham',
+  lentejas: 'lentils',
+  pescado: 'fish',
+  pollo: 'chicken_breast',
+  res: 'beef',
+  salmon: 'salmon',
+  tocino: 'bacon',
+};
+
+const RECIPE_CATEGORY_MAP: Record<string, string> = {
+  desayuno: 'Breakfast',
+  postre: 'Dessert',
+  postres: 'Dessert',
+  mariscos: 'Seafood',
+  pescado: 'Seafood',
+  vegetariana: 'Vegetarian',
+  vegetariano: 'Vegetarian',
+  vegana: 'Vegan',
+  vegano: 'Vegan',
+  pasta: 'Pasta',
+};
+
+const RECIPE_AREA_MAP: Record<string, string> = {
+  americana: 'American',
+  americano: 'American',
+  britanica: 'British',
+  britanico: 'British',
+  canadiense: 'Canadian',
+  china: 'Chinese',
+  chino: 'Chinese',
+  francesa: 'French',
+  frances: 'French',
+  griega: 'Greek',
+  griego: 'Greek',
+  hindu: 'Indian',
+  india: 'Indian',
+  indio: 'Indian',
+  italiana: 'Italian',
+  italiano: 'Italian',
+  japonesa: 'Japanese',
+  japones: 'Japanese',
+  mexicana: 'Mexican',
+  mexicano: 'Mexican',
+  tailandesa: 'Thai',
+  tailandes: 'Thai',
+};
+
 @Injectable()
 export class ResearchToolsService {
   constructor(
@@ -72,16 +167,21 @@ export class ResearchToolsService {
   });
 
   async answer(input: string, orgId?: string): Promise<ToolAnswer> {
-    if (this.isWeatherQuery(input)) return this.answerWeatherWithBrowser(input, orgId);
+    const api = this.matchPublicApi(input);
+    if (api?.capability === 'weather.forecast') return this.answerWeatherApi(input, [], orgId);
+    if (api?.capability === 'recipes.lookup') return this.answerRecipeApi(input);
     return this.answerWebSearch(input, orgId);
   }
 
   canAnswer(input: string): boolean {
-    return this.isWeatherQuery(input) || Boolean(input.trim());
+    return Boolean(this.matchPublicApi(input)) || Boolean(input.trim());
   }
 
-  private isWeatherQuery(input: string): boolean {
-    return /\b(clima|weather|temperatura|pron[oó]stico|lluvia|llover|calor|fr[ií]o)\b/i.test(input);
+  private matchPublicApi(input: string): PublicApiCatalogEntry | null {
+    if (/\b(restaurante|sucursal|abierto|horario|direcci[oó]n|ubicaci[oó]n)\b/i.test(input)) {
+      return PUBLIC_API_CATALOG.find((entry) => entry.capability === 'weather.forecast' && entry.patterns.some((pattern) => pattern.test(input))) ?? null;
+    }
+    return PUBLIC_API_CATALOG.find((entry) => entry.patterns.some((pattern) => pattern.test(input))) ?? null;
   }
 
   private async answerWeatherWithBrowser(input: string, orgId?: string): Promise<ToolAnswer> {
@@ -96,6 +196,44 @@ export class ResearchToolsService {
       // Browser research is useful, but the final answer must stay structured.
     }
     return this.answerWeatherApi(input, extraSources, orgId);
+  }
+
+  private async answerRecipeApi(input: string): Promise<ToolAnswer> {
+    const request = this.extractRecipeRequest(input);
+    const sources: string[] = [];
+
+    let meal: MealDbMeal | undefined;
+    if (request.mode === 'random') {
+      const randomUrl = 'https://www.themealdb.com/api/json/v1/1/random.php';
+      sources.push(randomUrl);
+      meal = (await this.fetchJson<MealDbResult>(randomUrl)).meals?.[0];
+    } else if (request.mode === 'search') {
+      const searchUrl = new URL('https://www.themealdb.com/api/json/v1/1/search.php');
+      searchUrl.searchParams.set('s', request.value);
+      sources.push(searchUrl.toString());
+      meal = (await this.fetchJson<MealDbResult>(searchUrl.toString())).meals?.[0];
+    } else {
+      const filterUrl = new URL('https://www.themealdb.com/api/json/v1/1/filter.php');
+      filterUrl.searchParams.set(request.mode === 'ingredient' ? 'i' : request.mode === 'category' ? 'c' : 'a', request.value);
+      sources.push(filterUrl.toString());
+      const firstMatch = (await this.fetchJson<MealDbResult>(filterUrl.toString())).meals?.[0];
+      if (firstMatch?.idMeal) {
+        const lookupUrl = new URL('https://www.themealdb.com/api/json/v1/1/lookup.php');
+        lookupUrl.searchParams.set('i', firstMatch.idMeal);
+        sources.push(lookupUrl.toString());
+        meal = (await this.fetchJson<MealDbResult>(lookupUrl.toString())).meals?.[0];
+      }
+    }
+
+    if (!meal?.strMeal) {
+      throw new Error('TheMealDB no regreso recetas para esa consulta');
+    }
+
+    return {
+      text: this.formatRecipe(meal),
+      tool: 'themealdb',
+      sources,
+    };
   }
 
   private async answerWeatherApi(input: string, extraSources: string[] = [], orgId?: string): Promise<ToolAnswer> {
@@ -347,13 +485,101 @@ export class ResearchToolsService {
   private extractTargetDate(input: string): string {
     const now = new Date();
     const normalized = input.toLowerCase();
-    const offset = /\b(pasado\s+ma[nñ]ana|after tomorrow)\b/.test(normalized)
+    const explicitDate = normalized.match(/\b(20\d{2}-\d{2}-\d{2})\b/)?.[1];
+    if (explicitDate) return explicitDate;
+
+    const daysMatch = normalized.match(/\b(?:en|dentro de)\s+(\d{1,2})\s+d[ií]as?\b/);
+    const offset = daysMatch
+      ? Number(daysMatch[1])
+      : /\b(pasado\s+ma[nñ]ana|after tomorrow)\b/.test(normalized)
       ? 2
       : /\b(ma[nñ]ana|tomorrow)\b/.test(normalized)
         ? 1
         : 0;
     now.setDate(now.getDate() + offset);
     return now.toISOString().slice(0, 10);
+  }
+
+  private extractRecipeRequest(input: string): RecipeRequest {
+    const normalized = this.normalizeText(input);
+    if (/\b(aleatoria|random|sorprendeme|sorpr[eé]ndeme)\b/i.test(input)) return { mode: 'random' };
+
+    const ingredientMatch = normalized.match(/\b(?:con|ingrediente(?: principal)?(?: es)?|tengo)\s+([a-z0-9 _-]{3,40})/);
+    if (ingredientMatch?.[1]) {
+      return { mode: 'ingredient', value: this.toMealDbTerm(ingredientMatch[1]) };
+    }
+
+    const area = this.firstMappedTerm(normalized, RECIPE_AREA_MAP);
+    if (area) return { mode: 'area', value: area };
+
+    const category = this.firstMappedTerm(normalized, RECIPE_CATEGORY_MAP);
+    if (category) return { mode: 'category', value: category };
+
+    const searchMatch = normalized.match(/\brecetas?\s+(?:de|para)\s+([a-z0-9 _-]{3,60})/);
+    if (searchMatch?.[1]) return { mode: 'search', value: this.toMealDbTerm(searchMatch[1]).replace(/_/g, ' ') };
+
+    const fallback = normalized
+      .replace(/\b(dame|busca|quiero|necesito|una|un|receta|recetas|recipe|recipes|para|cocinar|preparar|prepara)\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return fallback ? { mode: 'search', value: this.toMealDbTerm(fallback).replace(/_/g, ' ') } : { mode: 'random' };
+  }
+
+  private firstMappedTerm(input: string, map: Record<string, string>): string | null {
+    for (const [term, value] of Object.entries(map)) {
+      if (new RegExp(`\\b${term}\\b`, 'i').test(input)) return value;
+    }
+    return null;
+  }
+
+  private toMealDbTerm(value: string): string {
+    const normalized = this.normalizeText(value).replace(/\s+/g, ' ').trim();
+    return (RECIPE_TERM_MAP[normalized] ?? normalized).replace(/\s+/g, '_');
+  }
+
+  private normalizeText(input: string): string {
+    return input
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[?.,;:!]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private formatRecipe(meal: MealDbMeal): string {
+    const ingredients = this.extractMealIngredients(meal).slice(0, 8);
+    const steps = this.compactRecipeSteps(meal.strInstructions ?? '').slice(0, 4);
+    const meta = [meal.strCategory, meal.strArea].filter(Boolean).join(' / ');
+    const source = meal.strSource || meal.strYoutube || 'TheMealDB';
+
+    return [
+      `Receta: ${meal.strMeal}`,
+      meta ? `Tipo: ${meta}` : null,
+      ingredients.length ? `Ingredientes: ${ingredients.join(', ')}.` : null,
+      steps.length ? ['Pasos:', ...steps.map((step, index) => `${index + 1}. ${step}`)].join('\n') : null,
+      `Fuente: ${source}`,
+    ].filter((line): line is string => Boolean(line)).join('\n\n');
+  }
+
+  private extractMealIngredients(meal: MealDbMeal): string[] {
+    const ingredients: string[] = [];
+    for (let index = 1; index <= 20; index += 1) {
+      const ingredient = (meal[`strIngredient${index}`] ?? '').trim();
+      if (!ingredient) continue;
+      const measure = (meal[`strMeasure${index}`] ?? '').trim();
+      ingredients.push(measure ? `${measure} ${ingredient}` : ingredient);
+    }
+    return ingredients;
+  }
+
+  private compactRecipeSteps(instructions: string): string[] {
+    return instructions
+      .replace(/\r/g, '\n')
+      .split(/\n+|(?<=\.)\s+/)
+      .map((step) => step.replace(/\s+/g, ' ').trim())
+      .filter((step) => step.length > 8)
+      .map((step) => step.length > 220 ? `${step.slice(0, 217).trim()}...` : step);
   }
 
   private humanDate(date: string): string {

@@ -187,6 +187,35 @@ describe('CommunicationService', () => {
     })).rejects.toThrow(ForbiddenException);
   });
 
+  it('sends a helpful Telegram message when the account is not linked yet', async () => {
+    repo.findAccount.mockResolvedValue(null as unknown as typeof account);
+    integrations.getChannelSettings.mockResolvedValue({
+      status: 'active',
+      config: {},
+      secret: 'bot-token',
+      webhookSecret: null,
+    });
+
+    const result = await service.handleTelegramWebhook(ORG, undefined, {
+      update_id: 1,
+      message: {
+        message_id: 10,
+        text: 'HI',
+        chat: { id: 100, type: 'private' },
+        from: { id: 42 },
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: 'telegram_account_not_linked' });
+    expect(tasks.createTask).not.toHaveBeenCalled();
+    // Should still reply with instructions and Telegram ID
+    expect(telegram.sendMessage).toHaveBeenCalledWith(
+      { chat_id: '100' },
+      expect.stringContaining('42'),
+      'bot-token',
+    );
+  });
+
   it('rejects Telegram messages from users outside the allowlist', async () => {
     integrations.getChannelSettings.mockResolvedValue({
       status: 'active',

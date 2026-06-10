@@ -1,0 +1,14 @@
+{
+  "tests": [
+    {
+      "name": "weather is read-only and approval-free",
+      "input": { "tool": "public_api.weather_forecast", "location": "Ciudad de Mexico", "days": 2 },
+      "expect": { "approval_level": 0 }
+    },
+    {
+      "name": "recipe is read-only and approval-free",
+      "input": { "tool": "public_api.recipe_search", "ingredient": "chicken_breast" },
+      "expect": { "approval_level": 0 }
+    }
+  ]
+}

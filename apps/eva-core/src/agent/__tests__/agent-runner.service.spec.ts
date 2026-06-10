@@ -54,6 +54,7 @@ describe('classifyTier', () => {
     expect(classifyTier('¿cuánto cuesta el dólar?').tier).toBe('quick');
     expect(classifyTier('puedes decirme un restaurante de comida argentina rico para ir').tier).toBe('quick');
     expect(classifyTier('crea una imagen de un gato conduciendo').tier).toBe('quick');
+    expect(classifyTier('dame una receta con pollo').tier).toBe('quick');
   });
 
   it('routes current-information requests to quick instead of chat', () => {
@@ -145,9 +146,9 @@ describe('AgentRunnerService', () => {
           useValue: {
             canAnswer: jest.fn().mockReturnValue(true),
             answer: jest.fn().mockResolvedValue({
-              text: 'Consulte Chromium: manana 18-24 °C con lluvia ligera.',
-              tool: 'chromium:wttr.in',
-              sources: ['https://wttr.in/Ciudad%20de%20Mexico?lang=es'],
+              text: 'Resultado encontrado con busqueda web.',
+              tool: 'chromium:duckduckgo',
+              sources: ['https://duckduckgo.com/html/'],
             }),
           },
         },
@@ -331,39 +332,49 @@ describe('AgentRunnerService', () => {
     expect(publishedTypes()).not.toContain('task.result');
   });
 
-  it('runs quick lookups with the search tool instead of answering from the model', async () => {
-    modelRouter.generate.mockResolvedValueOnce({
-      text: JSON.stringify({
-        query: 'pronostico clima hoy Ciudad de Mexico',
-        intent: 'weather',
-        source_hint: 'both',
-        reason: 'Necesita ubicacion y fecha explicitas para la consulta.',
-      }),
-      model: 'gpt-4o-mini',
-      backend: 'openai',
-      usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70 },
+  it('runs weather through public APIs without spending planner tokens', async () => {
+    research.answer.mockResolvedValue({
+      text: 'Pronostico: manana 18-24 °C con lluvia ligera.',
+      tool: 'open-meteo',
+      sources: ['https://api.open-meteo.com/v1/forecast'],
     });
 
     await service.run(ORG, TASK); // "Busca el clima de hoy en CDMX"
 
     const published = events.publish.mock.calls.map(([event]) => event);
     expect(published[0].type).toBe('task.say');
-    expect((published[0].payload as { text: string }).text).toContain('buscar en internet');
+    expect((published[0].payload as { text: string }).text).toContain('API pública');
 
     const logs = publishedLogs();
     expect(logs.some((message) => message.includes('tier=quick'))).toBe(true);
     expect(logs.some((message) => message.includes('intent=fast_path'))).toBe(true);
-    expect(logs.some((message) => message.includes('tool-router'))).toBe(true);
-    expect(logs.some((message) => message.includes('research-plan: query="pronostico clima hoy Ciudad de Mexico"'))).toBe(true);
-    expect(logs.some((message) => message.includes('buscando en internet con Chromium'))).toBe(true);
-    expect(logs.some((message) => message.includes('tool chromium:wttr.in'))).toBe(true);
+    expect(logs.some((message) => message.includes('tool-router: capability "api"'))).toBe(true);
+    expect(logs.some((message) => message.includes('API pública directa'))).toBe(true);
+    expect(logs.some((message) => message.includes('tool open-meteo'))).toBe(true);
+    expect(logs.some((message) => message.includes('research-plan'))).toBe(false);
 
-    expect(research.answer).toHaveBeenCalledWith('pronostico clima hoy Ciudad de Mexico', ORG);
+    expect(research.answer).toHaveBeenCalledWith('Busca el clima de hoy en CDMX', ORG);
+    expect(modelRouter.generate).not.toHaveBeenCalled();
     expect(publishedTypes()).toContain('task.result');
-    expect(modelRouter.generate).toHaveBeenCalledWith('Busca el clima de hoy en CDMX', expect.objectContaining({
-      budget: 'cheap',
-      responseFormat: 'json',
+  });
+
+  it('runs recipe requests through public APIs without planner tokens', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      title: 'Receta',
+      description: 'dame una receta con pollo',
     }));
+    research.answer.mockResolvedValue({
+      text: 'Receta: Chicken Handi',
+      tool: 'themealdb',
+      sources: ['https://www.themealdb.com/api/json/v1/1/filter.php?i=chicken_breast'],
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(research.answer).toHaveBeenCalledWith('dame una receta con pollo', ORG);
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(publishedLogs().some((message) => message.includes('API pública directa'))).toBe(true);
+    expect(publishedTypes()).toContain('task.result');
   });
 
   it('uses freshness guard for short volatile questions that would otherwise be chat', async () => {
@@ -620,11 +631,11 @@ describe('AgentRunnerService', () => {
     expect(research.answer).toHaveBeenCalledWith('OpenAI latest news current status', ORG);
     expect(publishedLogs().some((message) => message.includes('model answer rejected as non-actionable'))).toBe(true);
     expect(publishedLogs().some((message) => message.includes('research-plan: query="OpenAI latest news current status"'))).toBe(true);
-    expect(publishedLogs().some((message) => message.includes('recovery tool chromium:wttr.in'))).toBe(true);
+    expect(publishedLogs().some((message) => message.includes('recovery tool chromium:duckduckgo'))).toBe(true);
     const resultEvent = events.publish.mock.calls
       .map(([event]) => event)
       .find((event) => event.type === 'task.result');
-    expect((resultEvent!.payload as { text: string }).text).toContain('Consulte Chromium');
+    expect((resultEvent!.payload as { text: string }).text).toContain('Resultado encontrado');
   });
 
   it('does not publish the useless model answer when all recovery tools fail', async () => {

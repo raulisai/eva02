@@ -1,0 +1,10 @@
+{
+  "default_level": 0,
+  "rules": [
+    {
+      "match": "public_api\\.",
+      "level": 0,
+      "reason": "read-only public API lookup"
+    }
+  ]
+}

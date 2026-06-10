@@ -1,0 +1,6 @@
+{
+  "read": false,
+  "write": true,
+  "retention": "session",
+  "allowed_types": ["api_preference", "location_hint", "recipe_preference"]
+}

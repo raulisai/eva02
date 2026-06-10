@@ -1,0 +1,7 @@
+{
+  "scopes": ["public_api.read"],
+  "tools": ["public_api.weather_forecast", "public_api.recipe_search"],
+  "network": ["api.open-meteo.com", "geocoding-api.open-meteo.com", "www.themealdb.com"],
+  "secrets": [],
+  "filesystem": []
+}

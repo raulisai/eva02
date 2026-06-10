@@ -41,9 +41,14 @@ const ACK_RULES: Array<{ pattern: RegExp; say: string; hint: string }> = [
     say: 'Revisando tu Drive 📂',
     hint: 'drive',
   },
+  {
+    pattern: /\b(clima|weather|temperatura|pron[oó]stico|lluvia|llover|calor|fr[ií]o|receta|recetas|recipe|recipes|cocina|cocinar|prepara(?:r)?|platillo|ingredientes?)\b/i,
+    say: 'Lo consulto directo en una API pública y te doy solo lo útil.',
+    hint: 'public_api',
+  },
   // Web-search triggers — words that clearly need current internet data
   {
-    pattern: /\b(busca|buscar|búsqueda|search|internet|noticias|news|precio|clima|weather|cotiza|tipo de cambio|reciente|actual|hoy|ma[nñ]ana|ayer|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|fixture|cap[ií]tulo|episodio|anime|manga|estreno|presidente|presidenta|gobernador|gobernadora|alcalde|alcaldesa|ceo|director|directora|titular|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i,
+    pattern: /\b(busca|buscar|búsqueda|search|internet|noticias|news|precio|cotiza|tipo de cambio|reciente|actual|hoy|ma[nñ]ana|ayer|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|fixture|cap[ií]tulo|episodio|anime|manga|estreno|presidente|presidenta|gobernador|gobernadora|alcalde|alcaldesa|ceo|director|directora|titular|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i,
     say: 'Dame un momento, voy a buscar en internet 🔎',
     hint: 'search',
   },
@@ -103,7 +108,8 @@ const USELESS_ANSWER_PATTERNS = [
   /\bno dispongo de informaci[oó]n actualizada\b/i,
 ];
 
-const RESEARCH_REQUIRED_SIGNALS = /\b(busca|buscar|b[uú]squeda|search|internet|noticias|news|precio|cotiza|tipo de cambio|clima|weather|pron[oó]stico|reciente|actual|ahora|hoy|ma[nñ]ana|ayer|en vivo|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|fixture|cap[ií]tulo|episodio|anime|manga|temporada|estreno|release|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i;
+const RESEARCH_REQUIRED_SIGNALS = /\b(busca|buscar|b[uú]squeda|search|internet|noticias|news|precio|cotiza|tipo de cambio|clima|weather|pron[oó]stico|receta|recetas|recipe|recipes|cocina|cocinar|ingredientes?|reciente|actual|ahora|hoy|ma[nñ]ana|ayer|en vivo|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|fixture|cap[ií]tulo|episodio|anime|manga|temporada|estreno|release|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i;
+const PUBLIC_API_DIRECT_SIGNALS = /\b(clima|weather|temperatura|pron[oó]stico|lluvia|llover|calor|fr[ií]o|receta|recetas|recipe|recipes|cocina|cocinar|prepara(?:r)?|platillo|ingredientes?)\b/i;
 
 // Personal-data requests: these must NEVER go to web search — they use their own APIs
 const EMAIL_SIGNALS = /\b(correo|email|mail|mensajes|bandeja|inbox|gmail|outlook|mis mails|mis correos)\b/i;
@@ -412,7 +418,8 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
       // Tool routing (transparent dry-run of what executes this)
       const shouldUseResearch = this.shouldUseResearch(input, routingInput, ack.hint, freshness.required);
-      const capability = shouldUseResearch ? 'search' : 'generate';
+      const directPublicApi = this.shouldUsePublicApiDirect(input, ack.hint);
+      const capability = directPublicApi ? 'api' : shouldUseResearch ? 'search' : 'generate';
       try {
         const route = this.toolRouter.route(capability);
         await this.log(
@@ -425,8 +432,17 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       }
 
       if (shouldUseResearch) {
-        await this.log(orgId, taskId, 'buscando en internet con Chromium… (web-search tool)', 'web');
-        const researchInput = await this.planResearchInput(orgId, taskId, contextualInput);
+        await this.log(
+          orgId,
+          taskId,
+          directPublicApi
+            ? 'consultando API pública directa (sin planificador LLM)'
+            : 'buscando en internet con Chromium… (web-search tool)',
+          directPublicApi ? 'api' : 'web',
+        );
+        const researchInput = directPublicApi
+          ? input
+          : await this.planResearchInput(orgId, taskId, contextualInput);
         const t0 = Date.now();
         const answer = await this.research.answer(researchInput, orgId);
         const elapsed = Date.now() - t0;
@@ -792,7 +808,11 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     // Always check raw input — routingInput may contain prior-turn keywords.
     if (ackHint === 'email' || ackHint === 'calendar' || ackHint === 'drive') return false;
     if (EMAIL_SIGNALS.test(rawInput) || CALENDAR_SIGNALS_PERSONAL.test(rawInput) || DRIVE_SIGNALS.test(rawInput)) return false;
-    return freshnessRequired || ackHint === 'search' || RESEARCH_REQUIRED_SIGNALS.test(routingInput);
+    return freshnessRequired || ackHint === 'search' || ackHint === 'public_api' || RESEARCH_REQUIRED_SIGNALS.test(routingInput);
+  }
+
+  private shouldUsePublicApiDirect(rawInput: string, ackHint: string): boolean {
+    return ackHint === 'public_api' || PUBLIC_API_DIRECT_SIGNALS.test(rawInput);
   }
 
   private needsFreshness(input: string): { required: boolean; reason: string } {
