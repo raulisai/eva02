@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { CapabilityGateModule } from '../capability-gate/capability-gate.module';
 import { DatabaseModule } from '../database/database.module';
 import { EventsModule } from '../events/events.module';
 import { IntegrationsModule } from '../integrations/integrations.module';
@@ -14,7 +15,7 @@ import { SoulContextService } from './soul-context.service';
 
 @Module({
   imports: [
-    DatabaseModule, EventsModule, IntegrationsModule,
+    DatabaseModule, EventsModule, IntegrationsModule, CapabilityGateModule,
     TasksModule, IntentRouterModule, ModelRouterModule, ToolRouterModule,
   ],
   providers: [AgentRunnerService, MediaService, ResearchToolsService, ScriptForgeService, SoulContextService],

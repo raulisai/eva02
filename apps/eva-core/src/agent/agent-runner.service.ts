@@ -1,4 +1,6 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { CapabilityGateService } from '../capability-gate/capability-gate.service';
+import { SetupRequiredPayload } from '../capability-gate/capability-gate.types';
 import { EventBusService } from '../events/event-bus.service';
 import { IntentRouterService } from '../intent-router/intent-router.service';
 import { ModelRouterService } from '../model-router/model-router.service';
@@ -119,6 +121,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly research: ResearchToolsService,
     private readonly forge: ScriptForgeService,
     private readonly soul: SoulContextService,
+    private readonly capabilityGate: CapabilityGateService,
   ) {}
 
   onApplicationBootstrap() {
@@ -184,6 +187,38 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         });
         await this.deliver(orgId, taskId, reply.text, reply.model, Date.now() - t0);
         await this.log(orgId, taskId, `chat answered in ${Date.now() - startedAt}ms`, 'pipeline');
+        return;
+      }
+
+      // ── Capability gate — must run before the ACK so we never promise ──
+      // ── something EVA can't actually do yet. ──────────────────────────
+      const missingReq = await this.capabilityGate.firstMissingRequirement(input, orgId);
+      if (missingReq) {
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        await this.log(
+          orgId, taskId,
+          `capability gate blocked: "${missingReq.capability}" not configured — setup required`,
+          'gate',
+        );
+        const setupPayload: SetupRequiredPayload = {
+          capability: missingReq.capability,
+          setup_type: missingReq.setup_type,
+          setup_label: missingReq.setup_label,
+          message: missingReq.user_message,
+          integrations: missingReq.integrations,
+          setup_meta: missingReq.setup_meta,
+        };
+        await this.events.publish({
+          type: 'task.setup_required',
+          orgId,
+          taskId,
+          payload: setupPayload,
+        });
+        await this.say(orgId, taskId, missingReq.ack_message);
+        await this.tasks.transition(taskId, orgId, 'waiting_for_approval', {
+          result: { text: missingReq.user_message, model: 'capability-gate' },
+        });
         return;
       }
 

@@ -13,7 +13,8 @@ export type EvaEventType =
   | 'task.log'      // transparent step-by-step action log
   | 'task.result'   // final answer text
   | 'task.media'    // media attachment uploaded to storage (image/audio)
-  | 'task.form_request' // server-driven form request for missing information
+  | 'task.form_request'    // server-driven form request for missing information
+  | 'task.setup_required' // capability gate: integration not configured, setup instructions sent
   | 'approval.requested'
   | 'approval.resolved'
   | 'dev.task.created'

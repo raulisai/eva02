@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { CapabilityGateService } from '../../capability-gate/capability-gate.service';
 import { EventBusService } from '../../events/event-bus.service';
 import { IntentRouterService } from '../../intent-router/intent-router.service';
 import { ModelRouterService } from '../../model-router/model-router.service';
@@ -164,6 +165,12 @@ describe('AgentRunnerService', () => {
             getAgentContext: jest.fn().mockResolvedValue({ personal_profile: {}, cowork_context: {} }),
             resolveCurrentLocation: jest.fn().mockResolvedValue(null),
           },
+        },
+        {
+          // By default the gate passes everything through — individual tests
+          // that need blocking behaviour can override this mock.
+          provide: CapabilityGateService,
+          useValue: { firstMissingRequirement: jest.fn().mockResolvedValue(null) },
         },
       ],
     }).compile();
