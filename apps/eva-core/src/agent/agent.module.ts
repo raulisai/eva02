@@ -13,6 +13,7 @@ import { AgentRunnerService } from './agent-runner.service';
 import { ConversationDigesterService } from './conversation-digester.service';
 import { GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
+import { GoogleDriveService } from './google-drive.service';
 import { MediaService } from './media.service';
 import { MemoryRecallService } from './memory-recall.service';
 import { ResearchToolsService } from './research-tools.service';
@@ -34,6 +35,7 @@ import { SoulContextService } from './soul-context.service';
     SoulContextService,
     GmailService,
     GoogleCalendarService,
+    GoogleDriveService,
     ScheduleService,
     BehaviorPatternService,
     MemoryRecallService,
@@ -45,6 +47,7 @@ import { SoulContextService } from './soul-context.service';
     SoulContextService,
     GmailService,
     GoogleCalendarService,
+    GoogleDriveService,
     ScheduleService,
     BehaviorPatternService,
   ],

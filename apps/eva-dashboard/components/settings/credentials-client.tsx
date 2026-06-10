@@ -69,7 +69,11 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
   const [integrations, setIntegrations] = useState(initialIntegrations);
   const [busy, setBusy] = useState<string | null>(null);
   const [google, setGoogle] = useState({ client_id: '', client_secret: '', refresh_token: '' });
-  const [googleAccount, setGoogleAccount] = useState<{ email: string; scopes: string[] } | null>(null);
+  const [googleAccount, setGoogleAccount] = useState<{
+    email: string;
+    scopes: string[];
+    services: { gmail: { ok: boolean; error?: string }; calendar: { ok: boolean; error?: string }; drive: { ok: boolean; error?: string } };
+  } | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
   const googleIntegration = integrations.find((integration) => integration.provider === 'google');
@@ -107,16 +111,48 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
   async function testGoogle() {
     setBusy('google-test');
     try {
-      const result = await coreFetch<{ ok: boolean; email?: string; scopes?: string[]; error?: string }>(
-        '/integrations/credential/google/test',
-        { method: 'POST' },
-      );
-      if (result.ok && result.email) {
-        setGoogleAccount({ email: result.email, scopes: result.scopes ?? [] });
-        toast(`Google conectado: ${result.email}`, 'success');
+      const result = await coreFetch<{
+        ok: boolean;
+        email?: string;
+        scopes: string[];
+        services?: { gmail: { ok: boolean; error?: string }; calendar: { ok: boolean; error?: string }; drive: { ok: boolean; error?: string } };
+        error?: string;
+      }>('/integrations/credential/google/test/full', { method: 'POST' });
+
+      if (!result.ok && result.error && !result.services) {
+        // Token exchange failed entirely (expired, bad credentials)
+        setGoogleAccount(null);
+        toast(`Error de credencial: ${result.error}`, 'error');
+        return;
+      }
+
+      const services = result.services ?? { gmail: { ok: false }, calendar: { ok: false }, drive: { ok: false } };
+
+      if (result.email) {
+        setGoogleAccount({ email: result.email, scopes: result.scopes ?? [], services });
       } else {
         setGoogleAccount(null);
-        toast(result.error ?? 'Google rejected the credential', 'error');
+      }
+
+      if (result.ok) {
+        toast(`Google conectado: ${result.email} — Gmail ✓ Calendar ✓ Drive ✓`, 'success');
+        return;
+      }
+
+      // Partial: at least one service worked — report which ones failed
+      const failing = (
+        [
+          !services.gmail.ok    && `Gmail: ${services.gmail.error ?? 'sin acceso'}`,
+          !services.calendar.ok && `Calendar: ${services.calendar.error ?? 'sin acceso'}`,
+          !services.drive.ok    && `Drive: ${services.drive.error ?? 'sin acceso'}`,
+        ] as (string | false)[]
+      ).filter(Boolean) as string[];
+
+      if (failing.length > 0) {
+        toast(`Acceso parcial — faltan permisos:\n${failing.join('\n')}`, 'error');
+      } else {
+        // services all ok but ok=false (shouldn't happen, but be safe)
+        toast(result.error ?? 'Google: respuesta inesperada', 'error');
       }
     } catch (error) {
       toast((error as Error).message, 'error');
@@ -223,10 +259,36 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
           </div>
 
           {googleAccount && (
-            <div className="border border-emerald-500/40 bg-emerald-500/5 rounded-sm p-3 space-y-1 animate-slide-up">
+            <div className="border border-emerald-500/40 bg-emerald-500/5 rounded-sm p-3 space-y-2 animate-slide-up">
               <p className="text-xs font-mono text-emerald-400">Conectado como {googleAccount.email}</p>
-              <p className="text-[10px] font-mono text-zinc-500 break-all">
-                scopes: {googleAccount.scopes.map((scope) => scope.split('/').pop()).join(', ') || '—'}
+              <div className="flex flex-wrap gap-1.5">
+                {([
+                  { key: 'gmail',    label: 'Gmail',    icon: Mail },
+                  { key: 'calendar', label: 'Calendar', icon: Calendar },
+                  { key: 'drive',    label: 'Drive',    icon: HardDrive },
+                ] as const).map(({ key, label, icon: Icon }) => {
+                  const svc = googleAccount.services[key];
+                  return (
+                    <span
+                      key={key}
+                      title={svc.ok ? `${label}: acceso confirmado` : `${label}: ${svc.error ?? 'sin acceso'}`}
+                      className={`flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-sm border font-mono ${
+                        svc.ok
+                          ? 'border-emerald-500/40 text-emerald-400'
+                          : 'border-red-500/40 text-red-400'
+                      }`}
+                    >
+                      <Icon className="w-3 h-3" />
+                      {label} {svc.ok ? '✓' : '✗'}
+                      {!svc.ok && svc.error && (
+                        <span className="text-zinc-500 normal-case"> — {svc.error.slice(0, 40)}</span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] font-mono text-zinc-600 break-all">
+                scopes: {googleAccount.scopes.map((s) => s.split('/').pop()).join(', ') || '—'}
               </p>
             </div>
           )}
@@ -242,7 +304,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
             </Button>
             <Button size="sm" variant="outline" onClick={testGoogle} disabled={busy !== null || !googleIntegration}>
               {busy === 'google-test' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PlugZap className="w-3.5 h-3.5" />}
-              Test — read my Gmail profile
+              Test Gmail · Calendar · Drive
             </Button>
             {googleIntegration && (
               <Button size="sm" variant="destructive" onClick={() => remove('google')} disabled={busy !== null}>

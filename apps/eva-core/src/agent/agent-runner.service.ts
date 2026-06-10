@@ -9,7 +9,8 @@ import { ToolRouterService } from '../tool-router/tool-router.service';
 import { TasksService } from '../tasks/tasks.service';
 import { Task } from '../tasks/task.types';
 import { ConversationDigesterService } from './conversation-digester.service';
-import { GmailService } from './gmail.service';
+import { DriveFetchResult, GoogleDriveService } from './google-drive.service';
+import { GmailFetchResult, GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
 import { MediaService } from './media.service';
 import { MemoryRecallService } from './memory-recall.service';
@@ -34,6 +35,11 @@ const ACK_RULES: Array<{ pattern: RegExp; say: string; hint: string }> = [
     pattern: /\b(calendario|agenda|mis citas|mis eventos|google calendar|pr[oó]ximas? citas?)\b/i,
     say: 'Revisando tu agenda 📅',
     hint: 'calendar',
+  },
+  {
+    pattern: /\b(drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|mis sheets|archivos? (grandes?|pesados?))\b/i,
+    say: 'Revisando tu Drive 📂',
+    hint: 'drive',
   },
   // Web-search triggers — words that clearly need current internet data
   {
@@ -102,6 +108,7 @@ const RESEARCH_REQUIRED_SIGNALS = /\b(busca|buscar|b[uú]squeda|search|internet|
 // Personal-data requests: these must NEVER go to web search — they use their own APIs
 const EMAIL_SIGNALS = /\b(correo|email|mail|mensajes|bandeja|inbox|gmail|outlook|mis mails|mis correos)\b/i;
 const CALENDAR_SIGNALS_PERSONAL = /\b(mi(s)? (citas?|eventos?|agenda|calendario)|qu[eé] tengo|tengo algo|tengo una cita)\b/i;
+const DRIVE_SIGNALS = /\b(drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|mis hojas|mis sheets|archivos? (grandes?|pesados?|de google)|carpeta(s)? (de google|en drive)|qu[eé] (archivos?|carpetas?|docs?) tengo)\b/i;
 
 const FRESHNESS_REQUIRED_SIGNALS = [
   /\b(qui[eé]n\s+es|quien\s+es)\s+(el|la)?\s*(presidente|presidenta|gobernador|gobernadora|alcalde|alcaldesa|ceo|director|directora|titular|jefe|jefa)\b/i,
@@ -150,6 +157,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly memoryRecall: MemoryRecallService,
     private readonly digester: ConversationDigesterService,
     private readonly gmail: GmailService,
+    private readonly drive: GoogleDriveService,
   ) {}
 
   onApplicationBootstrap() {
@@ -205,8 +213,11 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       proactiveTriggers.map(t => t.message), recallResult.context,
     );
     const startedAt = Date.now();
-    const freshness = this.needsFreshness(routingInput);
-    const tier = this.applyFreshnessToTier(classifyTier(routingInput), freshness);
+    // Always classify tier and freshness from raw input — routingInput includes
+    // conversation history which can make short drive/email requests appear as
+    // tier='long' (length > 280) and produce wrong ACKs/routing.
+    const freshness = this.needsFreshness(input);
+    const tier = this.applyFreshnessToTier(classifyTier(input), freshness);
     const wantsImage = this.media.wantsImage(input);
     const pureImageRequest = wantsImage && this.isPureImageRequest(input);
 
@@ -275,9 +286,11 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
       // ── Tier: quick (<1 min) — short "espera" + do it ──
       // ── Tier: long (>1 min) — background notice, chat stays free ──
+      // Always pick ack from raw input — routingInput includes conversation history
+      // which can contaminate the hint (e.g., prior "correo" turn misfiring as email).
       const ack = tier.tier === 'long'
         ? { say: LONG_TASK_ACK, hint: 'background' }
-        : this.pickAck(routingInput);
+        : this.pickAck(input);
       await this.say(orgId, taskId, ack.say);
       await this.log(
         orgId, taskId,
@@ -320,21 +333,46 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       }
 
       // ── Email fast-path — use Gmail API when configured ───────────────────
-      if (ack.hint === 'email' || EMAIL_SIGNALS.test(routingInput)) {
+      // NOTE: always test raw `input`, never routingInput — routingInput
+      // includes conversation history that may contain "correo" from prior turns.
+      if (ack.hint === 'email' || EMAIL_SIGNALS.test(input)) {
         await this.log(orgId, taskId, 'email request — querying Gmail API', 'tools');
-        const emailText = await this.gmail.formatLatestForResponse(orgId);
-        if (emailText) {
-          await this.deliver(orgId, taskId, emailText, 'gmail-api', 0);
+
+        const searchQuery = this.extractEmailSearch(input);
+        let gmailResult: GmailFetchResult;
+
+        if (searchQuery) {
+          await this.log(orgId, taskId, `Gmail search: "${searchQuery}"`, 'tools');
+          gmailResult = await this.gmail.fetchSearch(orgId, searchQuery);
+          // Empty search result → clear message, don't fall to model
+          if (!gmailResult.ok && gmailResult.reason === 'empty') {
+            const sender = searchQuery.startsWith('from:') ? searchQuery.replace('from:', '') : searchQuery;
+            const notFound = `📬 No encontré correos de _${sender}_ en tu bandeja. Verifica que el nombre coincida exactamente con el remitente que aparece en Gmail.`;
+            await this.deliver(orgId, taskId, notFound, 'gmail-api', 0);
+            await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+            return;
+          }
+        } else {
+          gmailResult = await this.gmail.fetchLatest(orgId);
+        }
+
+        if (gmailResult.ok) {
+          await this.deliver(orgId, taskId, gmailResult.text, 'gmail-api', 0);
           await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
-          this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: emailText, conversationContext });
+          this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: gmailResult.text, conversationContext });
           return;
         }
-        // Gmail returned nothing — fall through to model (will explain gracefully)
-        await this.log(orgId, taskId, 'Gmail returned empty — falling to model', 'tools');
+
+        // Always answer directly — never fall to model or recovery for email
+        const reply = this.gmailErrorMessage(gmailResult.reason, gmailResult.error);
+        await this.log(orgId, taskId, `Gmail: ${gmailResult.reason} — ${gmailResult.error ?? 'no detail'}`, 'tools');
+        await this.deliver(orgId, taskId, reply, 'gmail-api', 0);
+        await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+        return;
       }
 
       // ── Calendar fast-path — use local schedule + GCal when configured ────
-      if (ack.hint === 'calendar' || CALENDAR_SIGNALS_PERSONAL.test(routingInput)) {
+      if (ack.hint === 'calendar' || CALENDAR_SIGNALS_PERSONAL.test(input)) {
         await this.log(orgId, taskId, 'calendar request — querying local schedule + Google Calendar', 'tools');
         const [localBlock, gcalBlock] = await Promise.all([
           this.schedule.formatUpcomingForSoul(orgId, 7).catch(() => null),
@@ -351,8 +389,29 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         await this.log(orgId, taskId, 'No calendar events found — falling to model', 'tools');
       }
 
+      // ── Drive fast-path — use Drive API when configured ───────────────────
+      // NOTE: always test raw `input`, never routingInput — history contamination.
+      if (ack.hint === 'drive' || DRIVE_SIGNALS.test(input)) {
+        await this.log(orgId, taskId, 'drive request — querying Google Drive API', 'tools');
+        const driveResult = await this.drive.fetchForQuery(orgId, input);
+
+        if (driveResult.ok) {
+          await this.deliver(orgId, taskId, driveResult.text, 'drive-api', 0);
+          await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+          this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: driveResult.text, conversationContext });
+          return;
+        }
+
+        // Always answer directly — never fall to model or recovery for Drive requests
+        const reply = this.driveErrorMessage(driveResult.reason, driveResult.error);
+        await this.log(orgId, taskId, `Drive: ${driveResult.reason} — ${driveResult.error ?? 'no detail'}`, 'tools');
+        await this.deliver(orgId, taskId, reply, 'drive-api', 0);
+        await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+        return;
+      }
+
       // Tool routing (transparent dry-run of what executes this)
-      const shouldUseResearch = this.shouldUseResearch(routingInput, ack.hint, freshness.required);
+      const shouldUseResearch = this.shouldUseResearch(input, routingInput, ack.hint, freshness.required);
       const capability = shouldUseResearch ? 'search' : 'generate';
       try {
         const route = this.toolRouter.route(capability);
@@ -400,7 +459,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       if (this.isUselessAnswer(result.text) || staleReason) {
         const reason = staleReason ?? 'non-actionable';
         await this.log(orgId, taskId, `model answer rejected as ${reason}; trying project tools`, 'model');
-        const recovered = await this.recoverWithTools(orgId, taskId, contextualInput, startedAt);
+        const recovered = await this.recoverWithTools(orgId, taskId, contextualInput, startedAt, input);
         if (recovered) return;
       }
 
@@ -656,11 +715,84 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     return this.formatEnrichedSoulContext(context, null, null);
   }
 
-  private shouldUseResearch(input: string, ackHint: string, freshnessRequired = false): boolean {
-    // Personal-data requests must never fall to web search — they use their own APIs.
-    if (ackHint === 'email' || ackHint === 'calendar') return false;
-    if (EMAIL_SIGNALS.test(input) || CALENDAR_SIGNALS_PERSONAL.test(input)) return false;
-    return freshnessRequired || ackHint === 'search' || RESEARCH_REQUIRED_SIGNALS.test(input);
+  private gmailErrorMessage(reason: 'no_credential' | 'token_error' | 'api_error' | 'empty', error?: string): string {
+    if (reason === 'no_credential') {
+      return '📬 No tienes Gmail configurado. Ve a **Integraciones → Google** y guarda tu Client ID, Client Secret y Refresh Token para que pueda leer tu bandeja.';
+    }
+    if (reason === 'token_error') {
+      const detail = error ? ` (${error})` : '';
+      return `📬 No pude obtener acceso a Gmail${detail}. Verifica que tu Refresh Token siga siendo válido en **Integraciones → Google → Test Gmail · Calendar · Drive**. Si expiró, regenera el token en Google OAuth Playground.`;
+    }
+    if (reason === 'api_error') {
+      const detail = error ? `: ${error}` : '';
+      return `📬 Gmail respondió con un error${detail}. Puede ser un problema de permisos — asegúrate de que el scope \`gmail.readonly\` esté incluido en tu autorización.`;
+    }
+    // empty
+    return '📬 Tu bandeja de entrada está vacía en este momento.';
+  }
+
+  private driveErrorMessage(reason: 'no_credential' | 'token_error' | 'api_error', error?: string): string {
+    if (reason === 'no_credential') {
+      return '📂 No tienes Google Drive configurado. Ve a **Integraciones → Google** y guarda tu Client ID, Client Secret y Refresh Token para que pueda acceder a tus archivos.';
+    }
+    if (reason === 'token_error') {
+      const detail = error ? ` (${error})` : '';
+      return `📂 No pude obtener acceso a Google Drive${detail}. Verifica que tu Refresh Token siga siendo válido en **Integraciones → Google → Test Gmail · Calendar · Drive**. Si expiró, regenera el token en Google OAuth Playground.`;
+    }
+    // api_error
+    const detail = error ? `: ${error}` : '';
+    return `📂 Google Drive respondió con un error${detail}. Puede ser un problema de permisos — asegúrate de que el scope \`drive.readonly\` esté incluido en tu autorización.`;
+  }
+
+  /**
+   * Extracts a Gmail search query from natural-language input.
+   * Returns a Gmail search string (e.g. "from:santander") or null for generic inbox requests.
+   *
+   * Supported patterns:
+   *   - "que me envió/mandó [sender]" → from:[sender]
+   *   - "enviado/mandado por [sender]" → from:[sender]
+   *   - "correo de [sender]" → from:[sender]
+   *   - "con asunto [topic]"  → subject:[topic]
+   *   - "sobre [topic]"       → [topic]  (free-text search)
+   */
+  private extractEmailSearch(query: string): string | null {
+    // Sender: "que me envio/mandó/escribió [sender]"
+    let m = query.match(/(?:que me (?:envi[oó]|mand[oó]|escribi[oó]|contact[oó]))\s+([^?,.\n]{2,40}?)(?:\?|$|[,.])/i);
+    if (m) return `from:${m[1].trim()}`;
+
+    // Sender: "enviado/mandado/escrito por [sender]"
+    m = query.match(/(?:enviado|mandado|escrito)\s+(?:por|de|from)\s+([^?,.\n]{2,40}?)(?:\?|$|[,.])/i);
+    if (m) return `from:${m[1].trim()}`;
+
+    // Sender: "correo(s) de/del [sender]" but NOT "correo de hoy/ayer" etc.
+    m = query.match(/\bcorreo[s]?\s+(?:de|del)\s+([a-záéíóúüñA-ZÁÉÍÓÚÜÑ][\w\s.-]{1,30}?)(?:\?|$|[,.]|\s+que|\s+con|\s+sobre)/i);
+    if (m && !/\b(hoy|ayer|semana|mes|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b/i.test(m[1])) {
+      return `from:${m[1].trim()}`;
+    }
+
+    // Subject: "con asunto [topic]"
+    m = query.match(/(?:con asunto|asunto)\s+([^?,.\n]{2,40}?)(?:\?|$|[,.])/i);
+    if (m) return `subject:${m[1].trim()}`;
+
+    // Free-text: "sobre [topic]" (skip if topic is generic email words)
+    m = query.match(/\bsobre\s+([^?,.\n]{3,40}?)(?:\?|$|[,.])/i);
+    if (m) {
+      const topic = m[1].trim();
+      if (!/\b(correo|email|mail|inbox|bandeja|mis|el|la|los|las)\b/i.test(topic)) {
+        return topic;
+      }
+    }
+
+    return null;
+  }
+
+  // rawInput = user's current message only; routingInput may include conversation history
+  private shouldUseResearch(rawInput: string, routingInput: string, ackHint: string, freshnessRequired = false): boolean {
+    // Personal-data requests must never fall to web search.
+    // Always check raw input — routingInput may contain prior-turn keywords.
+    if (ackHint === 'email' || ackHint === 'calendar' || ackHint === 'drive') return false;
+    if (EMAIL_SIGNALS.test(rawInput) || CALENDAR_SIGNALS_PERSONAL.test(rawInput) || DRIVE_SIGNALS.test(rawInput)) return false;
+    return freshnessRequired || ackHint === 'search' || RESEARCH_REQUIRED_SIGNALS.test(routingInput);
   }
 
   private needsFreshness(input: string): { required: boolean; reason: string } {
@@ -762,8 +894,16 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     );
   }
 
-  private async recoverWithTools(orgId: string, taskId: string, input: string, startedAt: number): Promise<boolean> {
+  // rawInput = current user message; input here may be the full contextualInput
+  private async recoverWithTools(orgId: string, taskId: string, input: string, startedAt: number, rawInput?: string): Promise<boolean> {
     const errors: string[] = [];
+    const guard = rawInput ?? input;
+
+    // Personal-data requests must never fall to web-search recovery.
+    if (EMAIL_SIGNALS.test(guard) || CALENDAR_SIGNALS_PERSONAL.test(guard) || DRIVE_SIGNALS.test(guard)) {
+      await this.log(orgId, taskId, 'recovery skipped: personal-data request — no web search fallback', 'tools');
+      return false;
+    }
 
     if (this.forge.isScriptTask(input)) {
       try {

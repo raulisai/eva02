@@ -46,4 +46,35 @@ export class TelegramAdapter {
     const body = (await response.json()) as { result?: { message_id?: number } };
     return { ok: true, externalMessageId: body.result?.message_id ? String(body.result.message_id) : null };
   }
+
+  async sendPhoto(
+    target: Record<string, unknown>,
+    photoUrl: string,
+    caption: string,
+    token?: string | null,
+  ): Promise<ChannelSendResult> {
+    const chatId = String(target['chat_id'] ?? '');
+    if (!chatId) return { ok: false, error: 'Missing Telegram chat_id' };
+
+    const botToken = token ?? this.envToken;
+    if (!botToken) return { ok: true, skipped: true, externalMessageId: null };
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        photo: photoUrl,
+        caption: caption.slice(0, 1024),
+        parse_mode: 'Markdown',
+      }),
+    });
+
+    if (!response.ok) {
+      return { ok: false, error: await response.text() };
+    }
+
+    const body = (await response.json()) as { result?: { message_id?: number } };
+    return { ok: true, externalMessageId: body.result?.message_id ? String(body.result.message_id) : null };
+  }
 }

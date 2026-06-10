@@ -1,6 +1,6 @@
 import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { EventBusService } from '../../events/event-bus.service';
+import { EvaEvent, EventBusService } from '../../events/event-bus.service';
 import { IntegrationsService } from '../../integrations/integrations.service';
 import { TasksService } from '../../tasks/tasks.service';
 import { CommunicationRepository } from '../communication.repository';
@@ -35,6 +35,26 @@ const conversation: Conversation = {
   user_id: USER,
   status: 'open',
   metadata: {},
+  created_at: now,
+  updated_at: now,
+};
+
+const telegramTask = {
+  id: TASK,
+  org_id: ORG,
+  title: 'Comprar leche',
+  description: 'Comprar leche',
+  status: 'completed' as const,
+  metadata: {
+    source: 'telegram',
+    external_chat_id: '100',
+    conversation_id: CONV,
+  },
+  result: null,
+  error: null,
+  created_by: USER,
+  started_at: null,
+  completed_at: null,
   created_at: now,
   updated_at: now,
 };
@@ -93,17 +113,22 @@ describe('CommunicationService', () => {
           provide: TasksService,
           useValue: {
             createTask: jest.fn().mockResolvedValue({ id: TASK, title: 'Comprar leche' }),
+            getTask: jest.fn().mockResolvedValue(telegramTask),
           } satisfies Partial<TasksService>,
         },
         {
           provide: EventBusService,
-          useValue: { publish: jest.fn().mockResolvedValue('0-1') } satisfies Partial<EventBusService>,
+          useValue: {
+            publish: jest.fn().mockResolvedValue('0-1'),
+            on: jest.fn(),
+          } satisfies Partial<EventBusService>,
         },
         {
           provide: TelegramAdapter,
           useValue: {
             verifyWebhookSecret: jest.fn().mockReturnValue(true),
             sendMessage: jest.fn().mockResolvedValue({ ok: true, externalMessageId: '200' }),
+            sendPhoto: jest.fn().mockResolvedValue({ ok: true, externalMessageId: '201' }),
           } satisfies Partial<TelegramAdapter>,
         },
         {
@@ -144,7 +169,7 @@ describe('CommunicationService', () => {
       title: 'Comprar leche',
       metadata: expect.objectContaining({ source: 'telegram', conversation_id: CONV }),
     }), USER, ORG);
-    expect(telegram.sendMessage).toHaveBeenCalledWith({ chat_id: '100' }, expect.stringContaining('Tarea creada'), undefined);
+    expect(telegram.sendMessage).toHaveBeenCalledWith({ chat_id: '100' }, expect.stringContaining('Recibido'), undefined);
     expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({ type: 'communication.message.received', orgId: ORG }));
   });
 
@@ -246,5 +271,153 @@ describe('CommunicationService', () => {
       direction: 'outbound',
       externalMessageId: '200',
     }));
+  });
+
+  describe('onApplicationBootstrap — Telegram response delivery', () => {
+    let resultHandler: (event: EvaEvent) => Promise<void>;
+    let mediaHandler: (event: EvaEvent) => Promise<void>;
+
+    beforeEach(() => {
+      service.onApplicationBootstrap();
+      const calls = (events.on as jest.Mock).mock.calls as [string, (e: EvaEvent) => Promise<void>][];
+      resultHandler = calls.find(([type]) => type === 'task.result')![1];
+      mediaHandler = calls.find(([type]) => type === 'task.media')![1];
+    });
+
+    it('forwards task.result text to Telegram when task source is telegram', async () => {
+      integrations.getChannelSettings.mockResolvedValue({
+        status: 'active',
+        config: {},
+        secret: 'bot-token',
+        webhookSecret: 'secret',
+      });
+
+      await resultHandler({
+        type: 'task.result',
+        orgId: ORG,
+        taskId: TASK,
+        payload: { text: 'Tu bandeja tiene 5 correos', model: 'gpt-4o', latency_ms: 400 },
+        ts: Date.now(),
+      });
+
+      expect(tasks.getTask).toHaveBeenCalledWith(TASK, ORG);
+      expect(telegram.sendMessage).toHaveBeenCalledWith(
+        { chat_id: '100' },
+        'Tu bandeja tiene 5 correos',
+        'bot-token',
+      );
+    });
+
+    it('skips task.result forwarding when model is media:image (photo delivered separately)', async () => {
+      integrations.getChannelSettings.mockResolvedValue({
+        status: 'active',
+        config: {},
+        secret: 'bot-token',
+        webhookSecret: 'secret',
+      });
+
+      await resultHandler({
+        type: 'task.result',
+        orgId: ORG,
+        taskId: TASK,
+        payload: { text: 'Listo, generé la imagen: https://example.com/img.png', model: 'media:image', latency_ms: 800 },
+        ts: Date.now(),
+      });
+
+      expect(telegram.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('skips delivery when task source is not telegram', async () => {
+      tasks.getTask.mockResolvedValue({
+        ...telegramTask,
+        metadata: { source: 'browser' },
+      });
+
+      await resultHandler({
+        type: 'task.result',
+        orgId: ORG,
+        taskId: TASK,
+        payload: { text: 'Respuesta web', model: 'gpt-4o', latency_ms: 200 },
+        ts: Date.now(),
+      });
+
+      expect(telegram.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('skips delivery when Telegram channel is disabled', async () => {
+      integrations.getChannelSettings.mockResolvedValue({
+        status: 'disabled',
+        config: {},
+        secret: 'bot-token',
+        webhookSecret: null,
+      });
+
+      await resultHandler({
+        type: 'task.result',
+        orgId: ORG,
+        taskId: TASK,
+        payload: { text: 'Respuesta', model: 'gpt-4o', latency_ms: 200 },
+        ts: Date.now(),
+      });
+
+      expect(telegram.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('forwards task.media images to Telegram as photos', async () => {
+      integrations.getChannelSettings.mockResolvedValue({
+        status: 'active',
+        config: {},
+        secret: 'bot-token',
+        webhookSecret: 'secret',
+      });
+
+      await mediaHandler({
+        type: 'task.media',
+        orgId: ORG,
+        taskId: TASK,
+        payload: { kind: 'image', url: 'https://storage.example.com/img.png', content_type: 'image/png' },
+        ts: Date.now(),
+      });
+
+      expect(tasks.getTask).toHaveBeenCalledWith(TASK, ORG);
+      expect(telegram.sendPhoto).toHaveBeenCalledWith(
+        { chat_id: '100' },
+        'https://storage.example.com/img.png',
+        expect.any(String),
+        'bot-token',
+      );
+    });
+
+    it('ignores task.media events with kind != image', async () => {
+      await mediaHandler({
+        type: 'task.media',
+        orgId: ORG,
+        taskId: TASK,
+        payload: { kind: 'audio', url: 'https://storage.example.com/audio.mp3', content_type: 'audio/mpeg' },
+        ts: Date.now(),
+      });
+
+      expect(telegram.sendPhoto).not.toHaveBeenCalled();
+      expect(telegram.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not throw when task.result handler encounters a missing task', async () => {
+      tasks.getTask.mockRejectedValue(new Error('not found'));
+
+      await expect(resultHandler({
+        type: 'task.result',
+        orgId: ORG,
+        taskId: TASK,
+        payload: { text: 'Respuesta', model: 'gpt-4o', latency_ms: 200 },
+        ts: Date.now(),
+      })).resolves.not.toThrow();
+    });
+
+    it('registers both task.result and task.media handlers on bootstrap', () => {
+      const calls = (events.on as jest.Mock).mock.calls as [string, unknown][];
+      const types = calls.map(([type]) => type);
+      expect(types).toContain('task.result');
+      expect(types).toContain('task.media');
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BehaviorPatternService } from '../behavior-pattern.service';
 import { GmailService } from '../gmail.service';
+import { GoogleDriveService } from '../google-drive.service';
 import { CapabilityGateService } from '../../capability-gate/capability-gate.service';
 import { EventBusService } from '../../events/event-bus.service';
 import { IntentRouterService } from '../../intent-router/intent-router.service';
@@ -205,8 +206,16 @@ describe('AgentRunnerService', () => {
         {
           provide: GmailService,
           useValue: {
+            fetchLatest: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
+            fetchSearch: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
             formatLatestForResponse: jest.fn().mockResolvedValue(null),
             isConnected: jest.fn().mockResolvedValue(false),
+          },
+        },
+        {
+          provide: GoogleDriveService,
+          useValue: {
+            fetchForQuery: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
           },
         },
       ],
@@ -701,18 +710,14 @@ describe('AgentRunnerService', () => {
   it('routes email requests to Gmail API — never to web search', async () => {
     tasks.getTask.mockResolvedValue(makeTask({ description: 'puedes ver mi ultimo correo electrónico' }));
     const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
-    gmail.formatLatestForResponse.mockResolvedValue('📬 Últimos 3 correos en tu bandeja:\n\n1. **Factura digital** ...');
+    gmail.fetchLatest.mockResolvedValue({ ok: true, text: '📬 Últimos 3 correos en tu bandeja:\n\n1. **Factura digital** ...' });
 
     await service.run(ORG, TASK);
 
-    // Must have called Gmail, never called web-search
-    expect(gmail.formatLatestForResponse).toHaveBeenCalledWith(ORG);
+    expect(gmail.fetchLatest).toHaveBeenCalledWith(ORG);
     expect(research.answer).not.toHaveBeenCalled();
 
-    // Result should contain the email listing, not search results
-    const result = events.publish.mock.calls
-      .map(([e]) => e)
-      .find(e => e.type === 'task.result');
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
     expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('bandeja') }));
   });
 
@@ -727,16 +732,125 @@ describe('AgentRunnerService', () => {
     expect(research.answer).not.toHaveBeenCalled();
   });
 
-  it('falls back to model when Gmail returns nothing (not configured or empty)', async () => {
+  it('delivers a clear error message when Gmail token is expired — never web search', async () => {
     tasks.getTask.mockResolvedValue(makeTask({ description: 'revisa mi correo' }));
     const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
-    gmail.formatLatestForResponse.mockResolvedValue(null);
+    gmail.fetchLatest.mockResolvedValue({ ok: false, reason: 'token_error', error: 'Token has been expired or revoked.' });
 
     await service.run(ORG, TASK);
 
-    // Should still complete via model, never via web-search
-    expect(gmail.formatLatestForResponse).toHaveBeenCalled();
+    // Never web-searched
     expect(research.answer).not.toHaveBeenCalled();
+    // Delivered a message explaining the token problem
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('Refresh Token') }));
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
+  });
+
+  it('delivers a setup prompt when Gmail is not configured — never web search', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'puedes ver mi correo' }));
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+    gmail.fetchLatest.mockResolvedValue({ ok: false, reason: 'no_credential' });
+
+    await service.run(ORG, TASK);
+
+    expect(research.answer).not.toHaveBeenCalled();
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('Integraciones') }));
+  });
+
+  it('routes sender-specific email search to Gmail search API', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'puedes buscar el ultimo correo que me envio santander?' }));
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+    gmail.fetchSearch.mockResolvedValue({ ok: true, text: '📬 Resultados para _from:santander_:\n\n1. **Tu estado de cuenta**' });
+
+    await service.run(ORG, TASK);
+
+    expect(gmail.fetchSearch).toHaveBeenCalledWith(ORG, 'from:santander');
+    expect(gmail.fetchLatest).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
+
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('santander') }));
+  });
+
+  it('delivers a clear "not found" message when Gmail search returns no results', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'busca correo de santander' }));
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+    gmail.fetchSearch.mockResolvedValue({ ok: false, reason: 'empty' });
+
+    await service.run(ORG, TASK);
+
+    expect(research.answer).not.toHaveBeenCalled();
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('No encontré') }));
+  });
+
+  it('routes Drive requests to Drive API — never to web search or Gmail', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'que archivos tengo en drive muy pesados' }));
+    const driveService = module.get(GoogleDriveService) as jest.Mocked<GoogleDriveService>;
+    driveService.fetchForQuery.mockResolvedValue({ ok: true, text: '📂 Archivos más pesados en tu Drive:\n\n1. **video.mp4** — 2.3 GB' });
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+
+    await service.run(ORG, TASK);
+
+    expect(driveService.fetchForQuery).toHaveBeenCalledWith(ORG, 'que archivos tengo en drive muy pesados');
+    expect(gmail.fetchLatest).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
+
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('Drive') }));
+  });
+
+  it('routes folder listing to Drive API — never to Gmail or web search', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'que carpetas tengo en drive?' }));
+    const driveService = module.get(GoogleDriveService) as jest.Mocked<GoogleDriveService>;
+    driveService.fetchForQuery.mockResolvedValue({ ok: true, text: '📂 Tus carpetas en Drive:\n\n1. 📁 **Proyectos**' });
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+
+    await service.run(ORG, TASK);
+
+    expect(driveService.fetchForQuery).toHaveBeenCalled();
+    expect(gmail.fetchLatest).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
+
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('carpetas') }));
+  });
+
+  it('delivers a clear Drive error when credential is missing — never web search', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'mis archivos de drive' }));
+    const driveService = module.get(GoogleDriveService) as jest.Mocked<GoogleDriveService>;
+    driveService.fetchForQuery.mockResolvedValue({ ok: false, reason: 'no_credential' });
+
+    await service.run(ORG, TASK);
+
+    expect(research.answer).not.toHaveBeenCalled();
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('Integraciones') }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
+  });
+
+  it('does not route Drive request to Gmail even when conversation history contains "correo"', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'que carpetas tengo en drive?',
+      metadata: {
+        source: 'playground',
+        conversation_context: [
+          { role: 'user', text: 'puedes ver mi ultimo correo electrónico' },
+          { role: 'assistant', text: '📬 Últimos 3 correos en tu bandeja...' },
+        ],
+      },
+    }));
+    const driveService = module.get(GoogleDriveService) as jest.Mocked<GoogleDriveService>;
+    driveService.fetchForQuery.mockResolvedValue({ ok: true, text: '📂 Tus carpetas en Drive:\n\n1. 📁 **Docs**' });
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+
+    await service.run(ORG, TASK);
+
+    // Must use Drive, not Gmail (history contamination guard)
+    expect(driveService.fetchForQuery).toHaveBeenCalled();
+    expect(gmail.fetchLatest).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
   });
 });

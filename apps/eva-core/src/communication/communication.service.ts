@@ -1,5 +1,5 @@
-import { ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { EventBusService } from '../events/event-bus.service';
+import { ForbiddenException, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { EvaEvent, EventBusService } from '../events/event-bus.service';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { TasksService } from '../tasks/tasks.service';
 import { Approval } from '../approvals/approval.types';
@@ -13,7 +13,7 @@ import {
 } from './communication.types';
 
 @Injectable()
-export class CommunicationService {
+export class CommunicationService implements OnApplicationBootstrap {
   private readonly logger = new Logger(CommunicationService.name);
 
   constructor(
@@ -23,6 +23,32 @@ export class CommunicationService {
     private readonly telegram: TelegramAdapter,
     private readonly integrations: IntegrationsService,
   ) {}
+
+  onApplicationBootstrap() {
+    if (typeof this.events.on !== 'function') return;
+
+    // Forward completed task results back to Telegram when the task originated there.
+    this.events.on('task.result', async (event: EvaEvent) => {
+      const { orgId, taskId, payload } = event;
+      if (!taskId) return;
+      // Pure image tasks are delivered via the task.media handler (sendPhoto) — skip text here.
+      if ((payload as Record<string, unknown>)['model'] === 'media:image') return;
+      await this.deliverToTelegram(orgId, taskId, String((payload as Record<string, unknown>)['text'] ?? ''));
+    });
+
+    // Forward generated images to Telegram as photos.
+    this.events.on('task.media', async (event: EvaEvent) => {
+      const { orgId, taskId, payload } = event;
+      if (!taskId) return;
+      const p = payload as Record<string, unknown>;
+      if (p['kind'] !== 'image') return;
+      const url = String(p['url'] ?? '');
+      if (!url) return;
+      await this.deliverPhotoToTelegram(orgId, taskId, url);
+    });
+
+    this.logger.log('CommunicationService subscribed to task.result and task.media');
+  }
 
   linkTelegramAccount(input: {
     orgId: string;
@@ -119,7 +145,7 @@ export class CommunicationService {
       userId: account.user_id,
       channel: 'telegram',
       target: { chat_id: chatId },
-      text: `Tarea creada: ${task.title}\nID: ${task.id}`,
+      text: `✅ Recibido — procesando tu solicitud...`,
       notificationType: 'task.created',
       payload: { task_id: task.id },
     });
@@ -212,6 +238,41 @@ export class CommunicationService {
 
   findRecentNotifications(orgId: string, limit = 20) {
     return this.repo.findRecentNotifications(orgId, Math.min(limit, 100));
+  }
+
+  private async deliverToTelegram(orgId: string, taskId: string, text: string): Promise<void> {
+    if (!text) return;
+    try {
+      const task = await this.tasks.getTask(taskId, orgId);
+      const meta = task.metadata as Record<string, unknown>;
+      if (meta['source'] !== 'telegram') return;
+      const chatId = String(meta['external_chat_id'] ?? '');
+      if (!chatId) return;
+
+      const settings = await this.integrations.getChannelSettings(orgId, 'telegram');
+      if (settings && settings.status !== 'active') return;
+
+      await this.telegram.sendMessage({ chat_id: chatId }, text, settings?.secret);
+    } catch (err) {
+      this.logger.warn(`deliverToTelegram failed for task ${taskId}: ${(err as Error).message}`);
+    }
+  }
+
+  private async deliverPhotoToTelegram(orgId: string, taskId: string, photoUrl: string): Promise<void> {
+    try {
+      const task = await this.tasks.getTask(taskId, orgId);
+      const meta = task.metadata as Record<string, unknown>;
+      if (meta['source'] !== 'telegram') return;
+      const chatId = String(meta['external_chat_id'] ?? '');
+      if (!chatId) return;
+
+      const settings = await this.integrations.getChannelSettings(orgId, 'telegram');
+      if (settings && settings.status !== 'active') return;
+
+      await this.telegram.sendPhoto({ chat_id: chatId }, photoUrl, '🖼️ Imagen generada', settings?.secret);
+    } catch (err) {
+      this.logger.warn(`deliverPhotoToTelegram failed for task ${taskId}: ${(err as Error).message}`);
+    }
   }
 
   private async findPreferredTelegramAccount(orgId: string, userId: string) {

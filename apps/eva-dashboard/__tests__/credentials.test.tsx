@@ -1,6 +1,11 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { CredentialsClient } from '@/components/settings/credentials-client';
+import { ToastProvider } from '@/components/ui/toast';
 import type { Integration } from '@/lib/types';
+
+function renderWithToast(ui: React.ReactElement) {
+  return render(<ToastProvider>{ui}</ToastProvider>);
+}
 
 jest.mock('@/lib/supabase/client', () => ({
   createClient: () => ({
@@ -21,17 +26,43 @@ const googleIntegration: Integration = {
   updated_at: new Date().toISOString(),
 };
 
+const fullOkResponse = {
+  ok: true,
+  email: 'raulisai97@gmail.com',
+  scopes: [
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/drive.readonly',
+  ],
+  services: {
+    gmail:    { ok: true },
+    calendar: { ok: true },
+    drive:    { ok: true },
+  },
+};
+
+const partialResponse = {
+  ok: false,
+  email: 'raulisai97@gmail.com',
+  scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+  services: {
+    gmail:    { ok: true },
+    calendar: { ok: false, error: 'Request had insufficient authentication scopes.' },
+    drive:    { ok: false, error: 'Request had insufficient authentication scopes.' },
+  },
+};
+
 describe('CredentialsClient', () => {
   beforeEach(() => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ ok: true, email: 'raulisai97@gmail.com', scopes: ['https://www.googleapis.com/auth/gmail.readonly'] }),
+      json: async () => fullOkResponse,
       text: async () => '',
     }) as jest.Mock;
   });
 
   it('shows the Google full integration with its capabilities', () => {
-    render(<CredentialsClient initialIntegrations={[]} />);
+    renderWithToast(<CredentialsClient initialIntegrations={[]} />);
 
     expect(screen.getByText('Google')).toBeInTheDocument();
     expect(screen.getByText('FULL INTEGRATION')).toBeInTheDocument();
@@ -39,27 +70,68 @@ describe('CredentialsClient', () => {
     expect(screen.getByText('Calendario')).toBeInTheDocument();
     expect(screen.getByText('Uber')).toBeInTheDocument();
     expect(screen.getByText('Pedir viajes (con aprobación)')).toBeInTheDocument();
-    // Secrets are password inputs
     expect(screen.getByLabelText('Google client secret')).toHaveAttribute('type', 'password');
     expect(screen.getByLabelText('Google refresh token')).toHaveAttribute('type', 'password');
   });
 
-  it('tests the Google credential and shows the connected account', async () => {
-    render(<CredentialsClient initialIntegrations={[googleIntegration]} />);
+  it('calls /test/full and shows per-service status when all services pass', async () => {
+    renderWithToast(<CredentialsClient initialIntegrations={[googleIntegration]} />);
 
-    fireEvent.click(screen.getByText('Test — read my Gmail profile'));
+    fireEvent.click(screen.getByText('Test Gmail · Calendar · Drive'));
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/integrations/credential/google/test'),
+        expect.stringContaining('/integrations/credential/google/test/full'),
         expect.objectContaining({ method: 'POST' }),
       );
     });
+
     expect(await screen.findByText('Conectado como raulisai97@gmail.com')).toBeInTheDocument();
+    // Service badges — queried by title attribute (text is mixed with an icon child)
+    expect(await screen.findByTitle('Gmail: acceso confirmado')).toBeInTheDocument();
+    expect(await screen.findByTitle('Calendar: acceso confirmado')).toBeInTheDocument();
+    expect(await screen.findByTitle('Drive: acceso confirmado')).toBeInTheDocument();
+  });
+
+  it('shows which services fail when scopes are missing', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => partialResponse,
+      text: async () => '',
+    }) as jest.Mock;
+
+    renderWithToast(<CredentialsClient initialIntegrations={[googleIntegration]} />);
+
+    fireEvent.click(screen.getByText('Test Gmail · Calendar · Drive'));
+
+    // Still shows account (email is set in partial response)
+    expect(await screen.findByText('Conectado como raulisai97@gmail.com')).toBeInTheDocument();
+
+    // Gmail is ok, Calendar and Drive show the specific error in their title
+    expect(await screen.findByTitle('Gmail: acceso confirmado')).toBeInTheDocument();
+    expect(await screen.findByTitle(/Calendar: Request had insufficient/)).toBeInTheDocument();
+    expect(await screen.findByTitle(/Drive: Request had insufficient/)).toBeInTheDocument();
+  });
+
+  it('shows a clear toast error when the refresh token is rejected', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: false, scopes: [], error: 'Token has been expired or revoked.', services: undefined }),
+      text: async () => '',
+    }) as jest.Mock;
+
+    renderWithToast(<CredentialsClient initialIntegrations={[googleIntegration]} />);
+
+    fireEvent.click(screen.getByText('Test Gmail · Calendar · Drive'));
+
+    // Toast renders in the ToastProvider — text includes the API error message
+    expect(await screen.findByText(/Token has been expired or revoked/)).toBeInTheDocument();
+    // Account panel must NOT appear (setGoogleAccount(null) was called)
+    expect(screen.queryByText(/Conectado como/)).not.toBeInTheDocument();
   });
 
   it('saves the Google credential as a single encrypted blob', async () => {
-    render(<CredentialsClient initialIntegrations={[]} />);
+    renderWithToast(<CredentialsClient initialIntegrations={[]} />);
 
     fireEvent.change(screen.getByLabelText('Google client ID'), { target: { value: 'cid.apps.googleusercontent.com' } });
     fireEvent.change(screen.getByLabelText('Google client secret'), { target: { value: 'GOCSPX-abc' } });

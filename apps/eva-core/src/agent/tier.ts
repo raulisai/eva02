@@ -13,7 +13,7 @@ export interface TierDecision {
 
 const LONG_SIGNALS = /\b(script|c[oó]digo|programa|automatiza|bot\b|scraper|scrape|docker|deploy|despliega|proyecto|integra|monitorea|cron|cada (hora|d[ií]a|semana)|paso a paso|varios pasos|informe completo|reporte completo|migra|refactoriza)\b/i;
 
-const QUICK_SIGNALS = /\b(busca|buscar|b[uú]squeda|clima|tiempo en|precio|cotiza|noticias|tipo de cambio|convierte|cu[aá]nto (cuesta|vale|es)|resume|revisa|traduce|correo|email|notificaciones|agenda|recu[eé]rdame|define|qu[eé] es|actual|hoy|ma[nñ]ana|ayer|[uú]ltim[ao]s?|reciente|en vivo|ahora|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|calendario|fixture|selecci[oó]n|grupos?|imagen|im[aá]genes|foto|dibuja|dibujo|ilustra|ilustraci[oó]n|logo|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i;
+const QUICK_SIGNALS = /\b(busca|buscar|b[uú]squeda|clima|tiempo en|precio|cotiza|noticias|tipo de cambio|convierte|cu[aá]nto (cuesta|vale|es)|resume|revisa|traduce|correo|email|notificaciones|agenda|recu[eé]rdame|define|qu[eé] es|actual|hoy|ma[nñ]ana|ayer|[uú]ltim[ao]s?|reciente|en vivo|ahora|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|calendario|fixture|selecci[oó]n|grupos?|imagen|im[aá]genes|foto|dibuja|dibujo|ilustra|ilustraci[oó]n|logo|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n|drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|archivos?|carpetas?)\b/i;
 
 const GREETING = /^(hola|hey|buenas|buenos d[ií]as|buenas tardes|buenas noches|qu[eé] tal|c[oó]mo est[aá]s|gracias|ok|vale|jaja|adi[oó]s|bye)\b/i;
 
