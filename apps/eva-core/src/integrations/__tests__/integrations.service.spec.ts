@@ -232,4 +232,99 @@ describe('IntegrationsService', () => {
     const result = await service.testGoogle(ORG);
     expect(result).toEqual({ ok: false, error: 'No Google credential configured' });
   });
+
+  // ── testGoogleFull ────────────────────────────────────────────────────────
+
+  function googleCredRow() {
+    return row({
+      kind: 'credential',
+      provider: 'google',
+      secret_ciphertext: SecretCipher.encrypt(JSON.stringify({
+        client_id: 'cid',
+        client_secret: 'csecret',
+        refresh_token: 'rtoken',
+      })),
+    });
+  }
+
+  it('testGoogleFull: all three services pass when scopes cover gmail+calendar+drive', async () => {
+    repo.findIntegration.mockResolvedValue(googleCredRow());
+
+    const SCOPES = [
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/calendar',
+      'https://www.googleapis.com/auth/drive.readonly',
+    ].join(' ');
+
+    global.fetch = jest.fn()
+      // token exchange
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'at-abc', scope: SCOPES }) })
+      // gmail probe
+      .mockResolvedValueOnce({ ok: true, json: async () => ({}) })
+      // calendar probe
+      .mockResolvedValueOnce({ ok: true, json: async () => ({}) })
+      // drive probe
+      .mockResolvedValueOnce({ ok: true, json: async () => ({}) })
+      // gmail profile (to get email)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ emailAddress: 'raulisai97@gmail.com' }) }) as unknown as typeof fetch;
+
+    const result = await service.testGoogleFull(ORG);
+
+    expect(result.ok).toBe(true);
+    expect(result.email).toBe('raulisai97@gmail.com');
+    expect(result.scopes).toContain('https://www.googleapis.com/auth/gmail.readonly');
+    expect(result.services.gmail.ok).toBe(true);
+    expect(result.services.calendar.ok).toBe(true);
+    expect(result.services.drive.ok).toBe(true);
+  });
+
+  it('testGoogleFull: reports Unauthorized for calendar+drive when only gmail scope granted', async () => {
+    repo.findIntegration.mockResolvedValue(googleCredRow());
+
+    global.fetch = jest.fn()
+      // token exchange — only gmail scope
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'at-xyz', scope: 'https://www.googleapis.com/auth/gmail.readonly' }) })
+      // gmail probe — ok
+      .mockResolvedValueOnce({ ok: true, json: async () => ({}) })
+      // calendar probe — 403
+      .mockResolvedValueOnce({ ok: false, status: 403, json: async () => ({ error: { message: 'Request had insufficient authentication scopes.' } }) })
+      // drive probe — 403
+      .mockResolvedValueOnce({ ok: false, status: 403, json: async () => ({ error: { message: 'Request had insufficient authentication scopes.' } }) })
+      // gmail profile
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ emailAddress: 'raulisai97@gmail.com' }) }) as unknown as typeof fetch;
+
+    const result = await service.testGoogleFull(ORG);
+
+    expect(result.ok).toBe(false);
+    expect(result.services.gmail.ok).toBe(true);
+    expect(result.services.calendar.ok).toBe(false);
+    expect(result.services.calendar.error).toContain('insufficient');
+    expect(result.services.drive.ok).toBe(false);
+  });
+
+  it('testGoogleFull: returns error when refresh token is rejected (invalid_grant)', async () => {
+    repo.findIntegration.mockResolvedValue(googleCredRow());
+
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({ error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }),
+      }) as unknown as typeof fetch;
+
+    const result = await service.testGoogleFull(ORG);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('expired or revoked');
+    expect(result.services.gmail.ok).toBe(false);
+    expect(result.services.calendar.ok).toBe(false);
+    expect(result.services.drive.ok).toBe(false);
+  });
+
+  it('testGoogleFull: reports error when no credential is stored', async () => {
+    repo.findIntegration.mockResolvedValue(null);
+    const result = await service.testGoogleFull(ORG);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('No Google credential');
+    expect(result.scopes).toEqual([]);
+  });
 });

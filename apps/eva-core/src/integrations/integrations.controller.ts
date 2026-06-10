@@ -56,6 +56,12 @@ export class IntegrationsController {
     return this.integrations.testGoogle(req.user.orgId);
   }
 
+  @Post('credential/google/test/full')
+  @HttpCode(HttpStatus.OK)
+  testGoogleFull(@Req() req: AuthenticatedRequest) {
+    return this.integrations.testGoogleFull(req.user.orgId);
+  }
+
   @Post('model/:provider/test')
   @HttpCode(HttpStatus.OK)
   testModelProvider(@Param('provider') provider: string, @Req() req: AuthenticatedRequest) {

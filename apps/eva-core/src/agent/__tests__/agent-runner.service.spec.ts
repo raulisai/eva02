@@ -1,4 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { BehaviorPatternService } from '../behavior-pattern.service';
+import { GmailService } from '../gmail.service';
 import { CapabilityGateService } from '../../capability-gate/capability-gate.service';
 import { EventBusService } from '../../events/event-bus.service';
 import { IntentRouterService } from '../../intent-router/intent-router.service';
@@ -6,8 +8,12 @@ import { ModelRouterService } from '../../model-router/model-router.service';
 import { TasksService } from '../../tasks/tasks.service';
 import { ToolRouterService } from '../../tool-router/tool-router.service';
 import { AgentRunnerService } from '../agent-runner.service';
+import { ConversationDigesterService } from '../conversation-digester.service';
+import { GoogleCalendarService } from '../google-calendar.service';
 import { MediaService } from '../media.service';
+import { MemoryRecallService } from '../memory-recall.service';
 import { MissingInformationError, ResearchToolsService } from '../research-tools.service';
+import { ScheduleService } from '../schedule.service';
 import { ScriptForgeService } from '../script-forge.service';
 import { SoulContextService } from '../soul-context.service';
 import { classifyTier } from '../tier';
@@ -68,6 +74,7 @@ describe('classifyTier', () => {
 });
 
 describe('AgentRunnerService', () => {
+  let module: TestingModule;
   let service: AgentRunnerService;
   let events: jest.Mocked<EventBusService>;
   let tasks: jest.Mocked<TasksService>;
@@ -79,7 +86,7 @@ describe('AgentRunnerService', () => {
   let soul: jest.Mocked<SoulContextService>;
 
   beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
+    module = await Test.createTestingModule({
       providers: [
         AgentRunnerService,
         {
@@ -162,15 +169,45 @@ describe('AgentRunnerService', () => {
           useValue: {
             getPersonalProfile: jest.fn().mockResolvedValue({}),
             getCoworkContext: jest.fn().mockResolvedValue({}),
-            getAgentContext: jest.fn().mockResolvedValue({ personal_profile: {}, cowork_context: {} }),
+            getAgentContext: jest.fn().mockResolvedValue({
+              personal_profile: {}, cowork_context: {}, goals: [], persona_context: {},
+            }),
             resolveCurrentLocation: jest.fn().mockResolvedValue(null),
           },
         },
         {
-          // By default the gate passes everything through — individual tests
-          // that need blocking behaviour can override this mock.
           provide: CapabilityGateService,
           useValue: { firstMissingRequirement: jest.fn().mockResolvedValue(null) },
+        },
+        {
+          provide: GoogleCalendarService,
+          useValue: { formatUpcomingForSoul: jest.fn().mockResolvedValue(null), isConnected: jest.fn().mockResolvedValue(false) },
+        },
+        {
+          provide: MemoryRecallService,
+          useValue: { check: jest.fn().mockResolvedValue({ isRecall: false, context: null, memories: [] }) },
+        },
+        {
+          provide: ConversationDigesterService,
+          useValue: { digestAsync: jest.fn().mockResolvedValue(undefined) },
+        },
+        {
+          provide: ScheduleService,
+          useValue: { formatUpcomingForSoul: jest.fn().mockResolvedValue(null) },
+        },
+        {
+          provide: BehaviorPatternService,
+          useValue: {
+            formatPatternsForSoul: jest.fn().mockResolvedValue(null),
+            getTriggersNow: jest.fn().mockResolvedValue([]),
+          },
+        },
+        {
+          provide: GmailService,
+          useValue: {
+            formatLatestForResponse: jest.fn().mockResolvedValue(null),
+            isConnected: jest.fn().mockResolvedValue(false),
+          },
         },
       ],
     }).compile();
@@ -218,17 +255,19 @@ describe('AgentRunnerService', () => {
         pending_tasks: 'Preparar reporte semanal',
         work_hours: 'Lun-vie 9:00-18:00',
       },
+      goals: [],
+      persona_context: {},
     });
 
     await service.run(ORG, TASK);
 
     expect(intentRouter.classify).not.toHaveBeenCalled();
     expect(modelRouter.generate).toHaveBeenCalledWith(
-      expect.stringContaining('Contexto privado de Soul disponible para EVA'),
+      expect.stringContaining('Contexto personal de tu usuario'),
       expect.objectContaining({ budget: 'cheap' }),
     );
     expect(modelRouter.generate).toHaveBeenCalledWith(
-      expect.stringContaining('Tareas pendientes: Preparar reporte semanal'),
+      expect.stringContaining('Preparar reporte semanal'),
       expect.objectContaining({ budget: 'cheap' }),
     );
   });
@@ -452,7 +491,7 @@ describe('AgentRunnerService', () => {
     await service.run(ORG, TASK);
 
     expect(modelRouter.generate).toHaveBeenCalledWith(
-      expect.stringContaining('Contexto reciente de la conversacion'),
+      expect.stringContaining('Conversación reciente'),
       expect.objectContaining({ budget: 'cheap', responseFormat: 'json' }),
     );
     expect(research.answer).toHaveBeenCalledWith('direccion restaurante El Gaucho comida argentina', ORG);
@@ -657,5 +696,47 @@ describe('AgentRunnerService', () => {
     tasks.getTask.mockResolvedValue(makeTask({ status: 'completed' }));
     await service.run(ORG, TASK);
     expect(events.publish).not.toHaveBeenCalled();
+  });
+
+  it('routes email requests to Gmail API — never to web search', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'puedes ver mi ultimo correo electrónico' }));
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+    gmail.formatLatestForResponse.mockResolvedValue('📬 Últimos 3 correos en tu bandeja:\n\n1. **Factura digital** ...');
+
+    await service.run(ORG, TASK);
+
+    // Must have called Gmail, never called web-search
+    expect(gmail.formatLatestForResponse).toHaveBeenCalledWith(ORG);
+    expect(research.answer).not.toHaveBeenCalled();
+
+    // Result should contain the email listing, not search results
+    const result = events.publish.mock.calls
+      .map(([e]) => e)
+      .find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('bandeja') }));
+  });
+
+  it('routes calendar requests to local schedule — never to web search', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: '¿qué tengo en mi agenda hoy?' }));
+    const schedule = module.get(ScheduleService) as jest.Mocked<ScheduleService>;
+    schedule.formatUpcomingForSoul.mockResolvedValue('- Hoy 09:00: Reunión de equipo');
+
+    await service.run(ORG, TASK);
+
+    expect(schedule.formatUpcomingForSoul).toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
+  });
+
+  it('falls back to model when Gmail returns nothing (not configured or empty)', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'revisa mi correo' }));
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+    gmail.formatLatestForResponse.mockResolvedValue(null);
+
+    await service.run(ORG, TASK);
+
+    // Should still complete via model, never via web-search
+    expect(gmail.formatLatestForResponse).toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
   });
 });

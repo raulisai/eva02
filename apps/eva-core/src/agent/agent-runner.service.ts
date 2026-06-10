@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { BehaviorPatternService } from './behavior-pattern.service';
 import { CapabilityGateService } from '../capability-gate/capability-gate.service';
 import { SetupRequiredPayload } from '../capability-gate/capability-gate.types';
 import { EventBusService } from '../events/event-bus.service';
@@ -7,10 +8,15 @@ import { ModelRouterService } from '../model-router/model-router.service';
 import { ToolRouterService } from '../tool-router/tool-router.service';
 import { TasksService } from '../tasks/tasks.service';
 import { Task } from '../tasks/task.types';
+import { ConversationDigesterService } from './conversation-digester.service';
+import { GmailService } from './gmail.service';
+import { GoogleCalendarService } from './google-calendar.service';
 import { MediaService } from './media.service';
+import { MemoryRecallService } from './memory-recall.service';
 import { MissingInformationError, ResearchToolsService } from './research-tools.service';
+import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
-import { AgentSoulContext, PersonalProfile, SoulContextService } from './soul-context.service';
+import { AgentSoulContext, Goal, PersonalProfile, SoulContextService } from './soul-context.service';
 import { TierDecision, classifyTier } from './tier';
 
 /**
@@ -18,13 +24,25 @@ import { TierDecision, classifyTier } from './tier';
  * while the real work happens, so the user always knows she heard them.
  */
 const ACK_RULES: Array<{ pattern: RegExp; say: string; hint: string }> = [
+  // Personal-data requests: email, calendar — handled by their own APIs, not web
   {
-    pattern: /\b(busca|buscar|búsqueda|search|internet|noticias|news|precio|clima|weather|cotiza|tipo de cambio|[uú]ltim[ao]s?|reciente|actual|hoy|ma[nñ]ana|ayer|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|calendario|fixture|cap[ií]tulo|episodio|anime|manga|estreno|presidente|presidenta|gobernador|gobernadora|alcalde|alcaldesa|ceo|director|directora|titular|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i,
+    pattern: /\b(correo|email|mail|mensajes|notificaciones|bandeja|inbox|gmail|outlook)\b/i,
+    say: 'Déjame revisar tu bandeja, un momento 📬',
+    hint: 'email',
+  },
+  {
+    pattern: /\b(calendario|agenda|mis citas|mis eventos|google calendar|pr[oó]ximas? citas?)\b/i,
+    say: 'Revisando tu agenda 📅',
+    hint: 'calendar',
+  },
+  // Web-search triggers — words that clearly need current internet data
+  {
+    pattern: /\b(busca|buscar|búsqueda|search|internet|noticias|news|precio|clima|weather|cotiza|tipo de cambio|reciente|actual|hoy|ma[nñ]ana|ayer|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|fixture|cap[ií]tulo|episodio|anime|manga|estreno|presidente|presidenta|gobernador|gobernadora|alcalde|alcaldesa|ceo|director|directora|titular|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i,
     say: 'Dame un momento, voy a buscar en internet 🔎',
     hint: 'search',
   },
   {
-    pattern: /\b(revisa|revisar|correo|email|mail|mensajes|notificaciones|bandeja|inbox)\b/i,
+    pattern: /\b(revisa|revisar|mensajes)\b/i,
     say: 'Déjame revisar, te aviso en un momento 📬',
     hint: 'review',
   },
@@ -79,7 +97,11 @@ const USELESS_ANSWER_PATTERNS = [
   /\bno dispongo de informaci[oó]n actualizada\b/i,
 ];
 
-const RESEARCH_REQUIRED_SIGNALS = /\b(busca|buscar|b[uú]squeda|search|internet|noticias|news|precio|cotiza|tipo de cambio|clima|weather|pron[oó]stico|[uú]ltim[ao]s?|reciente|actual|ahora|hoy|ma[nñ]ana|ayer|en vivo|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|calendario|fixture|cap[ií]tulo|episodio|anime|manga|temporada|estreno|release|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i;
+const RESEARCH_REQUIRED_SIGNALS = /\b(busca|buscar|b[uú]squeda|search|internet|noticias|news|precio|cotiza|tipo de cambio|clima|weather|pron[oó]stico|reciente|actual|ahora|hoy|ma[nñ]ana|ayer|en vivo|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|fixture|cap[ií]tulo|episodio|anime|manga|temporada|estreno|release|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i;
+
+// Personal-data requests: these must NEVER go to web search — they use their own APIs
+const EMAIL_SIGNALS = /\b(correo|email|mail|mensajes|bandeja|inbox|gmail|outlook|mis mails|mis correos)\b/i;
+const CALENDAR_SIGNALS_PERSONAL = /\b(mi(s)? (citas?|eventos?|agenda|calendario)|qu[eé] tengo|tengo algo|tengo una cita)\b/i;
 
 const FRESHNESS_REQUIRED_SIGNALS = [
   /\b(qui[eé]n\s+es|quien\s+es)\s+(el|la)?\s*(presidente|presidenta|gobernador|gobernadora|alcalde|alcaldesa|ceo|director|directora|titular|jefe|jefa)\b/i,
@@ -122,6 +144,12 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly forge: ScriptForgeService,
     private readonly soul: SoulContextService,
     private readonly capabilityGate: CapabilityGateService,
+    private readonly calendar: GoogleCalendarService,
+    private readonly schedule: ScheduleService,
+    private readonly patterns: BehaviorPatternService,
+    private readonly memoryRecall: MemoryRecallService,
+    private readonly digester: ConversationDigesterService,
+    private readonly gmail: GmailService,
   ) {}
 
   onApplicationBootstrap() {
@@ -150,9 +178,32 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
     const input = task.description ?? task.title;
     const conversationContext = this.getConversationContext(task);
-    const soulContext = await this.soul.getAgentContext(orgId).catch(() => ({ personal_profile: {}, cowork_context: {} }));
+
+    // Fetch soul, schedule, patterns, and memory recall in parallel — none blocks response
+    const [soulContext, localScheduleBlock, gcalBlock, patternBlock, proactiveTriggers, recallResult] = await Promise.all([
+      this.soul.getAgentContext(orgId).catch(() => ({
+        personal_profile: {}, cowork_context: {}, goals: [], persona_context: {},
+      })),
+      // Local schedule is always primary (from watch, voice, manual)
+      this.schedule.formatUpcomingForSoul(orgId, 7).catch(() => null),
+      // Google Calendar enrichment — optional, null when not connected
+      this.calendar.formatUpcomingForSoul(orgId, 7).catch(() => null),
+      // Behavior patterns for proactive suggestions
+      this.patterns.formatPatternsForSoul(orgId).catch(() => null),
+      // Patterns that should trigger right now (e.g. Uber suggestion at 8:30am)
+      this.patterns.getTriggersNow(orgId).catch(() => []),
+      // Memory recall — only relevant when user asks to remember
+      this.memoryRecall.check(input, orgId).catch(() => ({ isRecall: false, context: null, memories: [] })),
+    ]);
+
+    // Merge schedule sources: local first, then fill gaps with Google Calendar
+    const calendarBlock = this.mergeScheduleBlocks(localScheduleBlock, gcalBlock);
+
     const routingInput = this.withConversationContextForRouting(input, conversationContext);
-    const contextualInput = this.withAgentContext(input, conversationContext, soulContext);
+    const contextualInput = this.buildContextualInput(
+      input, conversationContext, soulContext, calendarBlock, patternBlock,
+      proactiveTriggers.map(t => t.message), recallResult.context,
+    );
     const startedAt = Date.now();
     const freshness = this.needsFreshness(routingInput);
     const tier = this.applyFreshnessToTier(classifyTier(routingInput), freshness);
@@ -268,6 +319,38 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         return;
       }
 
+      // ── Email fast-path — use Gmail API when configured ───────────────────
+      if (ack.hint === 'email' || EMAIL_SIGNALS.test(routingInput)) {
+        await this.log(orgId, taskId, 'email request — querying Gmail API', 'tools');
+        const emailText = await this.gmail.formatLatestForResponse(orgId);
+        if (emailText) {
+          await this.deliver(orgId, taskId, emailText, 'gmail-api', 0);
+          await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+          this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: emailText, conversationContext });
+          return;
+        }
+        // Gmail returned nothing — fall through to model (will explain gracefully)
+        await this.log(orgId, taskId, 'Gmail returned empty — falling to model', 'tools');
+      }
+
+      // ── Calendar fast-path — use local schedule + GCal when configured ────
+      if (ack.hint === 'calendar' || CALENDAR_SIGNALS_PERSONAL.test(routingInput)) {
+        await this.log(orgId, taskId, 'calendar request — querying local schedule + Google Calendar', 'tools');
+        const [localBlock, gcalBlock] = await Promise.all([
+          this.schedule.formatUpcomingForSoul(orgId, 7).catch(() => null),
+          this.calendar.formatUpcomingForSoul(orgId, 7).catch(() => null),
+        ]);
+        const agendaText = this.mergeScheduleBlocks(localBlock, gcalBlock);
+        if (agendaText) {
+          const reply = `📅 Tu agenda próxima:\n\n${agendaText}`;
+          await this.deliver(orgId, taskId, reply, 'calendar-api', 0);
+          await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+          this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: reply, conversationContext });
+          return;
+        }
+        await this.log(orgId, taskId, 'No calendar events found — falling to model', 'tools');
+      }
+
       // Tool routing (transparent dry-run of what executes this)
       const shouldUseResearch = this.shouldUseResearch(routingInput, ack.hint, freshness.required);
       const capability = shouldUseResearch ? 'search' : 'generate';
@@ -292,6 +375,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         await this.deliver(orgId, taskId, answer.text, answer.tool, elapsed);
         await this.maybeAttachMedia(orgId, taskId, input, answer.text);
         await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+        this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: answer.text, conversationContext });
         return;
       }
 
@@ -323,6 +407,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       await this.deliver(orgId, taskId, result.text, result.model, elapsed);
       await this.maybeAttachMedia(orgId, taskId, input, result.text);
       await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+      this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: result.text, conversationContext });
     } catch (error) {
       if (error instanceof MissingInformationError) {
         await this.requestMissingInformation(orgId, taskId, error);
@@ -406,16 +491,51 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     return `${input}\n\nContexto reciente de la conversacion:\n${contextText}`;
   }
 
-  private withAgentContext(
+  /**
+   * Merges local schedule (primary) with Google Calendar (enrichment).
+   * If both have content, they're shown in separate labeled sections.
+   * If only one has content, just that one is shown.
+   */
+  private mergeScheduleBlocks(local: string | null, gcal: string | null): string | null {
+    if (!local && !gcal) return null;
+    if (local && !gcal) return local;
+    if (!local && gcal) return `[Google Calendar]\n${gcal}`;
+    return `[Agenda local]\n${local}\n[Google Calendar]\n${gcal}`;
+  }
+
+  /**
+   * Assembles the full contextual prompt injected into every non-trivial agent call.
+   * Includes: personal profile, identity, active goals, local schedule (+ optional Google Calendar),
+   * behavior patterns, proactive triggers, and optionally: recalled memories.
+   */
+  private buildContextualInput(
     input: string,
     conversationContext: ConversationContextTurn[],
     soulContext: AgentSoulContext,
+    calendarBlock: string | null,
+    patternBlock: string | null,
+    proactiveTriggerMessages: string[],
+    memoryRecallContext: string | null,
   ): string {
     const blocks: string[] = [input];
 
-    const soulSummary = this.formatSoulContext(soulContext);
+    const soulSummary = this.formatEnrichedSoulContext(soulContext, calendarBlock, patternBlock);
     if (soulSummary) {
-      blocks.push('', 'Contexto privado de Soul disponible para EVA:', soulSummary);
+      blocks.push('', soulSummary);
+    }
+
+    // Proactive triggers — patterns that match right now (e.g. "¿Llamo el Uber?")
+    if (proactiveTriggerMessages.length > 0) {
+      blocks.push(
+        '',
+        '## Sugerencias proactivas basadas en los patrones del usuario:',
+        '(Puedes mencionarlas si es natural en esta conversación)',
+        ...proactiveTriggerMessages.map(m => `- ${m}`),
+      );
+    }
+
+    if (memoryRecallContext) {
+      blocks.push('', memoryRecallContext);
     }
 
     if (conversationContext.length > 0) {
@@ -424,7 +544,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         .join('\n');
       blocks.push(
         '',
-        'Contexto reciente de la conversacion:',
+        '## Conversación reciente:',
         contextText,
         '',
         'Resuelve la peticion actual usando ese contexto si el usuario usa referencias como "eso", "ese", "la direccion", "el lugar", "cuanto cuesta" o preguntas incompletas.',
@@ -432,55 +552,114 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     }
 
     if (blocks.length === 1) return input;
-    blocks.push('No inventes datos actuales: si hace falta informacion vigente, usa busqueda/herramientas.');
+    blocks.push('\nNo inventes datos actuales: si hace falta informacion vigente, usa busqueda/herramientas.');
     return blocks.join('\n');
   }
 
+  /**
+   * Formats the full soul context into a structured, human-readable block.
+   * This is what makes EVA feel like a real personal assistant — she knows
+   * who the user is, what they care about, and what's on their agenda.
+   */
+  private formatEnrichedSoulContext(
+    context: AgentSoulContext,
+    calendarBlock: string | null,
+    patternBlock: string | null = null,
+  ): string | null {
+    const sections: string[] = ['## Contexto personal de tu usuario:'];
+    let hasContent = false;
+
+    // ── Identity & Profile ─────────────────────────────────────────────────
+    const p = context.personal_profile;
+    const persona = context.persona_context;
+    const profileLines: string[] = [];
+
+    if (p.full_name)         profileLines.push(`- Nombre: ${p.full_name}`);
+    if (p.preferred_address) profileLines.push(`- Llámale: ${p.preferred_address}`);
+    if (p.age)               profileLines.push(`- Edad: ${p.age}`);
+    if (p.occupation || persona.occupation)
+      profileLines.push(`- Se dedica a: ${p.occupation ?? persona.occupation}`);
+    if (p.workplace)         profileLines.push(`- Empresa/Lugar de trabajo: ${p.workplace}`);
+    if (p.current_location)  profileLines.push(`- Ubicación actual: ${p.current_location}`);
+    if (p.likes)             profileLines.push(`- Le gusta: ${p.likes}`);
+    if (p.hobbies)           profileLines.push(`- Hobbies: ${p.hobbies}`);
+    if (p.values)            profileLines.push(`- Lo que más valora: ${p.values}`);
+    if (p.dislikes)          profileLines.push(`- No le gusta: ${p.dislikes}`);
+    if (p.allergies)         profileLines.push(`- Alergias: ${p.allergies}`);
+    if (persona.bio)         profileLines.push(`- Sobre él/ella: ${persona.bio}`);
+
+    if (profileLines.length > 0) {
+      sections.push('\n### Perfil personal', ...profileLines);
+      hasContent = true;
+    }
+
+    // ── Expectations from EVA ──────────────────────────────────────────────
+    if (persona.expectations) {
+      sections.push('\n### Qué espera de EVA', `- ${persona.expectations}`);
+      hasContent = true;
+    }
+    if (persona.communication_preferences) {
+      sections.push(`- Estilo de comunicación preferido: ${persona.communication_preferences}`);
+    }
+
+    // ── Active Goals ───────────────────────────────────────────────────────
+    const activeGoals = context.goals.filter(g => g.status === 'active');
+    if (activeGoals.length > 0) {
+      sections.push('\n### Metas activas');
+      activeGoals.forEach(g => {
+        const deadline = g.deadline ? ` (meta: ${g.deadline})` : '';
+        const progress = g.progress ? ` — Progreso: ${g.progress}` : '';
+        sections.push(`- ${g.title}${deadline}${progress}`);
+      });
+      hasContent = true;
+    }
+
+    // ── Live Calendar (from Google Calendar API) ───────────────────────────
+    if (calendarBlock) {
+      sections.push('\n### Agenda próxima (Google Calendar)', calendarBlock);
+      hasContent = true;
+    } else if (context.cowork_context.upcoming_appointments) {
+      sections.push('\n### Citas próximas (estáticas)', context.cowork_context.upcoming_appointments);
+      hasContent = true;
+    }
+
+    // ── Projects & Tasks ───────────────────────────────────────────────────
+    const projects = persona.projects ?? context.cowork_context.projects;
+    if (projects) { sections.push('\n### Proyectos activos', projects); hasContent = true; }
+
+    const pending = context.cowork_context.pending_tasks;
+    if (pending) { sections.push('\n### Tareas pendientes', pending); hasContent = true; }
+
+    // ── Routines & Work style ─────────────────────────────────────────────
+    const routines = persona.routines ?? context.cowork_context.routines;
+    if (routines) { sections.push('\n### Rutinas', routines); hasContent = true; }
+
+    const workHours = persona.work_hours ?? context.cowork_context.work_hours;
+    if (workHours) { sections.push(`\n### Horarios de trabajo: ${workHours}`); hasContent = true; }
+
+    // ── Relationships ─────────────────────────────────────────────────────
+    const family = persona.family ?? context.cowork_context.family;
+    if (family) { sections.push('\n### Familia y relaciones importantes', family); hasContent = true; }
+
+    // ── Behavior patterns ─────────────────────────────────────────────────
+    if (patternBlock) {
+      sections.push('\n### Patrones de comportamiento detectados', patternBlock);
+      hasContent = true;
+    }
+
+    if (!hasContent) return null;
+    return sections.join('\n').slice(0, 5000);
+  }
+
+  /** Legacy alias used by answerPersonalProfileQuestion — kept for compat. */
   private formatSoulContext(context: AgentSoulContext): string | null {
-    const profileLabels: Partial<Record<keyof PersonalProfile, string>> = {
-      full_name: 'Nombre',
-      preferred_address: 'Como llamarlo',
-      age: 'Edad',
-      current_location: 'Ubicacion actual',
-      address: 'Direccion',
-      workplace: 'Trabajo',
-      likes: 'Gustos',
-      dislikes: 'No le gusta',
-      allergies: 'Alergias',
-      weight: 'Peso',
-      height: 'Altura',
-    };
-    const coworkLabels: Partial<Record<keyof AgentSoulContext['cowork_context'], string>> = {
-      calendars: 'Calendarios',
-      upcoming_appointments: 'Proximas citas',
-      pending_tasks: 'Tareas pendientes',
-      work_hours: 'Horarios de trabajo',
-      days_off: 'Dias libres',
-      goals: 'Metas',
-      family: 'Familia y relaciones',
-      social_media: 'Redes sociales',
-      projects: 'Proyectos activos',
-      routines: 'Rutinas',
-      communication_preferences: 'Preferencias de comunicacion',
-      important_links: 'Links importantes',
-    };
-
-    const profile = Object.entries(profileLabels)
-      .map(([key, label]) => [label, String(context.personal_profile[key as keyof PersonalProfile] ?? '').trim()])
-      .filter(([, value]) => value);
-    const cowork = Object.entries(coworkLabels)
-      .map(([key, label]) => [label, String(context.cowork_context[key as keyof AgentSoulContext['cowork_context']] ?? '').trim()])
-      .filter(([, value]) => value);
-
-    const lines = [
-      ...profile.map(([label, value]) => `- ${label}: ${value}`),
-      ...cowork.map(([label, value]) => `- ${label}: ${value}`),
-    ];
-
-    return lines.length > 0 ? lines.join('\n').slice(0, 4000) : null;
+    return this.formatEnrichedSoulContext(context, null, null);
   }
 
   private shouldUseResearch(input: string, ackHint: string, freshnessRequired = false): boolean {
+    // Personal-data requests must never fall to web search — they use their own APIs.
+    if (ackHint === 'email' || ackHint === 'calendar') return false;
+    if (EMAIL_SIGNALS.test(input) || CALENDAR_SIGNALS_PERSONAL.test(input)) return false;
     return freshnessRequired || ackHint === 'search' || RESEARCH_REQUIRED_SIGNALS.test(input);
   }
 

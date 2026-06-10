@@ -347,6 +347,92 @@ export class IntegrationsService {
   }
 
   /**
+   * Comprehensive Google connectivity test: exchanges the refresh token, then
+   * probes Gmail, Calendar, and Drive in parallel.
+   * Returns per-service status so the UI can highlight which scopes are missing.
+   */
+  async testGoogleFull(orgId: string): Promise<{
+    ok: boolean;
+    email?: string;
+    scopes: string[];
+    services: {
+      gmail:    { ok: boolean; error?: string };
+      calendar: { ok: boolean; error?: string };
+      drive:    { ok: boolean; error?: string };
+    };
+    error?: string;
+  }> {
+    const secret = await this.getSecret(orgId, 'credential', 'google');
+    if (!secret) return { ok: false, scopes: [], services: { gmail: { ok: false, error: 'No credential' }, calendar: { ok: false, error: 'No credential' }, drive: { ok: false, error: 'No credential' } }, error: 'No Google credential configured' };
+
+    let credential: GoogleCredential;
+    try {
+      credential = JSON.parse(secret) as GoogleCredential;
+    } catch {
+      return { ok: false, scopes: [], services: { gmail: { ok: false, error: 'Bad JSON' }, calendar: { ok: false, error: 'Bad JSON' }, drive: { ok: false, error: 'Bad JSON' } }, error: 'Stored Google credential is not valid JSON' };
+    }
+    if (!credential.client_id || !credential.client_secret || !credential.refresh_token) {
+      return { ok: false, scopes: [], services: { gmail: { ok: false, error: 'Incomplete' }, calendar: { ok: false, error: 'Incomplete' }, drive: { ok: false, error: 'Incomplete' } }, error: 'Credential must include client_id, client_secret and refresh_token' };
+    }
+
+    // 1 — exchange refresh token
+    let accessToken: string;
+    let scopes: string[] = [];
+    try {
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: credential.client_id,
+          client_secret: credential.client_secret,
+          refresh_token: credential.refresh_token,
+          grant_type: 'refresh_token',
+        }),
+      });
+      const tokenBody = (await tokenRes.json()) as {
+        access_token?: string; scope?: string; error_description?: string; error?: string;
+      };
+      if (!tokenBody.access_token) {
+        const msg = tokenBody.error_description ?? tokenBody.error ?? 'Token exchange failed';
+        return { ok: false, scopes: [], services: { gmail: { ok: false, error: msg }, calendar: { ok: false, error: msg }, drive: { ok: false, error: msg } }, error: msg };
+      }
+      accessToken = tokenBody.access_token;
+      scopes = tokenBody.scope?.split(' ').filter(Boolean) ?? [];
+    } catch (err) {
+      const msg = (err as Error).message;
+      return { ok: false, scopes: [], services: { gmail: { ok: false, error: msg }, calendar: { ok: false, error: msg }, drive: { ok: false, error: msg } }, error: msg };
+    }
+
+    // 2 — probe each service in parallel
+    const probe = async (url: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+        if (res.ok) return { ok: true };
+        const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+        return { ok: false, error: body.error?.message ?? `HTTP ${res.status}` };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    };
+
+    const [gmail, calendar, drive] = await Promise.all([
+      probe('https://gmail.googleapis.com/gmail/v1/users/me/profile'),
+      probe('https://www.googleapis.com/calendar/v3/calendars/primary'),
+      probe('https://www.googleapis.com/drive/v3/about?fields=user'),
+    ]);
+
+    const email = gmail.ok
+      ? await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', { headers: { Authorization: `Bearer ${accessToken}` } })
+          .then(r => r.json() as Promise<{ emailAddress?: string }>)
+          .then(b => b.emailAddress)
+          .catch(() => undefined)
+      : undefined;
+
+    const allOk = gmail.ok && calendar.ok && drive.ok;
+    return { ok: allOk, email, scopes, services: { gmail, calendar, drive } };
+  }
+
+  /**
    * Validates the stored Google credential end-to-end: refresh-token grant,
    * then Gmail profile. Returns the connected account + granted scopes.
    */
