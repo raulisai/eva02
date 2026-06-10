@@ -12,6 +12,7 @@ export type EvaEventType =
   | 'task.say'      // immediate acknowledgment EVA speaks while working
   | 'task.log'      // transparent step-by-step action log
   | 'task.result'   // final answer text
+  | 'task.media'    // media attachment uploaded to storage (image/audio)
   | 'approval.requested'
   | 'approval.resolved'
   | 'dev.task.created'

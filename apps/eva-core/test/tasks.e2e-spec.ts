@@ -66,6 +66,15 @@ describe('Tasks (e2e)', () => {
     eq: jest.fn().mockReturnThis(),
     single: jest.fn().mockResolvedValue({ data: MOCK_TASK, error: null }),
     maybeSingle: jest.fn().mockResolvedValue({ data: MOCK_TASK, error: null }),
+    // SupabaseJwtStrategy validates tokens via admin.auth.getUser().
+    // Plain function (not jest.fn) so clearAllMocks() can't wipe it.
+    auth: {
+      getUser: async (token: string) => {
+        const payload = jwt.decode(token) as { sub?: string; app_metadata?: Record<string, unknown> } | null;
+        if (!payload?.sub) return { data: { user: null }, error: { message: 'invalid token' } };
+        return { data: { user: { id: payload.sub, app_metadata: payload.app_metadata ?? {} } }, error: null };
+      },
+    },
   };
 
   beforeAll(async () => {

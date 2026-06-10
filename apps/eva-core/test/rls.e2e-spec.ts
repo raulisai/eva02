@@ -81,6 +81,14 @@ describe('RLS isolation (cross-org access)', () => {
       },
       single: async () => resolveForOrg(),
       maybeSingle: async () => resolveForOrg(),
+      // SupabaseJwtStrategy validates tokens via admin.auth.getUser()
+      auth: {
+        getUser: async (token: string) => {
+          const payload = jwt.decode(token) as { sub?: string; app_metadata?: Record<string, unknown> } | null;
+          if (!payload?.sub) return { data: { user: null }, error: { message: 'invalid token' } };
+          return { data: { user: { id: payload.sub, app_metadata: payload.app_metadata ?? {} } }, error: null };
+        },
+      },
     };
 
     return {

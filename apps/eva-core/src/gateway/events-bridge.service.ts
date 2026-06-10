@@ -5,6 +5,7 @@ import { AppGateway } from './app.gateway';
 /** Every event type that should reach dashboard/watch clients in realtime. */
 const BROADCAST_EVENTS: EvaEventType[] = [
   'task.created',
+  'task.update',
   'task.started',
   'task.completed',
   'task.failed',
@@ -13,6 +14,7 @@ const BROADCAST_EVENTS: EvaEventType[] = [
   'task.say',
   'task.log',
   'task.result',
+  'task.media',
   'approval.requested',
   'approval.resolved',
   'communication.message.received',

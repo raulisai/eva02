@@ -5,6 +5,9 @@ import { ModelRouterService } from '../../model-router/model-router.service';
 import { TasksService } from '../../tasks/tasks.service';
 import { ToolRouterService } from '../../tool-router/tool-router.service';
 import { AgentRunnerService } from '../agent-runner.service';
+import { MediaService } from '../media.service';
+import { ScriptForgeService } from '../script-forge.service';
+import { classifyTier } from '../tier';
 import { Task } from '../../tasks/task.types';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -25,9 +28,32 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     completed_at: null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-  ...overrides,
+    ...overrides,
   };
 }
+
+describe('classifyTier', () => {
+  it('routes greetings and short messages to chat', () => {
+    expect(classifyTier('hola').tier).toBe('chat');
+    expect(classifyTier('¿cómo estás?').tier).toBe('chat');
+    expect(classifyTier('gracias!').tier).toBe('chat');
+  });
+
+  it('routes lookups to quick (<1 min)', () => {
+    expect(classifyTier('busca el clima de hoy').tier).toBe('quick');
+    expect(classifyTier('¿cuánto cuesta el dólar?').tier).toBe('quick');
+  });
+
+  it('routes automation/code orders to long (background)', () => {
+    expect(classifyTier('crea un script que limpie mis descargas').tier).toBe('long');
+    expect(classifyTier('automatiza un reporte cada día').tier).toBe('long');
+  });
+
+  it('never lets sensitive actions take the chat shortcut', () => {
+    expect(classifyTier('compra el dominio eva.dev').tier).toBe('quick');
+    expect(classifyTier('borra la base de datos').tier).toBe('quick');
+  });
+});
 
 describe('AgentRunnerService', () => {
   let service: AgentRunnerService;
@@ -35,6 +61,8 @@ describe('AgentRunnerService', () => {
   let tasks: jest.Mocked<TasksService>;
   let intentRouter: jest.Mocked<IntentRouterService>;
   let modelRouter: jest.Mocked<ModelRouterService>;
+  let media: jest.Mocked<MediaService>;
+  let forge: jest.Mocked<ScriptForgeService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -81,6 +109,29 @@ describe('AgentRunnerService', () => {
             }),
           },
         },
+        {
+          provide: MediaService,
+          useValue: {
+            wantsImage: jest.fn().mockReturnValue(false),
+            wantsAudio: jest.fn().mockReturnValue(false),
+            sendImage: jest.fn().mockResolvedValue('https://bucket/eva-media/img.svg'),
+            sendAudio: jest.fn().mockResolvedValue('https://bucket/eva-media/audio.mp3'),
+          },
+        },
+        {
+          provide: ScriptForgeService,
+          useValue: {
+            isScriptTask: jest.fn().mockReturnValue(false),
+            forge: jest.fn().mockResolvedValue({
+              language: 'python',
+              filename: 'cleaner.py',
+              description: 'Limpia descargas',
+              executed: true,
+              output: 'OK: 12 archivos',
+              skillSlug: 'gen-cleaner',
+            }),
+          },
+        },
       ],
     }).compile();
 
@@ -89,53 +140,90 @@ describe('AgentRunnerService', () => {
     tasks = module.get(TasksService);
     intentRouter = module.get(IntentRouterService);
     modelRouter = module.get(ModelRouterService);
+    media = module.get(MediaService);
+    forge = module.get(ScriptForgeService);
   });
 
-  describe('pickAck', () => {
-    it('answers search orders with the internet phrase', () => {
-      expect(service.pickAck('busca el precio del dólar').say).toContain('buscar en internet');
-    });
-    it('answers review orders with the review phrase', () => {
-      expect(service.pickAck('revisa mis correos de hoy').say).toContain('Déjame revisar');
-    });
-    it('answers analysis orders with the thinking phrase', () => {
-      expect(service.pickAck('analiza las ventas del mes').say).toContain('Déjame pensar');
-    });
-    it('falls back to the default phrase', () => {
-      expect(service.pickAck('hola').say).toContain('Enseguida');
-    });
-  });
+  function publishedTypes() {
+    return events.publish.mock.calls.map(([event]) => event.type);
+  }
+  function publishedLogs() {
+    return events.publish.mock.calls
+      .map(([event]) => event)
+      .filter((event) => event.type === 'task.log')
+      .map((event) => (event.payload as { message: string }).message);
+  }
 
-  it('runs the happy path emitting say → logs → result and completing the task', async () => {
+  it('answers a greeting directly: no filler, no intent classification, cheap model', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'hola, ¿cómo vas?' }));
+
     await service.run(ORG, TASK);
 
-    const published = events.publish.mock.calls.map(([event]) => event);
-    const types = published.map((event) => event.type);
+    expect(publishedTypes()).not.toContain('task.say');
+    expect(intentRouter.classify).not.toHaveBeenCalled();
+    expect(modelRouter.generate).toHaveBeenCalledWith('hola, ¿cómo vas?', expect.objectContaining({
+      budget: 'cheap',
+    }));
+    expect(publishedTypes()).toContain('task.result');
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
+  });
 
-    // Instant ack goes out first
-    expect(types[0]).toBe('task.say');
+  it('runs quick lookups with the "espera" filler and transparent logs', async () => {
+    await service.run(ORG, TASK); // "Busca el clima de hoy en CDMX"
+
+    const published = events.publish.mock.calls.map(([event]) => event);
+    expect(published[0].type).toBe('task.say');
     expect((published[0].payload as { text: string }).text).toContain('buscar en internet');
 
-    // Transparent logs for every stage
-    const logs = published.filter((event) => event.type === 'task.log')
-      .map((event) => (event.payload as { message: string }).message);
-    expect(logs.some((message) => message.includes('classifying intent'))).toBe(true);
+    const logs = publishedLogs();
+    expect(logs.some((message) => message.includes('tier=quick'))).toBe(true);
     expect(logs.some((message) => message.includes('intent=fast_path'))).toBe(true);
     expect(logs.some((message) => message.includes('tool-router'))).toBe(true);
     expect(logs.some((message) => message.includes('buscando en internet'))).toBe(true);
     expect(logs.some((message) => message.includes('model claude-haiku'))).toBe(true);
 
-    // Final answer event + completed transition with result persisted
-    expect(types).toContain('task.result');
-    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.objectContaining({
-      result: expect.objectContaining({ text: expect.stringContaining('CDMX') }),
-    }));
-
-    // fast_path rides the cheap tier with org keys
+    expect(publishedTypes()).toContain('task.result');
     expect(modelRouter.generate).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
       orgId: ORG,
       budget: 'cheap',
     }));
+  });
+
+  it('announces background mode for long tasks so the chat stays free', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'automatiza un reporte diario de ventas con gráficos y envíalo',
+    }));
+
+    await service.run(ORG, TASK);
+
+    const firstSay = events.publish.mock.calls.map(([event]) => event).find((event) => event.type === 'task.say');
+    expect((firstSay!.payload as { text: string }).text).toContain('segundo plano');
+    expect(publishedLogs().some((message) => message.includes('tier=long'))).toBe(true);
+  });
+
+  it('forges, sandboxes and registers a skill for script orders', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'crea un script que limpie mis descargas' }));
+    forge.isScriptTask.mockReturnValue(true);
+
+    await service.run(ORG, TASK);
+
+    expect(forge.forge).toHaveBeenCalled();
+    const resultEvent = events.publish.mock.calls.map(([event]) => event).find((event) => event.type === 'task.result');
+    const text = (resultEvent!.payload as { text: string }).text;
+    expect(text).toContain('cleaner.py');
+    expect(text).toContain('gen-cleaner');
+    expect(text).toContain('OK: 12 archivos');
+    expect(modelRouter.generate).not.toHaveBeenCalled(); // forge owns the model call
+  });
+
+  it('attaches an image from the bucket when the order asks for one', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'busca el clima y muéstrame una imagen' }));
+    media.wantsImage.mockReturnValue(true);
+
+    await service.run(ORG, TASK);
+
+    expect(media.sendImage).toHaveBeenCalledWith(ORG, TASK, expect.stringContaining('imagen'));
+    expect(publishedLogs().some((message) => message.includes('eva-media'))).toBe(true);
   });
 
   it('parks sensitive orders at the approval gate without executing', async () => {
@@ -157,7 +245,6 @@ describe('AgentRunnerService', () => {
 
   it('marks the task failed and logs the error when the model call blows up', async () => {
     modelRouter.generate.mockRejectedValue(new Error('provider down'));
-    // failSafely re-reads status: pending first, then running after transitions
     tasks.getTask
       .mockResolvedValueOnce(makeTask())                       // run() initial read
       .mockResolvedValueOnce(makeTask({ status: 'running' }))  // failSafely current
@@ -166,11 +253,7 @@ describe('AgentRunnerService', () => {
     await service.run(ORG, TASK);
 
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'failed', { error: 'provider down' });
-    const logs = events.publish.mock.calls
-      .map(([event]) => event)
-      .filter((event) => event.type === 'task.log')
-      .map((event) => (event.payload as { message: string }).message);
-    expect(logs.some((message) => message.includes('ERROR: provider down'))).toBe(true);
+    expect(publishedLogs().some((message) => message.includes('ERROR: provider down'))).toBe(true);
   });
 
   it('ignores tasks that are no longer pending', async () => {

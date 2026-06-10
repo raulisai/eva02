@@ -5,6 +5,9 @@ import { ModelRouterService } from '../model-router/model-router.service';
 import { ToolRouterService } from '../tool-router/tool-router.service';
 import { TasksService } from '../tasks/tasks.service';
 import { Task } from '../tasks/task.types';
+import { MediaService } from './media.service';
+import { ScriptForgeService } from './script-forge.service';
+import { classifyTier } from './tier';
 
 /**
  * Immediate spoken acknowledgments — EVA answers in <100ms with one of these
@@ -35,10 +38,17 @@ const ACK_RULES: Array<{ pattern: RegExp; say: string; hint: string }> = [
 
 const DEFAULT_ACK = { say: 'Enseguida, ya estoy en ello ⚙️', hint: 'default' };
 
+const LONG_TASK_ACK =
+  'Esto va a tomar un rato — lo estoy atendiendo en segundo plano 🛠️. '
+  + 'Puedes seguir hablándome mientras tanto; te aviso cuando termine.';
+
 const SYSTEM_PROMPT = `Eres EVA, un agente operativo. Responde SIEMPRE en español,
 de forma directa y concisa (máximo ~120 palabras salvo que pidan detalle).
 Si la orden requiere acciones externas que no puedes ejecutar todavía, explica
 exactamente qué harías paso a paso.`;
+
+const CHAT_PROMPT = `Eres EVA, asistente personal. Conversación casual: responde en español,
+cálida y breve (1-3 frases). Sin listas ni formalidades.`;
 
 @Injectable()
 export class AgentRunnerService implements OnApplicationBootstrap {
@@ -50,6 +60,8 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly intentRouter: IntentRouterService,
     private readonly modelRouter: ModelRouterService,
     private readonly toolRouter: ToolRouterService,
+    private readonly media: MediaService,
+    private readonly forge: ScriptForgeService,
   ) {}
 
   onApplicationBootstrap() {
@@ -78,16 +90,36 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
     const input = task.description ?? task.title;
     const startedAt = Date.now();
-
-    // 1. Instant acknowledgment (<100ms — no model involved)
-    const ack = this.pickAck(input);
-    await this.say(orgId, taskId, ack.say);
-    await this.log(orgId, taskId, `ack emitted (${ack.hint}) in ${Date.now() - startedAt}ms`, 'pipeline');
+    const tier = classifyTier(input);
 
     try {
-      // 2. Intent classification
+      // ── Tier: chat — straight to the model, no pipeline overhead ──
+      if (tier.tier === 'chat') {
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        await this.log(orgId, taskId, `tier=chat (${tier.reason}) — direct model, cheap tier`, 'pipeline');
+        const t0 = Date.now();
+        const reply = await this.modelRouter.generate(input, {
+          orgId, budget: 'cheap', maxTokens: 300, systemPrompt: CHAT_PROMPT,
+        });
+        await this.deliver(orgId, taskId, reply.text, reply.model, Date.now() - t0);
+        await this.log(orgId, taskId, `chat answered in ${Date.now() - startedAt}ms`, 'pipeline');
+        return;
+      }
+
+      // ── Tier: quick (<1 min) — short "espera" + do it ──
+      // ── Tier: long (>1 min) — background notice, chat stays free ──
+      const ack = tier.tier === 'long'
+        ? { say: LONG_TASK_ACK, hint: 'background' }
+        : this.pickAck(input);
+      await this.say(orgId, taskId, ack.say);
+      await this.log(
+        orgId, taskId,
+        `tier=${tier.tier} est ~${tier.estimateSec}s (${tier.reason}) — ack "${ack.hint}" in ${Date.now() - startedAt}ms`,
+        'pipeline',
+      );
+
       await this.tasks.transition(taskId, orgId, 'planning');
-      await this.log(orgId, taskId, 'classifying intent…', 'intent');
       const intent = await this.intentRouter.classify(input, orgId, { taskId });
       await this.log(
         orgId, taskId,
@@ -97,7 +129,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
       await this.tasks.transition(taskId, orgId, 'running');
 
-      // 3. Sensitive orders stop at the approval gate — never auto-executed.
+      // Sensitive orders stop at the approval gate — never auto-executed.
       if (intent.intent === 'core_path_approval') {
         await this.tasks.transition(taskId, orgId, 'waiting_for_approval');
         await this.say(orgId, taskId, 'Necesito tu aprobación para continuar — revisa la bandeja de Approvals 🛡️');
@@ -105,7 +137,23 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         return;
       }
 
-      // 4. Tool routing (transparent dry-run of what executes this)
+      // Long + code/automation → EVA writes and sandboxes her own script
+      if (tier.tier === 'long' && this.forge.isScriptTask(input)) {
+        const outcome = await this.forge.forge(orgId, taskId, input, (message, scope) => this.log(orgId, taskId, message, scope));
+        const summary = [
+          `Generé el script **${outcome.filename}** (${outcome.language}): ${outcome.description}`,
+          outcome.skillSlug ? `Quedó registrado como skill \`${outcome.skillSlug}\` y como artifact.` : 'Quedó guardado como artifact.',
+          outcome.executed
+            ? `Lo ejecuté en un sandbox Docker (sin red) y esta fue la salida:\n\n${outcome.output || '(sin salida)'}`
+            : outcome.note ?? '',
+        ].filter(Boolean).join('\n\n');
+        await this.deliver(orgId, taskId, summary, 'script-forge', Date.now() - startedAt);
+        await this.maybeAttachMedia(orgId, taskId, input, summary);
+        await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+        return;
+      }
+
+      // Tool routing (transparent dry-run of what executes this)
       const capability = ack.hint === 'search' ? 'search' : 'generate';
       try {
         const route = this.toolRouter.route(capability);
@@ -122,15 +170,15 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         await this.log(orgId, taskId, 'buscando en internet… (web-search tool)', 'web');
       }
 
-      // 5. Model call — fast path uses the cheap tier for speed
-      const budget = intent.intent === 'fast_path' ? 'cheap' : 'balanced';
+      // Model call — quick rides the cheap tier for speed
+      const budget = tier.tier === 'quick' ? 'cheap' : 'balanced';
       await this.log(orgId, taskId, `calling model (budget=${budget}, org keys first, env fallback)…`, 'model');
       const t0 = Date.now();
       const result = await this.modelRouter.generate(input, {
         orgId,
         budget,
         systemPrompt: SYSTEM_PROMPT,
-        maxTokens: 700,
+        maxTokens: tier.tier === 'long' ? 1200 : 700,
       });
       const elapsed = Date.now() - t0;
       await this.log(
@@ -139,22 +187,41 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         'model',
       );
 
-      // 6. Deliver result + complete
-      await this.events.publish({
-        type: 'task.result',
-        orgId,
-        taskId,
-        payload: { text: result.text, model: result.model, latency_ms: elapsed },
-      });
-      await this.tasks.transition(taskId, orgId, 'completed', {
-        result: { text: result.text, model: result.model, latency_ms: elapsed },
-      });
+      await this.deliver(orgId, taskId, result.text, result.model, elapsed);
+      await this.maybeAttachMedia(orgId, taskId, input, result.text);
       await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
     } catch (error) {
       const message = (error as Error).message;
       this.logger.error(`Agent run failed for task ${taskId}: ${message}`);
       await this.log(orgId, taskId, `ERROR: ${message}`, 'pipeline');
       await this.failSafely(orgId, taskId, message);
+    }
+  }
+
+  /** Final answer event + completed transition with the result persisted. */
+  private async deliver(orgId: string, taskId: string, text: string, model: string, latencyMs: number) {
+    await this.events.publish({
+      type: 'task.result',
+      orgId,
+      taskId,
+      payload: { text, model, latency_ms: latencyMs },
+    });
+    await this.tasks.transition(taskId, orgId, 'completed', {
+      result: { text, model, latency_ms: latencyMs },
+    });
+  }
+
+  /** Image/audio attachments when the order asks for them (bucket + task.media). */
+  private async maybeAttachMedia(orgId: string, taskId: string, input: string, answer: string) {
+    if (this.media.wantsImage(input)) {
+      await this.log(orgId, taskId, 'generando imagen (SVG) y subiendo al bucket eva-media…', 'media');
+      const url = await this.media.sendImage(orgId, taskId, input);
+      await this.log(orgId, taskId, url ? `imagen lista: ${url}` : 'no se pudo generar la imagen', 'media');
+    }
+    if (this.media.wantsAudio(input)) {
+      await this.log(orgId, taskId, 'generando audio (TTS) y subiendo al bucket eva-media…', 'media');
+      const url = await this.media.sendAudio(orgId, taskId, answer);
+      await this.log(orgId, taskId, url ? `audio listo: ${url}` : 'audio no disponible (falta key de OpenAI)', 'media');
     }
   }
 

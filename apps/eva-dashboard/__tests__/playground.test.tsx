@@ -1,6 +1,23 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { PlaygroundClient } from '@/components/playground/playground-client';
-import type { Task } from '@/lib/types';
+import type { EvaEvent, Task, TaskStatus } from '@/lib/types';
+
+const mockWsState: {
+  events: EvaEvent[];
+  taskPatches: Record<string, TaskStatus>;
+} = {
+  events: [],
+  taskPatches: {},
+};
+
+jest.mock('@/hooks/use-ws', () => ({
+  useWs: () => ({
+    connected: true,
+    events: mockWsState.events,
+    taskPatches: mockWsState.taskPatches,
+    patchTaskStatus: jest.fn(),
+  }),
+}));
 
 jest.mock('@/lib/supabase/client', () => ({
   createClient: () => ({
@@ -9,7 +26,8 @@ jest.mock('@/lib/supabase/client', () => ({
     },
     from: () => ({
       select: () => ({
-        eq: () => ({ maybeSingle: jest.fn().mockResolvedValue({ data: null }) }),
+        eq: function eq() { return this; },
+        maybeSingle: jest.fn().mockResolvedValue({ data: null }),
       }),
     }),
   }),
@@ -33,6 +51,8 @@ const task: Task = {
 
 describe('PlaygroundClient', () => {
   beforeEach(() => {
+    mockWsState.events = [];
+    mockWsState.taskPatches = {};
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       json: async () => task,
@@ -57,8 +77,11 @@ describe('PlaygroundClient', () => {
     ['Received', 'Planning', 'Executing', 'Approval', 'Done'].forEach((stage) => {
       expect(screen.getByText(stage)).toBeInTheDocument();
     });
-    // Appears both in the header and as the user bubble in the conversation
-    expect(screen.getAllByText('Resume mis notificaciones').length).toBeGreaterThanOrEqual(2);
+    // The order shows as the user bubble in the conversation
+    expect(screen.getByText('Resume mis notificaciones')).toBeInTheDocument();
+    // Non-terminal task is flagged as running in background; chat input stays free
+    expect(screen.getByText('en segundo plano')).toBeInTheDocument();
+    expect(screen.getByLabelText('Order')).not.toBeDisabled();
 
     // Conversation shows the user order and the working indicator;
     // the action log console is live from the start.
@@ -66,5 +89,41 @@ describe('PlaygroundClient', () => {
     expect(screen.getByText('EVA está trabajando…')).toBeInTheDocument();
     expect(screen.getByTestId('action-log')).toBeInTheDocument();
     expect(screen.getByText('Waiting for the agent to start…')).toBeInTheDocument();
+  });
+
+  it('renders the final model answer for a simple greeting path', async () => {
+    const greetingTask = {
+      ...task,
+      title: 'hola',
+      description: 'hola',
+      status: 'running' as const,
+    };
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => greetingTask,
+      text: async () => '',
+    }) as jest.Mock;
+
+    const { rerender } = render(<PlaygroundClient />);
+
+    fireEvent.change(screen.getByLabelText('Order'), { target: { value: 'hola' } });
+    fireEvent.click(screen.getByText('Run'));
+
+    await screen.findByText('hola');
+
+    mockWsState.events = [
+      {
+        type: 'task.result',
+        orgId: 'org',
+        taskId: greetingTask.id,
+        payload: { text: 'Hola, aqui estoy. ¿Que hacemos?', model: 'claude-haiku', latency_ms: 42 },
+        ts: Date.now(),
+      },
+    ];
+    mockWsState.taskPatches = { [greetingTask.id]: 'completed' };
+    rerender(<PlaygroundClient />);
+
+    expect(await screen.findByText('Hola, aqui estoy. ¿Que hacemos?')).toBeInTheDocument();
+    expect(screen.queryByText('EVA está trabajando…')).not.toBeInTheDocument();
   });
 });
