@@ -10,7 +10,6 @@ import {
 } from '@nestjs/websockets';
 import { Injectable, Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
-import * as jwt from 'jsonwebtoken';
 import { EvaEvent } from '../events/event-bus.service';
 import { DatabaseService } from '../database/database.service';
 
@@ -43,19 +42,25 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     }
 
     try {
-      const secret = process.env.SUPABASE_JWT_SECRET ?? '';
-      const payload = jwt.verify(token, secret) as Record<string, unknown>;
-      const userId = payload['sub'] as string;
+      // Use Supabase auth.getUser() — handles ES256/HS256 automatically
+      const { data: { user }, error: authError } = await this.db.forUser(token).auth.getUser();
+
+      if (authError || !user) {
+        this.logger.warn(`handleConnection rejected: ${authError?.message ?? 'no user'}`);
+        client.emit('error', { message: 'Invalid token' });
+        client.disconnect(true);
+        return;
+      }
 
       // Look up org_id from users table
-      const { data, error } = await this.db.admin
+      const { data, error: dbError } = await this.db.admin
         .from('users')
         .select('org_id')
-        .eq('id', userId)
+        .eq('id', user.id)
         .limit(1)
         .single();
 
-      if (error || !data?.org_id) {
+      if (dbError || !data?.org_id) {
         client.emit('error', { message: 'User has no org membership' });
         client.disconnect(true);
         return;
@@ -63,14 +68,14 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
       const orgId = data.org_id as string;
 
-      // Join org-scoped room so only org members receive events
       await client.join(`org:${orgId}`);
       (client.data as any).orgId = orgId;
-      (client.data as any).userId = userId;
+      (client.data as any).userId = user.id;
 
-      this.logger.debug(`Client ${client.id} joined org:${orgId}`);
+      this.logger.log(`Client ${client.id} joined org:${orgId}`);
       client.emit('connected', { orgId });
-    } catch {
+    } catch (err) {
+      this.logger.warn(`handleConnection rejected: ${(err as Error).message}`);
       client.emit('error', { message: 'Invalid token' });
       client.disconnect(true);
     }
