@@ -18,7 +18,7 @@ version: '1.0'
 | DB | Supabase Postgres + pgvector (vector 1536) |
 | Cache / Queue | Redis · BullMQ · Redis Streams |
 | Browser | Playwright (perfiles persistentes) |
-| Auth | Supabase Auth (JWT con claim org_id) |
+| Auth | Supabase Auth (JWT ES256) — `org_id` se busca en tabla `users`, no viene en el JWT |
 | Dashboard | Next.js · Tailwind · shadcn/ui |
 | Realtime | WebSocket (Gateway propio) + Supabase Realtime |
 | Reloj | Kotlin · Jetpack Compose for Wear OS · Canvas |
@@ -127,18 +127,17 @@ organizations (id, name, plan, cost_limit_usd)
 
 ```
 001_extensions.sql          → uuid, pgcrypto, vector
-002_tenancy_users.sql       → organizations, users, devices, helper current_org_id()
-003_nodes.sql               → nodes, node_capabilities
-004_tasks.sql               → tasks, task_steps, task_events
-005_memory.sql              → memories, memory_embeddings (ivfflat index)
-006_approvals.sql           → approvals (action_hash, nonce, expires_at)
+002_orgs_users.sql          → organizations, users (id=auth.uid), devices
+003_tasks.sql               → tasks, task_steps + set_updated_at trigger
+004_events.sql              → task_events
+005_memories.sql            → memories, memory_embeddings (ivfflat index)
+006_intent_routes.sql       → intent_routes
 007_communication.sql       → messages, conversations, notifications
 008_skills.sql              → skills, skill_versions, tools, tool_calls
 009_browser.sql             → browser_sessions, screenshots
 010_dev_manager.sql         → projects, dev_tasks, build_runs, test_runs, roadmap_items
 011_wear_fast_path.sql      → wear_tokens, wear_sessions, wear_fast_path_logs, fast_path_policies
-012_experiences_costs.sql   → experiences, costs
-013_audit_log.sql           → audit_log (append-only, prev_hash, hash)
+013_approvals.sql           → approvals (action_hash, nonce, expires_at)
 014_rls_policies.sql        → RLS de TODAS las tablas anteriores
 015_wear_ui.sql             → wear_capabilities, wear_directives, wear_form_responses, wear_sensor_consents
 ```

@@ -18,19 +18,20 @@ Los scripts se versionan en `infra/supabase/migrations/` y se aplican **en orden
 | Migración | Contenido | Fase que la usa |
 |-----------|-----------|-----------------|
 | `001_extensions.sql` | uuid, pgcrypto, vector | Fase 1 |
-| `002_tenancy_users.sql` | orgs, users, devices, helper RLS | Fase 1 |
-| `003_nodes.sql` | nodes, node_capabilities | Fase 1 / 5 |
-| `004_tasks.sql` | tasks, task_steps, task_events | Fase 1 |
-| `005_memory.sql` | memories, memory_embeddings (pgvector) | Fase 3 |
-| `006_approvals.sql` | approvals (con action_hash + nonce) | Fase 8 |
+| `002_orgs_users.sql` | organizations, users (`id=auth.uid()`), devices | Fase 1 |
+| `003_tasks.sql` | tasks, task_steps + trigger `set_updated_at` | Fase 1 |
+| `004_events.sql` | task_events | Fase 1 |
+| `005_memories.sql` | memories, memory_embeddings (pgvector) | Fase 3 |
+| `006_intent_routes.sql` | intent_routes | Fase 2 |
 | `007_communication.sql` | messages, conversations, notifications | Fase 9 |
 | `008_skills.sql` | skills, skill_versions, tools, tool_calls | Fase 10 |
 | `009_browser.sql` | browser_sessions, screenshots | Fase 7 |
-| `010_dev_manager.sql` | projects, repositories, dev_tasks, build/test/reviews, roadmap | Fase 6 |
-| `011_wear_fast_path.sql` | wear_sessions, wear_tokens, wear_fast_path_logs, fast_path_policies, intent_routes | Fase 13 |
-| `012_experiences_costs.sql` | experiences, costs | Fase 12 |
-| `013_audit_log.sql` | audit_log append-only + hash-chaining | Fase 1 (base) / 18 (hardening) |
+| `010_dev_manager.sql` | projects, dev_tasks, build/test/reviews, roadmap | Fase 6 |
+| `011_wear_fast_path.sql` | wear_sessions, wear_tokens, wear_fast_path_logs, fast_path_policies | Fase 13 |
+| `012_nodes_devices.sql` | nodes, node_capabilities | Fase 1 / 5 |
+| `013_approvals.sql` | approvals (action_hash + nonce) | Fase 8 |
 | `014_rls_policies.sql` | políticas RLS de todas las tablas | tras cada bloque |
+| `015_wear_ui.sql` | wear_capabilities, wear_directives, wear_form_responses | Fase 13 |
 
 ---
 
