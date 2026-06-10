@@ -1,6 +1,16 @@
 {
   "examples": [
     {
+      "name": "Find a books API",
+      "input": "Find a safe public API for books and generate a small lookup script",
+      "expected_tool": "public_api.catalog_search"
+    },
+    {
+      "name": "Probe endpoint",
+      "input": "Verify the public holidays API works before using it",
+      "expected_tool": "public_api.probe"
+    },
+    {
       "name": "Weather tomorrow",
       "input": "Clima manana en Ciudad de Mexico",
       "expected_tool": "public_api.weather_forecast"

@@ -58,6 +58,21 @@ export class BrowserRepository {
     return data as BrowserSession;
   }
 
+  async findLatestOpenSessionForProfile(profileId: string, orgId: string): Promise<BrowserSession | null> {
+    const { data, error } = await this.db.admin
+      .from('browser_sessions')
+      .select('*')
+      .eq('org_id', orgId)
+      .eq('profile_id', profileId)
+      .eq('status', 'open')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) this.fail('browser_sessions.findOpenForProfile', error);
+    return data as BrowserSession | null;
+  }
+
   async findSessionOrThrow(sessionId: string, orgId: string): Promise<BrowserSession> {
     const { data, error } = await this.db.admin
       .from('browser_sessions')

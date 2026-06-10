@@ -19,13 +19,18 @@ const CHANNELS = [
   { provider: 'telegram', label: 'Telegram', icon: Send,              ready: true,  blurb: 'Run EVA from Telegram DMs and groups.' },
   { provider: 'discord',  label: 'Discord',  icon: MessageCircle,     ready: false, blurb: 'Discord bot integration.' },
   { provider: 'slack',    label: 'Slack',    icon: Slack,             ready: false, blurb: 'Slack app integration.' },
-  { provider: 'whatsapp', label: 'WhatsApp', icon: Phone,             ready: false, blurb: 'WhatsApp Business API.' },
+  { provider: 'whatsapp', label: 'WhatsApp', icon: Phone,             ready: true,  blurb: 'WhatsApp Web profile with QR login.' },
   { provider: 'email',    label: 'Email',    icon: Mail,              ready: false, blurb: 'Inbound + outbound email.' },
   { provider: 'sms',      label: 'SMS (Twilio)', icon: MessageSquareText, ready: false, blurb: 'SMS via Twilio.' },
 ];
 
 interface ChannelsClientProps {
   initialIntegrations: Integration[];
+}
+
+interface WhatsAppSessionStatus {
+  state: 'logged_in' | 'qr_required' | 'loading' | 'unknown';
+  screenshot?: { image_base64: string; mime_type: string };
 }
 
 export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
@@ -36,6 +41,7 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
   const [allowedIds, setAllowedIds] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+  const [whatsAppQr, setWhatsAppQr] = useState<string | null>(null);
 
   const current = useMemo(
     () => integrations.find((integration) => integration.provider === selected),
@@ -109,6 +115,38 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
       setFeedback(result.ok
         ? { ok: true, text: `Webhook registered: ${result.url}` }
         : { ok: false, text: result.error ?? 'setWebhook failed' });
+    } catch (error) {
+      setFeedback({ ok: false, text: (error as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function startWhatsAppSession() {
+    setBusy('whatsapp');
+    setFeedback(null);
+    setWhatsAppQr(null);
+    try {
+      const result = await coreFetch<WhatsAppSessionStatus>('/integrations/whatsapp/start-session', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (result.state === 'logged_in') {
+        const refreshed = await coreFetch<Integration[]>('/integrations?kind=channel');
+        setIntegrations(refreshed);
+        setFeedback({ ok: true, text: 'WhatsApp Web is linked and ready.' });
+        toast('WhatsApp Web ready', 'success');
+        return;
+      }
+      if (result.screenshot?.image_base64) {
+        setWhatsAppQr(`data:${result.screenshot.mime_type};base64,${result.screenshot.image_base64}`);
+      }
+      setFeedback({
+        ok: result.state === 'qr_required',
+        text: result.state === 'qr_required'
+          ? 'Scan this QR with WhatsApp on your phone.'
+          : 'WhatsApp Web is still loading. Try again in a few seconds.',
+      });
     } catch (error) {
       setFeedback({ ok: false, text: (error as Error).message });
     } finally {
@@ -234,6 +272,41 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
                 <Button size="sm" variant="ghost" onClick={registerWebhook} disabled={busy !== null || !(current?.has_secret ?? current?.secret_hint)}>
                   <Webhook className="w-3.5 h-3.5" />
                   Register webhook
+                </Button>
+              </div>
+            </>
+          )}
+
+          {selected === 'whatsapp' && (
+            <>
+              <section className="space-y-2">
+                <h3 className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">WhatsApp Web</h3>
+                <p className="text-xs text-zinc-500 leading-relaxed">
+                  EVA opens Chromium with a local WhatsApp profile. Scan once; the session stays in that profile.
+                </p>
+              </section>
+
+              {feedback && (
+                <div className={cn(
+                  'flex items-center gap-2 text-xs font-mono rounded-sm border px-3 py-2',
+                  feedback.ok ? 'border-emerald-500/30 text-emerald-400' : 'border-red-500/30 text-red-400',
+                )}>
+                  {feedback.ok ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                  <span className="break-all">{feedback.text}</span>
+                </div>
+              )}
+
+              {whatsAppQr && (
+                <div className="inline-block border border-zinc-800 rounded-sm bg-white p-3">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={whatsAppQr} alt="WhatsApp Web QR" className="w-72 h-auto" />
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 pt-2 border-t border-zinc-800">
+                <Button size="sm" onClick={startWhatsAppSession} disabled={busy !== null}>
+                  {busy === 'whatsapp' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  Connect WhatsApp Web
                 </Button>
               </div>
             </>

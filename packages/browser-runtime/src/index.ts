@@ -108,6 +108,15 @@ export class PlaywrightBrowserRuntime {
     });
   }
 
+  async evaluate<T = unknown, A = unknown>(
+    sessionId: string,
+    pageFunction: (arg: A) => T | Promise<T>,
+    arg?: A,
+  ): Promise<T> {
+    const session = this.requireSession(sessionId);
+    return session.page.evaluate(pageFunction as any, arg as any) as Promise<T>;
+  }
+
   async wait(sessionId: string, ms: number): Promise<void> {
     const session = this.requireSession(sessionId);
     await session.page.waitForTimeout(ms);
@@ -168,5 +177,14 @@ export class PlaywrightBrowserRuntime {
 
 export type BrowserRuntime = Pick<
   PlaywrightBrowserRuntime,
-  'open' | 'click' | 'type' | 'screenshot' | 'extractText' | 'extractTable' | 'wait' | 'close' | 'storageState'
+  'open'
+  | 'click'
+  | 'type'
+  | 'screenshot'
+  | 'extractText'
+  | 'extractTable'
+  | 'evaluate'
+  | 'wait'
+  | 'close'
+  | 'storageState'
 >;

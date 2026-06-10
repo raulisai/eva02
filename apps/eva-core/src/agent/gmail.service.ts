@@ -51,6 +51,35 @@ export class GmailService {
     return this.listAndFormat(tokenResult.token, { q: gmailQuery, limit }, gmailQuery);
   }
 
+  /**
+   * Two-stage search: tries recent emails first (last 90 days), then falls back
+   * to all-time if nothing found. On fallback it annotates the result so the
+   * user knows the match came from older history.
+   */
+  async fetchSearchWithFallback(orgId: string, query: string, limit = 5): Promise<GmailFetchResult> {
+    const tokenResult = await this.getAccessToken(orgId);
+    if (!tokenResult.ok) return { ok: false, reason: tokenResult.reason, error: tokenResult.error };
+
+    const recent = await this.listAndFormat(
+      tokenResult.token,
+      { q: `${query} newer_than:90d`, limit },
+      query,
+    );
+
+    if (recent.ok) return recent;
+    if (recent.reason !== 'empty') return recent;
+
+    const allTime = await this.listAndFormat(tokenResult.token, { q: query, limit }, query);
+    if (!allTime.ok) return allTime;
+
+    // Strip the default header and prefix with context message
+    const body = allTime.text.replace(/^📬[^\n]+\n\n/, '');
+    return {
+      ok: true,
+      text: `📬 No encontré en los últimos 3 meses, pero sí en correos más antiguos:\n\n${body}`,
+    };
+  }
+
   /** Legacy compat — returns null on any failure (used by older callers). */
   async formatLatestForResponse(orgId: string, limit = 5): Promise<string | null> {
     const r = await this.fetchLatest(orgId, limit);

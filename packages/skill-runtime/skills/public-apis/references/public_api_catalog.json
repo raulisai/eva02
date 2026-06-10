@@ -1,0 +1,589 @@
+{
+  "version": "2026-06-10",
+  "safety_policy": {
+    "default_allowed_methods": ["GET"],
+    "disallowed": ["payments", "purchases", "sending_messages", "account_changes", "deletes", "writes", "private_data", "scraping_html"],
+    "automation_rule": "Use these APIs for read-only lookup and artifact generation. Never use outputs alone for medical, legal, financial, production, or emergency decisions."
+  },
+  "verification": {
+    "last_live_probe_date": "2026-06-10",
+    "command": "node scripts/public_api_catalog.mjs --probe all",
+    "verified_endpoints": 29,
+    "failed_endpoints": 0
+  },
+  "apis": [
+    {
+      "id": "open-meteo-forecast",
+      "name": "Open-Meteo Forecast",
+      "category": "weather",
+      "description": "Daily and hourly weather forecast by latitude/longitude.",
+      "docs_url": "https://open-meteo.com/en/docs",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Fair use; cache repeated location/date lookups.",
+      "endpoints": [
+        {
+          "id": "forecast.daily",
+          "method": "GET",
+          "url_template": "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=auto&forecast_days={days}",
+          "sample_url": "https://api.open-meteo.com/v1/forecast?latitude=19.4326&longitude=-99.1332&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=auto&forecast_days=1",
+          "params": { "latitude": "19.4326", "longitude": "-99.1332", "days": "1" },
+          "use_for": ["weather", "forecast", "planning_by_weather"]
+        }
+      ]
+    },
+    {
+      "id": "open-meteo-geocoding",
+      "name": "Open-Meteo Geocoding",
+      "category": "geo",
+      "description": "Resolve city names to coordinates and timezone.",
+      "docs_url": "https://open-meteo.com/en/docs/geocoding-api",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Fair use.",
+      "endpoints": [
+        {
+          "id": "geo.search",
+          "method": "GET",
+          "url_template": "https://geocoding-api.open-meteo.com/v1/search?name={name}&count={count}&language={language}&format=json",
+          "sample_url": "https://geocoding-api.open-meteo.com/v1/search?name=Ciudad%20de%20Mexico&count=1&language=es&format=json",
+          "params": { "name": "Ciudad de Mexico", "count": "1", "language": "es" },
+          "use_for": ["city_to_coordinates", "timezone_lookup"]
+        }
+      ]
+    },
+    {
+      "id": "open-meteo-air-quality",
+      "name": "Open-Meteo Air Quality",
+      "category": "weather",
+      "description": "Air quality forecast for pollutants such as PM10 and PM2.5.",
+      "docs_url": "https://open-meteo.com/en/docs/air-quality-api",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Fair use; keep ranges small.",
+      "endpoints": [
+        {
+          "id": "air.hourly",
+          "method": "GET",
+          "url_template": "https://air-quality-api.open-meteo.com/v1/air-quality?latitude={latitude}&longitude={longitude}&hourly=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide&forecast_days={days}&timezone=auto",
+          "sample_url": "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=19.4326&longitude=-99.1332&hourly=pm10,pm2_5&forecast_days=1&timezone=auto",
+          "params": { "latitude": "19.4326", "longitude": "-99.1332", "days": "1" },
+          "use_for": ["air_quality", "health_context_weather"]
+        }
+      ]
+    },
+    {
+      "id": "themealdb",
+      "name": "TheMealDB",
+      "category": "food",
+      "description": "Recipe lookup by name, ingredient, category, area, or random meal.",
+      "docs_url": "https://www.themealdb.com/api.php",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Free tier public endpoints; avoid bulk scraping.",
+      "endpoints": [
+        {
+          "id": "meal.search",
+          "method": "GET",
+          "url_template": "https://www.themealdb.com/api/json/v1/1/search.php?s={query}",
+          "sample_url": "https://www.themealdb.com/api/json/v1/1/search.php?s=Arrabiata",
+          "params": { "query": "Arrabiata" },
+          "use_for": ["recipes", "meal_planning"]
+        },
+        {
+          "id": "meal.filter_ingredient",
+          "method": "GET",
+          "url_template": "https://www.themealdb.com/api/json/v1/1/filter.php?i={ingredient}",
+          "sample_url": "https://www.themealdb.com/api/json/v1/1/filter.php?i=chicken_breast",
+          "params": { "ingredient": "chicken_breast" },
+          "use_for": ["recipes_by_ingredient"]
+        }
+      ]
+    },
+    {
+      "id": "rest-countries",
+      "name": "REST Countries",
+      "category": "reference",
+      "description": "Country names, capitals, population, currencies, languages, flags.",
+      "docs_url": "https://restcountries.com/",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Cache repeated country lookups.",
+      "endpoints": [
+        {
+          "id": "country.name",
+          "method": "GET",
+          "url_template": "https://restcountries.com/v3.1/name/{name}?fields=name,capital,region,population,languages,currencies,flags",
+          "sample_url": "https://restcountries.com/v3.1/name/mexico?fields=name,capital,region,population,languages,currencies,flags",
+          "params": { "name": "mexico" },
+          "use_for": ["country_reference", "localization"]
+        }
+      ]
+    },
+    {
+      "id": "world-bank",
+      "name": "World Bank Data API",
+      "category": "economics",
+      "description": "Public development indicators by country.",
+      "docs_url": "https://datahelpdesk.worldbank.org/knowledgebase/articles/898581-api-basic-call-structures",
+      "auth": "none",
+      "risk": "caution",
+      "safe_use": "Informational economic data only; do not automate financial decisions.",
+      "rate_limit": "Use small per_page values and cache.",
+      "endpoints": [
+        {
+          "id": "worldbank.indicator",
+          "method": "GET",
+          "url_template": "https://api.worldbank.org/v2/country/{country}/indicator/{indicator}?format=json&per_page={per_page}",
+          "sample_url": "https://api.worldbank.org/v2/country/MX/indicator/SP.POP.TOTL?format=json&per_page=3",
+          "params": { "country": "MX", "indicator": "SP.POP.TOTL", "per_page": "3" },
+          "use_for": ["economics", "population", "public_indicators"]
+        }
+      ]
+    },
+    {
+      "id": "open-library",
+      "name": "Open Library",
+      "category": "books",
+      "description": "Book and author discovery through Internet Archive Open Library APIs.",
+      "docs_url": "https://openlibrary.org/developers/api",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Default 1 request/second; identify with User-Agent for regular use.",
+      "endpoints": [
+        {
+          "id": "books.search",
+          "method": "GET",
+          "url_template": "https://openlibrary.org/search.json?q={query}&limit={limit}",
+          "sample_url": "https://openlibrary.org/search.json?q=clean%20code&limit=3",
+          "params": { "query": "clean code", "limit": "3" },
+          "use_for": ["books", "bibliography", "reading_lists"]
+        }
+      ]
+    },
+    {
+      "id": "usgs-earthquake",
+      "name": "USGS Earthquake Catalog",
+      "category": "earth",
+      "description": "Recent earthquake event search from USGS.",
+      "docs_url": "https://earthquake.usgs.gov/fdsnws/event/1/",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Keep time windows and limits small.",
+      "endpoints": [
+        {
+          "id": "earthquake.recent",
+          "method": "GET",
+          "url_template": "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&limit={limit}&orderby=time&minmagnitude={minmagnitude}",
+          "sample_url": "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&limit=5&orderby=time&minmagnitude=4.5",
+          "params": { "limit": "5", "minmagnitude": "4.5" },
+          "use_for": ["earthquakes", "monitoring"]
+        }
+      ]
+    },
+    {
+      "id": "nager-date",
+      "name": "Nager.Date",
+      "category": "calendar",
+      "description": "Public holidays by country and year.",
+      "docs_url": "https://date.nager.at/api",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Docs state no rate limits; still cache yearly results.",
+      "endpoints": [
+        {
+          "id": "holidays.country_year",
+          "method": "GET",
+          "url_template": "https://date.nager.at/api/v3/PublicHolidays/{year}/{country}",
+          "sample_url": "https://date.nager.at/api/v3/PublicHolidays/2026/MX",
+          "params": { "year": "2026", "country": "MX" },
+          "use_for": ["holidays", "scheduling"]
+        }
+      ]
+    },
+    {
+      "id": "frankfurter",
+      "name": "Frankfurter",
+      "category": "finance",
+      "description": "Daily exchange rates and currency metadata.",
+      "docs_url": "https://frankfurter.dev/",
+      "auth": "none",
+      "risk": "caution",
+      "safe_use": "Reference exchange-rate data only; do not automate trades or transfers.",
+      "rate_limit": "No quotas listed; cache latest rates.",
+      "endpoints": [
+        {
+          "id": "fx.rate",
+          "method": "GET",
+          "url_template": "https://api.frankfurter.dev/v2/rate/{base}/{quote}",
+          "sample_url": "https://api.frankfurter.dev/v2/rate/USD/MXN",
+          "params": { "base": "USD", "quote": "MXN" },
+          "use_for": ["exchange_rates", "currency_reference"]
+        }
+      ]
+    },
+    {
+      "id": "tvmaze",
+      "name": "TVmaze",
+      "category": "media",
+      "description": "TV show search, schedules, episodes, cast metadata.",
+      "docs_url": "https://www.tvmaze.com/api",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Use cache; avoid full schedule unless needed.",
+      "endpoints": [
+        {
+          "id": "tv.show_search",
+          "method": "GET",
+          "url_template": "https://api.tvmaze.com/search/shows?q={query}",
+          "sample_url": "https://api.tvmaze.com/search/shows?q=one%20piece",
+          "params": { "query": "one piece" },
+          "use_for": ["tv_lookup", "episode_research"]
+        }
+      ]
+    },
+    {
+      "id": "hacker-news",
+      "name": "Hacker News Firebase API",
+      "category": "news",
+      "description": "Read public Hacker News items and story ids.",
+      "docs_url": "https://github.com/HackerNews/API",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Cache item lookups when iterating story ids.",
+      "endpoints": [
+        {
+          "id": "hn.item",
+          "method": "GET",
+          "url_template": "https://hacker-news.firebaseio.com/v0/item/{id}.json",
+          "sample_url": "https://hacker-news.firebaseio.com/v0/item/8863.json",
+          "params": { "id": "8863" },
+          "use_for": ["tech_news", "hn_item_lookup"]
+        }
+      ]
+    },
+    {
+      "id": "arxiv",
+      "name": "arXiv API",
+      "category": "research",
+      "description": "Open academic preprint metadata search.",
+      "docs_url": "https://info.arxiv.org/help/api/index.html",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Respect arXiv API terms and throttle requests.",
+      "endpoints": [
+        {
+          "id": "arxiv.query",
+          "method": "GET",
+          "url_template": "https://export.arxiv.org/api/query?search_query=all:{query}&start=0&max_results={limit}",
+          "sample_url": "https://export.arxiv.org/api/query?search_query=all:agentic%20ai&start=0&max_results=3",
+          "params": { "query": "agentic ai", "limit": "3" },
+          "use_for": ["papers", "research_monitoring"],
+          "response": "xml"
+        }
+      ]
+    },
+    {
+      "id": "crossref",
+      "name": "Crossref REST API",
+      "category": "research",
+      "description": "Scholarly metadata by title, DOI, author, funder, and more.",
+      "docs_url": "https://www.crossref.org/documentation/retrieve-metadata/rest-api/",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Use polite pool with mailto for heavy use.",
+      "endpoints": [
+        {
+          "id": "crossref.works",
+          "method": "GET",
+          "url_template": "https://api.crossref.org/works?query={query}&rows={limit}",
+          "sample_url": "https://api.crossref.org/works?query=agentic%20ai&rows=3",
+          "params": { "query": "agentic ai", "limit": "3" },
+          "use_for": ["papers", "doi_lookup", "citation_metadata"]
+        }
+      ]
+    },
+    {
+      "id": "clinicaltrials",
+      "name": "ClinicalTrials.gov API",
+      "category": "health",
+      "description": "Public clinical trial study records.",
+      "docs_url": "https://clinicaltrials.gov/data-api/api",
+      "auth": "none",
+      "risk": "caution",
+      "safe_use": "Public research registry only; not medical advice.",
+      "rate_limit": "Use small page sizes.",
+      "endpoints": [
+        {
+          "id": "trials.search",
+          "method": "GET",
+          "url_template": "https://clinicaltrials.gov/api/v2/studies?query.term={query}&pageSize={limit}",
+          "sample_url": "https://clinicaltrials.gov/api/v2/studies?query.term=diabetes&pageSize=3",
+          "params": { "query": "diabetes", "limit": "3" },
+          "use_for": ["clinical_trials", "medical_research"]
+        }
+      ]
+    },
+    {
+      "id": "openfda",
+      "name": "openFDA",
+      "category": "health",
+      "description": "Public FDA data for drugs, devices, foods, recalls, labels.",
+      "docs_url": "https://open.fda.gov/apis/",
+      "auth": "none",
+      "risk": "caution",
+      "safe_use": "Public regulatory data only; not clinical guidance.",
+      "rate_limit": "No key works at lower limits; keep requests narrow.",
+      "endpoints": [
+        {
+          "id": "fda.drug_label",
+          "method": "GET",
+          "url_template": "https://api.fda.gov/drug/label.json?limit={limit}",
+          "sample_url": "https://api.fda.gov/drug/label.json?limit=1",
+          "params": { "limit": "1" },
+          "use_for": ["drug_labels", "regulatory_lookup"]
+        }
+      ]
+    },
+    {
+      "id": "gbif",
+      "name": "GBIF API",
+      "category": "nature",
+      "description": "Species, taxonomy, biodiversity occurrence data.",
+      "docs_url": "https://techdocs.gbif.org/en/openapi/",
+      "auth": "none_for_common_get",
+      "risk": "low",
+      "rate_limit": "Set User-Agent; avoid bulk occurrence downloads through search.",
+      "endpoints": [
+        {
+          "id": "species.search",
+          "method": "GET",
+          "url_template": "https://api.gbif.org/v1/species/search?q={query}&limit={limit}",
+          "sample_url": "https://api.gbif.org/v1/species/search?q=panthera%20leo&limit=3",
+          "params": { "query": "panthera leo", "limit": "3" },
+          "use_for": ["species_lookup", "biodiversity"]
+        }
+      ]
+    },
+    {
+      "id": "sunrise-sunset",
+      "name": "Sunrise Sunset",
+      "category": "astronomy",
+      "description": "Sunrise, sunset, twilight, and day length by coordinates.",
+      "docs_url": "https://sunrise-sunset.org/api",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Reasonable use; attribution required.",
+      "endpoints": [
+        {
+          "id": "sun.times",
+          "method": "GET",
+          "url_template": "https://api.sunrise-sunset.org/json?lat={lat}&lng={lng}&date={date}&formatted=0",
+          "sample_url": "https://api.sunrise-sunset.org/json?lat=19.4326&lng=-99.1332&date=2026-06-10&formatted=0",
+          "params": { "lat": "19.4326", "lng": "-99.1332", "date": "2026-06-10" },
+          "use_for": ["sunrise", "sunset", "daylight_planning"]
+        }
+      ]
+    },
+    {
+      "id": "zippopotam",
+      "name": "Zippopotam.us",
+      "category": "geo",
+      "description": "Postal code to place lookup.",
+      "docs_url": "https://www.zippopotam.us/",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Cache postal lookups.",
+      "endpoints": [
+        {
+          "id": "postal.lookup",
+          "method": "GET",
+          "url_template": "https://api.zippopotam.us/{country}/{postal}",
+          "sample_url": "https://api.zippopotam.us/us/90210",
+          "params": { "country": "us", "postal": "90210" },
+          "use_for": ["postal_code_lookup", "geo_reference"]
+        }
+      ]
+    },
+    {
+      "id": "dictionaryapi",
+      "name": "Free Dictionary API",
+      "category": "language",
+      "description": "English dictionary definitions and phonetics.",
+      "docs_url": "https://dictionaryapi.dev/",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Reasonable use.",
+      "endpoints": [
+        {
+          "id": "dictionary.word",
+          "method": "GET",
+          "url_template": "https://api.dictionaryapi.dev/api/v2/entries/en/{word}",
+          "sample_url": "https://api.dictionaryapi.dev/api/v2/entries/en/automation",
+          "params": { "word": "automation" },
+          "use_for": ["dictionary", "language_tools"]
+        }
+      ]
+    },
+    {
+      "id": "datamuse",
+      "name": "Datamuse",
+      "category": "language",
+      "description": "Word-finding, synonyms, semantic and phonetic word search.",
+      "docs_url": "https://www.datamuse.com/api/",
+      "auth": "none_until_2027",
+      "risk": "low",
+      "rate_limit": "No key until 2027; 100000/day guidance; cache repeated prompts.",
+      "endpoints": [
+        {
+          "id": "words.meaning",
+          "method": "GET",
+          "url_template": "https://api.datamuse.com/words?ml={meaning}&max={limit}",
+          "sample_url": "https://api.datamuse.com/words?ml=automation&max=5",
+          "params": { "meaning": "automation", "limit": "5" },
+          "use_for": ["synonyms", "word_suggestions"]
+        }
+      ]
+    },
+    {
+      "id": "spaceflight-news",
+      "name": "Spaceflight News API",
+      "category": "news",
+      "description": "Spaceflight articles and news metadata.",
+      "docs_url": "https://api.spaceflightnewsapi.net/v4/docs/",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Use small limits.",
+      "endpoints": [
+        {
+          "id": "space.articles",
+          "method": "GET",
+          "url_template": "https://api.spaceflightnewsapi.net/v4/articles/?limit={limit}",
+          "sample_url": "https://api.spaceflightnewsapi.net/v4/articles/?limit=3",
+          "params": { "limit": "3" },
+          "use_for": ["space_news", "article_monitoring"]
+        }
+      ]
+    },
+    {
+      "id": "pokeapi",
+      "name": "PokeAPI",
+      "category": "games",
+      "description": "Pokemon game data and metadata.",
+      "docs_url": "https://pokeapi.co/docs/v2",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Fair use; cache.",
+      "endpoints": [
+        {
+          "id": "pokemon.lookup",
+          "method": "GET",
+          "url_template": "https://pokeapi.co/api/v2/pokemon/{name}",
+          "sample_url": "https://pokeapi.co/api/v2/pokemon/pikachu",
+          "params": { "name": "pikachu" },
+          "use_for": ["game_reference", "pokemon_lookup"]
+        }
+      ]
+    },
+    {
+      "id": "jikan",
+      "name": "Jikan",
+      "category": "media",
+      "description": "Anime and manga metadata API.",
+      "docs_url": "https://docs.api.jikan.moe/",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Rate-limited; keep limits small.",
+      "endpoints": [
+        {
+          "id": "anime.search",
+          "method": "GET",
+          "url_template": "https://api.jikan.moe/v4/anime?q={query}&limit={limit}",
+          "sample_url": "https://api.jikan.moe/v4/anime?q=one%20piece&limit=3",
+          "params": { "query": "one piece", "limit": "3" },
+          "use_for": ["anime_lookup", "manga_lookup"]
+        }
+      ]
+    },
+    {
+      "id": "iss-location",
+      "name": "Where The ISS At",
+      "category": "space",
+      "description": "Current ISS location and satellite metadata.",
+      "docs_url": "https://wheretheiss.at/w/developer",
+      "auth": "none",
+      "risk": "low",
+      "rate_limit": "Reasonable use.",
+      "endpoints": [
+        {
+          "id": "iss.now",
+          "method": "GET",
+          "url_template": "https://api.wheretheiss.at/v1/satellites/25544",
+          "sample_url": "https://api.wheretheiss.at/v1/satellites/25544",
+          "params": {},
+          "use_for": ["iss_tracking", "space_reference"]
+        }
+      ]
+    },
+    {
+      "id": "github-public",
+      "name": "GitHub REST Public",
+      "category": "developer",
+      "description": "Public repository metadata through GitHub REST API.",
+      "docs_url": "https://docs.github.com/en/rest",
+      "auth": "none_for_public_low_rate",
+      "risk": "low",
+      "rate_limit": "Unauthenticated requests are limited; set User-Agent and cache.",
+      "endpoints": [
+        {
+          "id": "github.repo",
+          "method": "GET",
+          "url_template": "https://api.github.com/repos/{owner}/{repo}",
+          "sample_url": "https://api.github.com/repos/nodejs/node",
+          "params": { "owner": "nodejs", "repo": "node" },
+          "use_for": ["repo_metadata", "developer_research"]
+        }
+      ]
+    },
+    {
+      "id": "npm-registry",
+      "name": "npm Registry",
+      "category": "developer",
+      "description": "npm package metadata.",
+      "docs_url": "https://github.com/npm/registry/blob/master/docs/REGISTRY-API.md",
+      "auth": "none_for_public_metadata",
+      "risk": "low",
+      "rate_limit": "Cache package metadata.",
+      "endpoints": [
+        {
+          "id": "npm.latest",
+          "method": "GET",
+          "url_template": "https://registry.npmjs.org/{package}/latest",
+          "sample_url": "https://registry.npmjs.org/typescript/latest",
+          "params": { "package": "typescript" },
+          "use_for": ["package_metadata", "dependency_research"]
+        }
+      ]
+    },
+    {
+      "id": "pypi",
+      "name": "PyPI JSON API",
+      "category": "developer",
+      "description": "Python package metadata.",
+      "docs_url": "https://docs.pypi.org/api/json/",
+      "auth": "none_for_public_metadata",
+      "risk": "low",
+      "rate_limit": "Cache package metadata.",
+      "endpoints": [
+        {
+          "id": "pypi.package",
+          "method": "GET",
+          "url_template": "https://pypi.org/pypi/{package}/json",
+          "sample_url": "https://pypi.org/pypi/requests/json",
+          "params": { "package": "requests" },
+          "use_for": ["package_metadata", "dependency_research"]
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import * as catalog from '../skills/public-apis/references/public_api_catalog.json';
 import { SkillLoader, SkillPermissionEvaluator, SkillRegistry } from '../src';
 
 const fixturesRoot = join(__dirname, '..', 'skills');
@@ -21,10 +22,36 @@ describe('skill-runtime', () => {
 
     expect(skill.manifest.name).toBe('public-apis');
     expect(skill.tools.map((tool) => tool.name)).toEqual([
+      'public_api.catalog_search',
+      'public_api.probe',
+      'public_api.call',
       'public_api.weather_forecast',
       'public_api.recipe_search',
     ]);
     expect(skill.permissions.secrets).toEqual([]);
+  });
+
+  it('keeps the public API catalog read-only, unique, and safe by default', () => {
+    const apiIds = new Set<string>();
+    const endpointIds = new Set<string>();
+
+    expect(catalog.apis.length).toBeGreaterThanOrEqual(25);
+    for (const api of catalog.apis) {
+      expect(api.id).toMatch(/^[a-z0-9-]+$/);
+      expect(apiIds.has(api.id)).toBe(false);
+      apiIds.add(api.id);
+      expect(api.docs_url).toMatch(/^https:\/\//);
+      expect(api.auth).not.toMatch(/required/i);
+
+      for (const endpoint of api.endpoints) {
+        const endpointKey = `${api.id}.${endpoint.id}`;
+        expect(endpointIds.has(endpointKey)).toBe(false);
+        endpointIds.add(endpointKey);
+        expect(endpoint.method).toBe('GET');
+        expect(endpoint.sample_url).toMatch(/^https:\/\//);
+        expect(endpoint.url_template).toMatch(/^https:\/\//);
+      }
+    }
   });
 
   it('rejects an invalid manifest', async () => {

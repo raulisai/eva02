@@ -136,7 +136,7 @@ export function PlaygroundClient() {
   const terminalVariant = selectedStatus === 'completed' ? 'completed' : selectedStatus === 'failed' ? 'failed' : 'cancelled';
 
   const actionLog = selectedEvents.filter((event) =>
-    ['task.log', 'task.created', 'task.started', 'task.completed', 'task.failed', 'task.waiting_approval', 'task.form_request'].includes(event.type));
+    ['task.log', 'task.created', 'task.started', 'task.completed', 'task.failed', 'task.waiting_approval', 'task.form_request', 'task.setup_required'].includes(event.type));
 
   return (
     <div className="flex flex-col h-full">
@@ -337,6 +337,7 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
   const resultMeta = resultEvent?.payload as { model?: string; latency_ms?: number } | undefined;
   const mediaEvents = events.filter((event) => event.type === 'task.media');
   const formEvents = events.filter((event) => event.type === 'task.form_request');
+  const setupEvents = events.filter((event) => event.type === 'task.setup_required');
   const working = !TERMINAL.includes(status) && !resultText;
   const failed = status === 'failed';
 
@@ -443,6 +444,23 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
                   </label>
                 ))}
               </div>
+            </div>
+          </div>
+        );
+      })}
+
+      {setupEvents.map((event, index) => {
+        const payload = event.payload as { message?: string; setup_label?: string; capability?: string };
+        return (
+          <div key={`setup-${index}`} className="flex justify-start animate-slide-up">
+            <div className="max-w-[85%] border border-amber-500/30 bg-amber-500/5 rounded-sm p-3 space-y-2">
+              <div className="flex items-center gap-2 text-amber-200">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                <span className="text-xs font-medium">{payload.setup_label ?? 'Conectar integración'}</span>
+              </div>
+              <p className="text-xs text-zinc-300 leading-relaxed">
+                {payload.message ?? `Falta configurar ${payload.capability ?? 'esta integración'}.`}
+              </p>
             </div>
           </div>
         );

@@ -16,6 +16,7 @@ const BROADCAST_EVENTS: EvaEventType[] = [
   'task.result',
   'task.media',
   'task.form_request',
+  'task.setup_required',
   'approval.requested',
   'approval.resolved',
   'communication.message.received',

@@ -51,7 +51,7 @@ export const CAPABILITY_CATALOG: Array<{
 
   // ── WhatsApp ──────────────────────────────────────────────────────────────
   {
-    pattern: /\b(whatsapp|watsapp|whats app|wa\b|mensajes de whats|mis mensajes de wa)\b/i,
+    pattern: /\b(whatsapp|whatsap|watsapp|watsap|whats app|guasap|guasapp|wa\b|mensajes? de whats|mis mensajes? de wa)\b/i,
     requirement: {
       capability: 'whatsapp',
       ack_message: 'Para acceder a WhatsApp necesito escanear el código QR con tu teléfono 📱',

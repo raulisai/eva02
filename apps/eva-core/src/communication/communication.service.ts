@@ -148,16 +148,6 @@ export class CommunicationService implements OnApplicationBootstrap {
       },
     }, account.user_id, orgId);
 
-    await this.sendMessage({
-      orgId,
-      userId: account.user_id,
-      channel: 'telegram',
-      target: { chat_id: chatId },
-      text: `✅ Recibido — procesando tu solicitud...`,
-      notificationType: 'task.created',
-      payload: { task_id: task.id },
-    });
-
     await this.events.publish({
       type: 'communication.message.received',
       orgId,

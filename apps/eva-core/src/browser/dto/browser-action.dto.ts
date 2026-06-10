@@ -1,4 +1,4 @@
-import { IsInt, IsObject, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsInt, IsObject, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class OpenBrowserDto {
@@ -19,6 +19,10 @@ export class OpenBrowserDto {
   @IsOptional()
   @IsObject()
   metadata?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsBoolean()
+  reuse_open?: boolean;
 }
 
 export class SelectorDto {

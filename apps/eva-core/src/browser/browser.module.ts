@@ -3,17 +3,21 @@ import { PlaywrightBrowserRuntime } from '@eva/browser-runtime';
 import { DatabaseModule } from '../database/database.module';
 import { EventsModule } from '../events/events.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
+import { IntegrationsModule } from '../integrations/integrations.module';
 import { BrowserController } from './browser.controller';
 import { BrowserRepository } from './browser.repository';
 import { BrowserService } from './browser.service';
 import { BROWSER_RUNTIME } from './browser.types';
+import { WhatsAppWebController } from './whatsapp-web.controller';
+import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
 
 @Module({
-  imports: [DatabaseModule, EventsModule, ApprovalsModule],
-  controllers: [BrowserController],
+  imports: [DatabaseModule, EventsModule, ApprovalsModule, IntegrationsModule],
+  controllers: [BrowserController, WhatsAppWebController],
   providers: [
     BrowserRepository,
     BrowserService,
+    WhatsAppWebService,
     {
       provide: BROWSER_RUNTIME,
       useFactory: () => new PlaywrightBrowserRuntime({
@@ -22,6 +26,6 @@ import { BROWSER_RUNTIME } from './browser.types';
       }),
     },
   ],
-  exports: [BrowserService],
+  exports: [BrowserService, WhatsAppWebService],
 })
 export class BrowserModule {}

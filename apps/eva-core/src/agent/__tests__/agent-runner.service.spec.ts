@@ -17,6 +17,7 @@ import { MissingInformationError, ResearchToolsService } from '../research-tools
 import { ScheduleService } from '../schedule.service';
 import { ScriptForgeService } from '../script-forge.service';
 import { SoulContextService } from '../soul-context.service';
+import { WhatsAppWebService } from '../../integrations/whatsapp-web.service';
 import { classifyTier } from '../tier';
 import { Task } from '../../tasks/task.types';
 
@@ -209,6 +210,7 @@ describe('AgentRunnerService', () => {
           useValue: {
             fetchLatest: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
             fetchSearch: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
+            fetchSearchWithFallback: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
             formatLatestForResponse: jest.fn().mockResolvedValue(null),
             isConnected: jest.fn().mockResolvedValue(false),
           },
@@ -217,6 +219,31 @@ describe('AgentRunnerService', () => {
           provide: GoogleDriveService,
           useValue: {
             fetchForQuery: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
+          },
+        },
+        {
+          provide: WhatsAppWebService,
+          useValue: {
+            startSession: jest.fn().mockResolvedValue({
+              session_id: 'browser-session-1',
+              state: 'logged_in',
+              current_url: 'https://web.whatsapp.com/',
+            }),
+            fetchLatestMessage: jest.fn().mockResolvedValue({
+              ok: true,
+              session: {
+                session_id: 'browser-session-1',
+                state: 'logged_in',
+                current_url: 'https://web.whatsapp.com/',
+              },
+              latest: {
+                chat_name: 'Ana',
+                preview: 'Voy en camino',
+                time: '17:38',
+                raw_lines: ['Ana', '17:38', 'Voy en camino'],
+              },
+              text: 'Tu último chat visible en WhatsApp es **Ana** (17:38):\n\nVoy en camino',
+            }),
           },
         },
       ],
@@ -725,7 +752,8 @@ describe('AgentRunnerService', () => {
 
     await service.run(ORG, TASK);
 
-    expect(gmail.fetchLatest).toHaveBeenCalledWith(ORG);
+    // "mi ultimo correo" → single → limit=1
+    expect(gmail.fetchLatest).toHaveBeenCalledWith(ORG, 1);
     expect(research.answer).not.toHaveBeenCalled();
 
     const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
@@ -746,6 +774,7 @@ describe('AgentRunnerService', () => {
   it('delivers a clear error message when Gmail token is expired — never web search', async () => {
     tasks.getTask.mockResolvedValue(makeTask({ description: 'revisa mi correo' }));
     const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+    // "revisa mi correo" has no specific sender → fetchLatest path, default limit=3
     gmail.fetchLatest.mockResolvedValue({ ok: false, reason: 'token_error', error: 'Token has been expired or revoked.' });
 
     await service.run(ORG, TASK);
@@ -770,14 +799,14 @@ describe('AgentRunnerService', () => {
     expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('Integraciones') }));
   });
 
-  it('routes sender-specific email search to Gmail search API', async () => {
+  it('routes sender-specific email search through fetchSearchWithFallback', async () => {
     tasks.getTask.mockResolvedValue(makeTask({ description: 'puedes buscar el ultimo correo que me envio santander?' }));
     const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
-    gmail.fetchSearch.mockResolvedValue({ ok: true, text: '📬 Resultados para _from:santander_:\n\n1. **Tu estado de cuenta**' });
+    gmail.fetchSearchWithFallback.mockResolvedValue({ ok: true, text: '📬 Resultados para _from:santander_:\n\n1. **Tu estado de cuenta**' });
 
     await service.run(ORG, TASK);
 
-    expect(gmail.fetchSearch).toHaveBeenCalledWith(ORG, 'from:santander');
+    expect(gmail.fetchSearchWithFallback).toHaveBeenCalledWith(ORG, 'from:santander');
     expect(gmail.fetchLatest).not.toHaveBeenCalled();
     expect(research.answer).not.toHaveBeenCalled();
 
@@ -785,16 +814,32 @@ describe('AgentRunnerService', () => {
     expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('santander') }));
   });
 
-  it('delivers a clear "not found" message when Gmail search returns no results', async () => {
+  it('delivers a clear "not found" message when Gmail search returns no results in any stage', async () => {
     tasks.getTask.mockResolvedValue(makeTask({ description: 'busca correo de santander' }));
     const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
-    gmail.fetchSearch.mockResolvedValue({ ok: false, reason: 'empty' });
+    gmail.fetchSearchWithFallback.mockResolvedValue({ ok: false, reason: 'empty' });
 
     await service.run(ORG, TASK);
 
     expect(research.answer).not.toHaveBeenCalled();
     const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
     expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('No encontré') }));
+  });
+
+  it('annotates results found in older emails (fallback stage)', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'busca correo de netflix' }));
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+    gmail.fetchSearchWithFallback.mockResolvedValue({
+      ok: true,
+      text: '📬 No encontré en los últimos 3 meses, pero sí en correos más antiguos:\n\n1. **Tu recibo de Netflix**',
+    });
+
+    await service.run(ORG, TASK);
+
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({
+      text: expect.stringContaining('más antiguos'),
+    }));
   });
 
   it('routes Drive requests to Drive API — never to web search or Gmail', async () => {
@@ -863,5 +908,56 @@ describe('AgentRunnerService', () => {
     expect(driveService.fetchForQuery).toHaveBeenCalled();
     expect(gmail.fetchLatest).not.toHaveBeenCalled();
     expect(research.answer).not.toHaveBeenCalled();
+  });
+
+  it('routes watsap latest-message requests to WhatsApp Web, never the model fallback', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'cual es el ultimo mensaje que tengo de watsap?' }));
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(whatsapp.fetchLatestMessage).toHaveBeenCalledWith(ORG, TASK);
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
+
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({
+      model: 'whatsapp-web',
+      text: expect.stringContaining('Ana'),
+    }));
+  });
+
+  it('publishes the WhatsApp QR screenshot when the browser profile is not linked', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'revisa mi whatsap' }));
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+    whatsapp.fetchLatestMessage.mockResolvedValueOnce({
+      ok: false,
+      reason: 'qr_required',
+      session: {
+        session_id: 'browser-session-1',
+        state: 'qr_required',
+        current_url: 'https://web.whatsapp.com/',
+        screenshot: {
+          id: 'shot-1',
+          org_id: ORG,
+          session_id: 'browser-session-1',
+          task_id: TASK,
+          image_base64: 'iVBORw0KGgo=',
+          mime_type: 'image/png',
+          created_at: new Date().toISOString(),
+        },
+      },
+      text: 'Abrí WhatsApp Web, pero falta vincular la sesión.',
+    });
+
+    await service.run(ORG, TASK);
+
+    const media = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.media');
+    expect(media?.payload).toEqual(expect.objectContaining({
+      kind: 'image',
+      url: 'data:image/png;base64,iVBORw0KGgo=',
+      label: 'WhatsApp Web QR',
+    }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
   });
 });

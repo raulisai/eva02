@@ -96,6 +96,12 @@ describe('CapabilityGateService', () => {
       const req = await gate.firstMissingRequirement('revisa mi whatsapp', 'org-1');
       expect(req).toBeNull();
     });
+
+    it('matches common misspelling "watsap"', async () => {
+      await buildGate([]);
+      const req = await gate.firstMissingRequirement('revisa mi watsap', 'org-1');
+      expect(req?.capability).toBe('whatsapp');
+    });
   });
 
   describe('no-op cases', () => {

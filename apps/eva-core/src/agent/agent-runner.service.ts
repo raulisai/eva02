@@ -12,6 +12,7 @@ import { ConversationDigesterService } from './conversation-digester.service';
 import { DriveFetchResult, GoogleDriveService } from './google-drive.service';
 import { GmailFetchResult, GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
+import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
 import { MediaService } from './media.service';
 import { MemoryRecallService } from './memory-recall.service';
 import { MissingInformationError, ResearchToolsService } from './research-tools.service';
@@ -115,6 +116,9 @@ const PUBLIC_API_DIRECT_SIGNALS = /\b(clima|weather|temperatura|pron[oó]stico|l
 const EMAIL_SIGNALS = /\b(correo|email|mail|mensajes|bandeja|inbox|gmail|outlook|mis mails|mis correos)\b/i;
 const CALENDAR_SIGNALS_PERSONAL = /\b(mi(s)? (citas?|eventos?|agenda|calendario)|qu[eé] tengo|tengo algo|tengo una cita)\b/i;
 const DRIVE_SIGNALS = /\b(drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|mis hojas|mis sheets|archivos? (grandes?|pesados?|de google)|carpeta(s)? (de google|en drive)|qu[eé] (archivos?|carpetas?|docs?) tengo)\b/i;
+const WHATSAPP_SIGNALS = /\b(whatsapp|whatsap|watsapp|watsap|whats app|guasap|guasapp|wa\b|mensajes? de whats|mis mensajes? de wa)\b/i;
+const WHATSAPP_READ_SIGNALS = /\b([uú]ltim[oa]s?|mensajes?|chats?|revisa|revisar|consulta|consultar|leer|lee|qu[eé] tengo)\b/i;
+const WHATSAPP_SEND_SIGNALS = /\b(responde|responder|contesta|contestar|env[ií]a|enviar|manda|mandar|escribe|escribir)\b/i;
 
 const FRESHNESS_REQUIRED_SIGNALS = [
   /\b(qui[eé]n\s+es|quien\s+es)\s+(el|la)?\s*(presidente|presidenta|gobernador|gobernadora|alcalde|alcaldesa|ceo|director|directora|titular|jefe|jefa)\b/i,
@@ -164,6 +168,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly digester: ConversationDigesterService,
     private readonly gmail: GmailService,
     private readonly drive: GoogleDriveService,
+    private readonly whatsapp: WhatsAppWebService,
   ) {}
 
   onApplicationBootstrap() {
@@ -238,6 +243,18 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           return;
         }
         throw new Error('No pude generar la imagen con los proveedores configurados. Revisa las credenciales/modelos de imagen o intenta de nuevo si el proveedor esta saturado.');
+      }
+
+      // ── WhatsApp Web fast-path — browser profile + QR handoff ─────────────
+      // Runs before chat triage so short prompts like "abre watsap" never fall
+      // into a generic model answer.
+      if (WHATSAPP_SIGNALS.test(input)) {
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        await this.say(orgId, taskId, 'Abro WhatsApp Web con tu perfil local. Si falta login, te paso el QR.');
+        await this.log(orgId, taskId, 'whatsapp request — opening WhatsApp Web profile', 'tools');
+        await this.handleWhatsAppRequest(orgId, taskId, input, startedAt, conversationContext);
+        return;
       }
 
       // ── Tier: chat — straight to the model, no pipeline overhead ──
@@ -348,18 +365,20 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         let gmailResult: GmailFetchResult;
 
         if (searchQuery) {
-          await this.log(orgId, taskId, `Gmail search: "${searchQuery}"`, 'tools');
-          gmailResult = await this.gmail.fetchSearch(orgId, searchQuery);
-          // Empty search result → clear message, don't fall to model
+          await this.log(orgId, taskId, `Gmail search: "${searchQuery}" (recent first, fallback to all-time)`, 'tools');
+          gmailResult = await this.gmail.fetchSearchWithFallback(orgId, searchQuery);
+          // Empty across both stages → clear message, don't fall to model
           if (!gmailResult.ok && gmailResult.reason === 'empty') {
             const sender = searchQuery.startsWith('from:') ? searchQuery.replace('from:', '') : searchQuery;
-            const notFound = `📬 No encontré correos de _${sender}_ en tu bandeja. Verifica que el nombre coincida exactamente con el remitente que aparece en Gmail.`;
+            const notFound = `📬 No encontré correos de _${sender}_ ni en los últimos 3 meses ni en tu historial.`;
             await this.deliver(orgId, taskId, notFound, 'gmail-api', 0);
             await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
             return;
           }
         } else {
-          gmailResult = await this.gmail.fetchLatest(orgId);
+          const limit = this.emailRequestedLimit(input);
+          await this.log(orgId, taskId, `Gmail fetchLatest limit=${limit}`, 'tools');
+          gmailResult = await this.gmail.fetchLatest(orgId, limit);
         }
 
         if (gmailResult.ok) {
@@ -530,6 +549,58 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     await this.deliver(orgId, taskId, text, 'media:image', Date.now() - startedAt);
     await this.log(orgId, taskId, `imagen lista: ${url}`, 'media');
     return url;
+  }
+
+  private async handleWhatsAppRequest(
+    orgId: string,
+    taskId: string,
+    input: string,
+    startedAt: number,
+    conversationContext: ConversationContextTurn[],
+  ): Promise<void> {
+    if (WHATSAPP_SEND_SIGNALS.test(input)) {
+      const session = await this.whatsapp.startSession(orgId, taskId);
+      await this.maybePublishWhatsAppQr(orgId, taskId, session.screenshot);
+      const text = session.state === 'qr_required'
+        ? 'Primero escanea el QR para vincular WhatsApp Web. Después podré preparar una respuesta, pero enviarla siempre pasará por Approval Engine.'
+        : 'WhatsApp Web está listo. Para responder necesito que me digas el contacto y el texto exacto; antes de enviarlo lo pasaré por Approval Engine.';
+      await this.deliver(orgId, taskId, text, 'whatsapp-web', Date.now() - startedAt);
+      return;
+    }
+
+    const shouldRead = WHATSAPP_READ_SIGNALS.test(input);
+    if (!shouldRead) {
+      const session = await this.whatsapp.startSession(orgId, taskId);
+      await this.maybePublishWhatsAppQr(orgId, taskId, session.screenshot);
+      const text = session.state === 'logged_in'
+        ? 'WhatsApp Web está conectado y el perfil local quedó listo para consultas.'
+        : 'Abrí WhatsApp Web. Escanea el QR con tu teléfono; cuando termine, la sesión quedará guardada en el perfil local.';
+      await this.deliver(orgId, taskId, text, 'whatsapp-web', Date.now() - startedAt);
+      return;
+    }
+
+    const result = await this.whatsapp.fetchLatestMessage(orgId, taskId);
+    await this.maybePublishWhatsAppQr(orgId, taskId, result.session.screenshot);
+    await this.deliver(orgId, taskId, result.text, 'whatsapp-web', Date.now() - startedAt);
+    await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+    if (result.ok) {
+      this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: result.text, conversationContext });
+    }
+  }
+
+  private async maybePublishWhatsAppQr(orgId: string, taskId: string, screenshot?: { image_base64: string; mime_type: string }) {
+    if (!screenshot?.image_base64) return;
+    await this.events.publish({
+      type: 'task.media',
+      orgId,
+      taskId,
+      payload: {
+        kind: 'image',
+        url: `data:${screenshot.mime_type};base64,${screenshot.image_base64}`,
+        label: 'WhatsApp Web QR',
+      },
+    });
+    await this.log(orgId, taskId, 'WhatsApp Web QR screenshot sent to the conversation', 'tools');
   }
 
   private isPureImageRequest(input: string): boolean {
@@ -1065,5 +1136,16 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     } catch (transitionError) {
       this.logger.error(`Could not mark task ${taskId} as failed`, transitionError as Error);
     }
+  }
+
+  /**
+   * Resolves how many emails to fetch based on the user's phrasing.
+   * "el último correo" → 1, "los últimos N" → N (max 10), default → 3.
+   */
+  private emailRequestedLimit(input: string): number {
+    if (/\b(el\s+)?[uú]ltimo\s+(correo|email|mail|mensaje)\b/i.test(input)) return 1;
+    const m = input.match(/[uú]ltimos\s+(\d+)\s+(correos?|emails?|mails?)/i);
+    if (m) return Math.min(parseInt(m[1], 10), 10);
+    return 3;
   }
 }

@@ -1,6 +1,21 @@
 {
   "tests": [
     {
+      "name": "catalog search is local and approval-free",
+      "input": { "tool": "public_api.catalog_search", "query": "weather" },
+      "expect": { "approval_level": 0 }
+    },
+    {
+      "name": "probe is read-only and approval-free",
+      "input": { "tool": "public_api.probe", "endpoint": "nager-date.holidays.country_year" },
+      "expect": { "approval_level": 0 }
+    },
+    {
+      "name": "catalog calls are read-only and approval-free",
+      "input": { "tool": "public_api.call", "endpoint": "rest-countries.country.name" },
+      "expect": { "approval_level": 0 }
+    },
+    {
       "name": "weather is read-only and approval-free",
       "input": { "tool": "public_api.weather_forecast", "location": "Ciudad de Mexico", "days": 2 },
       "expect": { "approval_level": 0 }

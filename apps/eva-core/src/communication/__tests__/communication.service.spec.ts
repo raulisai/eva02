@@ -148,7 +148,7 @@ describe('CommunicationService', () => {
     integrations = module.get(IntegrationsService);
   });
 
-  it('creates a task from a linked Telegram webhook and sends an acknowledgement', async () => {
+  it('creates a task from a linked Telegram webhook and publishes message.received event', async () => {
     const result = await service.handleTelegramWebhook(ORG, 'secret', {
       update_id: 1,
       message: {
@@ -169,7 +169,8 @@ describe('CommunicationService', () => {
       title: 'Comprar leche',
       metadata: expect.objectContaining({ source: 'telegram', conversation_id: CONV }),
     }), USER, ORG);
-    expect(telegram.sendMessage).toHaveBeenCalledWith({ chat_id: '100' }, expect.stringContaining('Recibido'), undefined);
+    // No immediate "Recibido" ack — the agent delivers the real answer directly
+    expect(telegram.sendMessage).not.toHaveBeenCalled();
     expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({ type: 'communication.message.received', orgId: ORG }));
   });
 

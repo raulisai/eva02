@@ -2,8 +2,14 @@
   "name": "public-apis",
   "display_name": "Public APIs",
   "version": "0.1.0",
-  "description": "Use free public APIs for deterministic weather forecasts and recipe lookup without spending model tokens on repeated research.",
+  "description": "Use safe read-only public APIs for deterministic automation scripts, including weather, recipes, reference data, research, calendars, language, developer metadata, and public monitoring.",
   "author": "eva",
-  "capabilities": ["public_api.weather_forecast", "public_api.recipe_search"],
-  "tags": ["automation", "public-api", "weather", "recipes"]
+  "capabilities": [
+    "public_api.catalog_search",
+    "public_api.probe",
+    "public_api.call",
+    "public_api.weather_forecast",
+    "public_api.recipe_search"
+  ],
+  "tags": ["automation", "public-api", "read-only", "weather", "recipes", "research", "reference"]
 }

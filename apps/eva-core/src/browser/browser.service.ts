@@ -19,12 +19,20 @@ export class BrowserService {
 
   async open(dto: OpenBrowserDto, orgId: string) {
     const profile = await this.repo.getOrCreateProfile(orgId, dto.service);
-    const session = await this.repo.createSession({
-      orgId,
-      profileId: profile.id,
-      taskId: dto.task_id,
-      metadata: dto.metadata,
-    });
+    const session = dto.reuse_open
+      ? await this.repo.findLatestOpenSessionForProfile(profile.id, orgId)
+        ?? await this.repo.createSession({
+          orgId,
+          profileId: profile.id,
+          taskId: dto.task_id,
+          metadata: dto.metadata,
+        })
+      : await this.repo.createSession({
+        orgId,
+        profileId: profile.id,
+        taskId: dto.task_id,
+        metadata: dto.metadata,
+      });
     const result = await this.runtime.open({
       sessionId: session.id,
       profileId: profile.id,
@@ -73,6 +81,16 @@ export class BrowserService {
       treatment: 'data',
       table,
     };
+  }
+
+  async evaluate<T = unknown, A = unknown>(
+    sessionId: string,
+    orgId: string,
+    pageFunction: (arg: A) => T | Promise<T>,
+    arg?: A,
+  ): Promise<T> {
+    await this.repo.findSessionOrThrow(sessionId, orgId);
+    return this.runtime.evaluate<T, A>(sessionId, pageFunction, arg);
   }
 
   async wait(sessionId: string, orgId: string, ms: number) {

@@ -1,6 +1,36 @@
 {
   "tools": [
     {
+      "name": "public_api.catalog_search",
+      "capability": "public_api.catalog_search",
+      "description": "Search the local safe public API catalog by category, keyword, or API id.",
+      "input_schema": {
+        "query": "string",
+        "category": "string",
+        "api_id": "string"
+      },
+      "approval_level": 0
+    },
+    {
+      "name": "public_api.probe",
+      "capability": "public_api.probe",
+      "description": "Verify a catalog endpoint sample URL is reachable before building automation around it.",
+      "input_schema": {
+        "endpoint": "api-id.endpoint-id | all"
+      },
+      "approval_level": 0
+    },
+    {
+      "name": "public_api.call",
+      "capability": "public_api.call",
+      "description": "Call a safe read-only catalog endpoint with explicit parameters.",
+      "input_schema": {
+        "endpoint": "api-id.endpoint-id",
+        "params": "object"
+      },
+      "approval_level": 0
+    },
+    {
       "name": "public_api.weather_forecast",
       "capability": "public_api.weather_forecast",
       "description": "Get a daily weather forecast for a location and exact date range through Open-Meteo.",
