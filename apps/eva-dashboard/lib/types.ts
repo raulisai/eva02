@@ -70,3 +70,67 @@ export interface ApprovalScreenshot {
   image_base64: string;
   mime_type: string;
 }
+
+export type IntegrationKind = 'model' | 'channel';
+export type IntegrationStatus = 'active' | 'disabled' | 'error';
+
+/** Masked view returned by eva-core / readable columns in Supabase. */
+export interface Integration {
+  id: string;
+  kind: IntegrationKind;
+  provider: string;
+  label: string | null;
+  status: IntegrationStatus;
+  config: Record<string, unknown>;
+  secret_hint: string | null;
+  has_secret?: boolean;
+  updated_at: string;
+}
+
+export interface McpConnection {
+  id: string;
+  name: string;
+  transport: 'http' | 'sse' | 'stdio';
+  endpoint: string;
+  enabled: boolean;
+  status: 'disconnected' | 'connected' | 'error';
+  tools: Array<Record<string, unknown>>;
+  last_checked_at: string | null;
+  last_error: string | null;
+  updated_at: string;
+}
+
+export interface Artifact {
+  id: string;
+  org_id: string;
+  task_id: string | null;
+  kind: 'text' | 'markdown' | 'code' | 'json' | 'image' | 'file' | 'url';
+  title: string;
+  content: string | null;
+  uri: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AgentSoul {
+  id?: string;
+  org_id: string;
+  name: string;
+  persona: string;
+  directives: string[];
+  autonomy_level: 0 | 1 | 2 | 3;
+  model_prefs: Record<string, unknown>;
+  updated_at?: string;
+}
+
+export interface Skill {
+  id: string;
+  org_id: string;
+  slug: string;
+  display_name: string;
+  description: string | null;
+  status: 'draft' | 'active' | 'disabled' | 'archived';
+  latest_version: string | null;
+  metadata: Record<string, unknown>;
+  updated_at: string;
+}

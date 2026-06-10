@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { EventBusService } from '../../events/event-bus.service';
+import { IntegrationsService } from '../../integrations/integrations.service';
 import { TasksService } from '../../tasks/tasks.service';
 import { CommunicationRepository } from '../communication.repository';
 import { CommunicationService } from '../communication.service';
@@ -44,6 +45,7 @@ describe('CommunicationService', () => {
   let tasks: jest.Mocked<TasksService>;
   let telegram: jest.Mocked<TelegramAdapter>;
   let events: jest.Mocked<EventBusService>;
+  let integrations: jest.Mocked<IntegrationsService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -104,6 +106,12 @@ describe('CommunicationService', () => {
             sendMessage: jest.fn().mockResolvedValue({ ok: true, externalMessageId: '200' }),
           } satisfies Partial<TelegramAdapter>,
         },
+        {
+          provide: IntegrationsService,
+          useValue: {
+            getChannelSettings: jest.fn().mockResolvedValue(null),
+          } satisfies Partial<IntegrationsService>,
+        },
       ],
     }).compile();
 
@@ -112,6 +120,7 @@ describe('CommunicationService', () => {
     tasks = module.get(TasksService);
     telegram = module.get(TelegramAdapter);
     events = module.get(EventBusService);
+    integrations = module.get(IntegrationsService);
   });
 
   it('creates a task from a linked Telegram webhook and sends an acknowledgement', async () => {
@@ -135,7 +144,7 @@ describe('CommunicationService', () => {
       title: 'Comprar leche',
       metadata: expect.objectContaining({ source: 'telegram', conversation_id: CONV }),
     }), USER, ORG);
-    expect(telegram.sendMessage).toHaveBeenCalledWith({ chat_id: '100' }, expect.stringContaining('Tarea creada'));
+    expect(telegram.sendMessage).toHaveBeenCalledWith({ chat_id: '100' }, expect.stringContaining('Tarea creada'), undefined);
     expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({ type: 'communication.message.received', orgId: ORG }));
   });
 
@@ -151,6 +160,67 @@ describe('CommunicationService', () => {
         from: { id: 42 },
       },
     })).rejects.toThrow(ForbiddenException);
+  });
+
+  it('rejects Telegram messages from users outside the allowlist', async () => {
+    integrations.getChannelSettings.mockResolvedValue({
+      status: 'active',
+      config: { allowed_user_ids: '11, 22' },
+      secret: 'bot-token',
+      webhookSecret: 'hook-secret',
+    });
+
+    const result = await service.handleTelegramWebhook(ORG, 'hook-secret', {
+      update_id: 2,
+      message: {
+        message_id: 11,
+        text: 'Hola',
+        chat: { id: 100, type: 'private' },
+        from: { id: 42 },
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false, ignored: true, reason: 'telegram_user_not_allowed' });
+    expect(tasks.createTask).not.toHaveBeenCalled();
+  });
+
+  it('uses the per-org bot token when dispatching Telegram messages', async () => {
+    integrations.getChannelSettings.mockResolvedValue({
+      status: 'active',
+      config: {},
+      secret: 'org-bot-token',
+      webhookSecret: null,
+    });
+
+    await service.sendMessage({
+      orgId: ORG,
+      userId: USER,
+      channel: 'telegram',
+      target: { chat_id: '100' },
+      text: 'Hola',
+    });
+
+    expect(telegram.sendMessage).toHaveBeenCalledWith({ chat_id: '100' }, 'Hola', 'org-bot-token');
+  });
+
+  it('refuses to dispatch through a disabled channel', async () => {
+    integrations.getChannelSettings.mockResolvedValue({
+      status: 'disabled',
+      config: {},
+      secret: 'org-bot-token',
+      webhookSecret: null,
+    });
+
+    const result = await service.sendMessage({
+      orgId: ORG,
+      userId: USER,
+      channel: 'telegram',
+      target: { chat_id: '100' },
+      text: 'Hola',
+    });
+
+    expect(result.notification.status).toBe('failed');
+    expect(telegram.sendMessage).not.toHaveBeenCalled();
   });
 
   it('records universal outbound messages as notifications and messages', async () => {

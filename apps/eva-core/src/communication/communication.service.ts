@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EventBusService } from '../events/event-bus.service';
+import { IntegrationsService } from '../integrations/integrations.service';
 import { TasksService } from '../tasks/tasks.service';
 import { Approval } from '../approvals/approval.types';
 import { CommunicationRepository } from './communication.repository';
@@ -20,6 +21,7 @@ export class CommunicationService {
     private readonly tasks: TasksService,
     private readonly events: EventBusService,
     private readonly telegram: TelegramAdapter,
+    private readonly integrations: IntegrationsService,
   ) {}
 
   linkTelegramAccount(input: {
@@ -40,8 +42,13 @@ export class CommunicationService {
   }
 
   async handleTelegramWebhook(orgId: string, secret: string | undefined, update: TelegramWebhookUpdate) {
-    if (!this.telegram.verifyWebhookSecret(secret)) {
+    const settings = await this.integrations.getChannelSettings(orgId, 'telegram');
+
+    if (!this.telegram.verifyWebhookSecret(secret, settings?.webhookSecret)) {
       throw new ForbiddenException('Invalid Telegram webhook secret');
+    }
+    if (settings && settings.status !== 'active') {
+      throw new ForbiddenException('Telegram channel is disabled for this organization');
     }
 
     const message = update.message;
@@ -51,6 +58,13 @@ export class CommunicationService {
 
     if (!message || !text || !externalUserId || !chatId) {
       return { ok: true, ignored: true, reason: 'unsupported_telegram_update' };
+    }
+
+    // Allowlist: when configured, only these Telegram user IDs may talk to the bot.
+    const allowed = this.allowedTelegramUserIds(settings?.config);
+    if (allowed.length > 0 && !allowed.includes(externalUserId)) {
+      this.logger.warn(`Rejected Telegram message from non-allowed user ${externalUserId} (org ${orgId})`);
+      return { ok: false, ignored: true, reason: 'telegram_user_not_allowed' };
     }
 
     const account = await this.repo.findAccount({
@@ -121,7 +135,7 @@ export class CommunicationService {
   }
 
   async sendMessage(input: SendMessageInput) {
-    const result = await this.dispatch(input.channel, input.target, input.text);
+    const result = await this.dispatch(input.orgId, input.channel, input.target, input.text);
     const status = this.statusFromResult(result);
     const notification = await this.repo.createNotification({
       orgId: input.orgId,
@@ -215,10 +229,28 @@ export class CommunicationService {
     return account;
   }
 
-  private dispatch(channel: CommunicationChannel, target: Record<string, unknown>, text: string): Promise<ChannelSendResult> {
-    if (channel === 'telegram') return this.telegram.sendMessage(target, text);
-    if (channel === 'dashboard') return Promise.resolve({ ok: true, skipped: true });
-    return Promise.resolve({ ok: true, skipped: true });
+  private async dispatch(
+    orgId: string,
+    channel: CommunicationChannel,
+    target: Record<string, unknown>,
+    text: string,
+  ): Promise<ChannelSendResult> {
+    if (channel === 'telegram') {
+      const settings = await this.integrations.getChannelSettings(orgId, 'telegram');
+      if (settings && settings.status !== 'active') {
+        return { ok: false, error: 'Telegram channel is disabled for this organization' };
+      }
+      return this.telegram.sendMessage(target, text, settings?.secret);
+    }
+    if (channel === 'dashboard') return { ok: true, skipped: true };
+    return { ok: true, skipped: true };
+  }
+
+  private allowedTelegramUserIds(config?: Record<string, unknown>): string[] {
+    const raw = config?.['allowed_user_ids'];
+    if (Array.isArray(raw)) return raw.map(String).map((id) => id.trim()).filter(Boolean);
+    if (typeof raw === 'string') return raw.split(',').map((id) => id.trim()).filter(Boolean);
+    return [];
   }
 
   private statusFromResult(result: ChannelSendResult) {

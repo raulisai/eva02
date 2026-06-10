@@ -4,17 +4,40 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   ListTodo, Server, Zap, FileText, ShieldCheck, LogOut, Terminal,
+  FlaskConical, Puzzle, Plug, Package, Sparkles, KeyRound, MessageSquare,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { createClient } from '@/lib/supabase/client';
 import { useWs } from '@/hooks/use-ws';
 
-const NAV = [
-  { href: '/tasks',     label: 'Tasks',     icon: ListTodo },
-  { href: '/nodes',     label: 'Nodes',     icon: Server },
-  { href: '/events',    label: 'Events',    icon: Zap },
-  { href: '/logs',      label: 'Logs',      icon: FileText },
-  { href: '/approvals', label: 'Approvals', icon: ShieldCheck },
+const NAV_GROUPS = [
+  {
+    label: 'Operations',
+    items: [
+      { href: '/tasks',     label: 'Tasks',     icon: ListTodo },
+      { href: '/nodes',     label: 'Nodes',     icon: Server },
+      { href: '/events',    label: 'Events',    icon: Zap },
+      { href: '/logs',      label: 'Logs',      icon: FileText },
+      { href: '/approvals', label: 'Approvals', icon: ShieldCheck },
+    ],
+  },
+  {
+    label: 'Agent',
+    items: [
+      { href: '/playground', label: 'Playground', icon: FlaskConical },
+      { href: '/skills',     label: 'Skills',     icon: Puzzle },
+      { href: '/mcp',        label: 'MCP',        icon: Plug },
+      { href: '/artifacts',  label: 'Artifacts',  icon: Package },
+      { href: '/soul',       label: 'Soul',       icon: Sparkles },
+    ],
+  },
+  {
+    label: 'Settings',
+    items: [
+      { href: '/settings/models',   label: 'Models',   icon: KeyRound },
+      { href: '/settings/channels', label: 'Channels', icon: MessageSquare },
+    ],
+  },
 ];
 
 export function Sidebar() {
@@ -45,25 +68,32 @@ export function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 py-2 px-2 space-y-0.5" role="navigation">
-        {NAV.map(({ href, label, icon: Icon }) => {
-          const active = pathname === href || pathname.startsWith(href + '/');
-          return (
-            <Link
-              key={href}
-              href={href}
-              className={cn(
-                'flex items-center gap-2.5 px-3 py-2 rounded-sm text-xs font-medium transition-all',
-                active
-                  ? 'bg-zinc-800/80 text-zinc-100 border-l-2 border-l-cyan-500'
-                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/40 border-l-2 border-l-transparent',
-              )}
-            >
-              <Icon className="w-3.5 h-3.5 flex-shrink-0" />
-              <span>{label}</span>
-            </Link>
-          );
-        })}
+      <nav className="flex-1 py-2 px-2 space-y-3 overflow-y-auto" role="navigation">
+        {NAV_GROUPS.map(({ label: groupLabel, items }) => (
+          <div key={groupLabel} className="space-y-0.5">
+            <p className="px-3 pb-1 text-[9px] font-mono uppercase tracking-widest text-zinc-700">
+              {groupLabel}
+            </p>
+            {items.map(({ href, label, icon: Icon }) => {
+              const active = pathname === href || pathname.startsWith(href + '/');
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  className={cn(
+                    'flex items-center gap-2.5 px-3 py-2 rounded-sm text-xs font-medium transition-all',
+                    active
+                      ? 'bg-zinc-800/80 text-zinc-100 border-l-2 border-l-cyan-500'
+                      : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/40 border-l-2 border-l-transparent',
+                  )}
+                >
+                  <Icon className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span>{label}</span>
+                </Link>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
       {/* Footer */}

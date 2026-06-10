@@ -1,23 +1,34 @@
 import { Injectable } from '@nestjs/common';
+import { SecretCipher } from '../common/secret-cipher';
 import { ChannelSendResult } from './communication.types';
 
 @Injectable()
 export class TelegramAdapter {
-  private get token() {
+  private get envToken() {
     return process.env.TELEGRAM_BOT_TOKEN;
   }
 
-  verifyWebhookSecret(secret?: string): boolean {
-    const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
-    return Boolean(expected) && secret === expected;
+  /**
+   * Constant-time check of the X-Telegram-Bot-Api-Secret-Token header.
+   * `expected` is the per-org webhook secret; falls back to the env value.
+   */
+  verifyWebhookSecret(secret?: string, expected?: string | null): boolean {
+    const reference = expected ?? process.env.TELEGRAM_WEBHOOK_SECRET;
+    return SecretCipher.safeEqual(secret, reference ?? undefined);
   }
 
-  async sendMessage(target: Record<string, unknown>, text: string): Promise<ChannelSendResult> {
+  async sendMessage(
+    target: Record<string, unknown>,
+    text: string,
+    token?: string | null,
+  ): Promise<ChannelSendResult> {
     const chatId = String(target['chat_id'] ?? '');
     if (!chatId) return { ok: false, error: 'Missing Telegram chat_id' };
-    if (!this.token) return { ok: true, skipped: true, externalMessageId: null };
 
-    const response = await fetch(`https://api.telegram.org/bot${this.token}/sendMessage`, {
+    const botToken = token ?? this.envToken;
+    if (!botToken) return { ok: true, skipped: true, externalMessageId: null };
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

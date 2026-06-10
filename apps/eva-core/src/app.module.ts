@@ -17,6 +17,7 @@ import { BrowserModule } from './browser/browser.module';
 import { ApprovalsModule } from './approvals/approvals.module';
 import { WearFastPathModule } from './wear-fast-path/wear-fast-path.module';
 import { CommunicationModule } from './communication/communication.module';
+import { IntegrationsModule } from './integrations/integrations.module';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { CommunicationModule } from './communication/communication.module';
     DevControlModule,
     BrowserModule,
     CommunicationModule,
+    IntegrationsModule,
     ApprovalsModule,
     WearFastPathModule,
   ],
