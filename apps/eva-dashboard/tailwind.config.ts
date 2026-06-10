@@ -34,11 +34,21 @@ const config: Config = {
           '0%, 100%': { boxShadow: '0 0 4px #22d3ee44' },
           '50%': { boxShadow: '0 0 12px #22d3ee88' },
         },
+        'slide-up': {
+          from: { opacity: '0', transform: 'translateY(12px) scale(0.98)' },
+          to: { opacity: '1', transform: 'translateY(0) scale(1)' },
+        },
+        'expand-y': {
+          from: { opacity: '0', maxHeight: '0' },
+          to: { opacity: '1', maxHeight: '600px' },
+        },
       },
       animation: {
         'fade-in': 'fade-in 0.15s ease-out',
         'slide-in': 'slide-in 0.2s ease-out',
         glow: 'glow 2s ease-in-out infinite',
+        'slide-up': 'slide-up 0.2s ease-out',
+        'expand-y': 'expand-y 0.25s ease-out',
       },
     },
   },

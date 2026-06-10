@@ -2,17 +2,20 @@
 
 import { useMemo, useState } from 'react';
 import {
-  Send, MessageCircle, Slack, Phone, Mail, MessageSquareText,
+  Send, MessageCircle, Slack, Phone, Mail, MessageSquareText, Watch,
   CheckCircle2, XCircle, Loader2, Webhook,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 import { coreFetch } from '@/lib/core-api';
+import { WearChannel } from '@/components/settings/wear-channel';
 import type { Integration } from '@/lib/types';
 
 const CHANNELS = [
+  { provider: 'wear',     label: 'wearOS Watch', icon: Watch,         ready: true,  blurb: 'Primary channel: the watch app talks to EVA in realtime.' },
   { provider: 'telegram', label: 'Telegram', icon: Send,              ready: true,  blurb: 'Run EVA from Telegram DMs and groups.' },
   { provider: 'discord',  label: 'Discord',  icon: MessageCircle,     ready: false, blurb: 'Discord bot integration.' },
   { provider: 'slack',    label: 'Slack',    icon: Slack,             ready: false, blurb: 'Slack app integration.' },
@@ -26,8 +29,9 @@ interface ChannelsClientProps {
 }
 
 export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
+  const { toast } = useToast();
   const [integrations, setIntegrations] = useState(initialIntegrations);
-  const [selected, setSelected] = useState('telegram');
+  const [selected, setSelected] = useState('wear');
   const [botToken, setBotToken] = useState('');
   const [allowedIds, setAllowedIds] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -66,8 +70,10 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
       patchLocal(updated);
       setBotToken('');
       setFeedback({ ok: true, text: 'Saved. Token stored encrypted (AES-256-GCM).' });
+      toast(`${selected} channel saved`, 'success');
     } catch (error) {
       setFeedback({ ok: false, text: (error as Error).message });
+      toast((error as Error).message, 'error');
     } finally {
       setBusy(null);
     }
@@ -84,6 +90,7 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
       setFeedback(result.ok
         ? { ok: true, text: `Connected as @${result.bot}` }
         : { ok: false, text: result.error ?? 'Token rejected' });
+      toast(result.ok ? `Telegram OK — @${result.bot}` : result.error ?? 'Token rejected', result.ok ? 'success' : 'error');
     } catch (error) {
       setFeedback({ ok: false, text: (error as Error).message });
     } finally {
@@ -138,25 +145,29 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
 
       {/* Detail pane */}
       <ScrollArea className="flex-1">
-        <div className="max-w-2xl p-6 space-y-6">
-          <div>
-            <div className="flex items-center gap-3">
-              <h2 className="text-base font-semibold text-zinc-100">{channel.label}</h2>
-              <Badge variant={enabled ? 'completed' : 'cancelled'}>{enabled ? 'Enabled' : 'Disabled'}</Badge>
-              {current?.secret_hint
-                ? <Badge variant="running">token {current.secret_hint}</Badge>
-                : <Badge variant="pending">Needs setup</Badge>}
-            </div>
-            <p className="text-xs text-zinc-500 mt-1">{channel.blurb}</p>
-          </div>
+        <div className="max-w-3xl p-6 space-y-6">
+          {selected === 'wear' && <WearChannel onIntegrationChange={patchLocal} />}
 
-          {!channel.ready && (
+          {selected !== 'wear' && (
+            <div>
+              <div className="flex items-center gap-3">
+                <h2 className="text-base font-semibold text-zinc-100">{channel.label}</h2>
+                <Badge variant={enabled ? 'completed' : 'cancelled'}>{enabled ? 'Enabled' : 'Disabled'}</Badge>
+                {current?.secret_hint
+                  ? <Badge variant="running">token {current.secret_hint}</Badge>
+                  : <Badge variant="pending">Needs setup</Badge>}
+              </div>
+              <p className="text-xs text-zinc-500 mt-1">{channel.blurb}</p>
+            </div>
+          )}
+
+          {selected !== 'wear' && !channel.ready && (
             <p className="text-xs font-mono text-zinc-600 border border-dashed border-zinc-800 rounded-sm p-4">
               This channel is not wired into eva-core yet. Telegram is the reference implementation.
             </p>
           )}
 
-          {channel.ready && (
+          {selected === 'telegram' && (
             <>
               <section className="space-y-2">
                 <h3 className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">Get your credentials</h3>

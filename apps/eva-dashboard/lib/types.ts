@@ -71,7 +71,7 @@ export interface ApprovalScreenshot {
   mime_type: string;
 }
 
-export type IntegrationKind = 'model' | 'channel';
+export type IntegrationKind = 'model' | 'channel' | 'credential';
 export type IntegrationStatus = 'active' | 'disabled' | 'error';
 
 /** Masked view returned by eva-core / readable columns in Supabase. */
@@ -121,6 +121,48 @@ export interface AgentSoul {
   autonomy_level: 0 | 1 | 2 | 3;
   model_prefs: Record<string, unknown>;
   updated_at?: string;
+}
+
+export interface SkillTool {
+  id: string;
+  skill_id: string;
+  name: string;
+  capability: string;
+  description: string | null;
+  approval_level: 0 | 1 | 2 | 3;
+  enabled: boolean;
+}
+
+export interface ToolRouteDecision {
+  tool: { name: string; description: string; capabilities: string[]; costPerToken: number; avgLatencyMs: number };
+  matchedCapability: string;
+  alternates: Array<{ name: string }>;
+  score: number;
+}
+
+export interface WearCommand {
+  id: string;
+  direction: 'watch_to_core' | 'core_to_watch';
+  label: string;
+  description: string;
+  category: 'agent' | 'web' | 'media' | 'apps' | 'system' | 'sensors';
+  approval_level: 0 | 1 | 2 | 3;
+  example: Record<string, unknown>;
+}
+
+export interface WearDevice {
+  id: string;
+  label: string | null;
+  status: string | null;
+  created_at: string;
+}
+
+export interface WearOverview {
+  status: IntegrationStatus;
+  enabled_commands: string[];
+  commands: WearCommand[];
+  devices: WearDevice[];
+  endpoints: Record<string, string>;
 }
 
 export interface Skill {

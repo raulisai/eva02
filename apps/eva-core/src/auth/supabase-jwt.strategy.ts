@@ -29,7 +29,7 @@ export class SupabaseJwtStrategy extends PassportStrategy(Strategy, 'supabase-jw
         const member = await this.db.admin
           .from('users')
           .select('org_id')
-          .eq('user_id', userId)
+          .eq('id', userId)
           .eq('org_id', headerOrgId)
           .maybeSingle();
 
@@ -42,7 +42,7 @@ export class SupabaseJwtStrategy extends PassportStrategy(Strategy, 'supabase-jw
       const { data } = await this.db.admin
         .from('users')
         .select('org_id')
-        .eq('user_id', userId)
+        .eq('id', userId)
         .limit(2);
 
       if (data?.length === 1) {

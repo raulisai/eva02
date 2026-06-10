@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   ListTodo, Server, Zap, FileText, ShieldCheck, LogOut, Terminal,
-  FlaskConical, Puzzle, Plug, Package, Sparkles, KeyRound, MessageSquare,
+  FlaskConical, Puzzle, Plug, Package, Sparkles, KeyRound, MessageSquare, Fingerprint,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { createClient } from '@/lib/supabase/client';
@@ -34,8 +34,9 @@ const NAV_GROUPS = [
   {
     label: 'Settings',
     items: [
-      { href: '/settings/models',   label: 'Models',   icon: KeyRound },
-      { href: '/settings/channels', label: 'Channels', icon: MessageSquare },
+      { href: '/settings/models',      label: 'Models',      icon: KeyRound },
+      { href: '/settings/channels',    label: 'Channels',    icon: MessageSquare },
+      { href: '/settings/credentials', label: 'Credentials', icon: Fingerprint },
     ],
   },
 ];

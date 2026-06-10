@@ -4,15 +4,18 @@ import { SecretCipher } from '../common/secret-cipher';
 import { IntegrationsRepository } from './integrations.repository';
 import {
   ChannelSettings,
+  GoogleCredential,
   IntegrationKind,
   IntegrationView,
   McpConnection,
   McpConnectionView,
   OrgIntegration,
 } from './integrations.types';
+import { WEAR_COMMANDS, WEAR_DEFAULT_ENABLED } from './wear-catalog';
 
 const KNOWN_MODEL_PROVIDERS = ['anthropic', 'openai', 'google', 'groq', 'openrouter'];
-const KNOWN_CHANNEL_PROVIDERS = ['telegram', 'discord', 'slack', 'whatsapp', 'email', 'sms'];
+const KNOWN_CHANNEL_PROVIDERS = ['wear', 'telegram', 'discord', 'slack', 'whatsapp', 'email', 'sms'];
+const KNOWN_CREDENTIAL_PROVIDERS = ['google', 'uber', 'github', 'amazon', 'custom'];
 
 @Injectable()
 export class IntegrationsService {
@@ -241,8 +244,105 @@ export class IntegrationsService {
     return this.toMcpView(updated);
   }
 
+  /**
+   * Wear channel overview: registered devices, the full command catalog and
+   * which commands the org has enabled — everything the watch app needs.
+   */
+  async getWearOverview(orgId: string) {
+    const [integration, devices] = await Promise.all([
+      this.repo.findIntegration(orgId, 'channel', 'wear'),
+      this.repo.listWearDevices(orgId),
+    ]);
+
+    const enabled = Array.isArray(integration?.config?.['enabled_commands'])
+      ? (integration!.config['enabled_commands'] as string[])
+      : WEAR_DEFAULT_ENABLED;
+
+    return {
+      status: integration?.status ?? 'disabled',
+      enabled_commands: enabled,
+      commands: WEAR_COMMANDS,
+      devices,
+      endpoints: {
+        websocket: '/eva (Socket.io, auth: { token })',
+        fast_path: 'POST /wear-fast-path/request',
+        pairing: 'POST /wear-fast-path/token { device_id }',
+        directives: 'wear_directives table → delivered flag',
+        consents: 'wear_sensor_consents (heart_rate, location, notifications)',
+      },
+    };
+  }
+
+  async registerWearDevice(input: { orgId: string; userId: string; label: string }) {
+    const device = await this.repo.createWearDevice(input);
+    // Enabling the channel on first device keeps the setup one-click.
+    const integration = await this.repo.findIntegration(input.orgId, 'channel', 'wear');
+    if (!integration) {
+      await this.repo.upsertIntegration({
+        orgId: input.orgId,
+        kind: 'channel',
+        provider: 'wear',
+        status: 'active',
+        config: { enabled_commands: WEAR_DEFAULT_ENABLED },
+      });
+    }
+    return device;
+  }
+
+  /**
+   * Validates the stored Google credential end-to-end: refresh-token grant,
+   * then Gmail profile. Returns the connected account + granted scopes.
+   */
+  async testGoogle(orgId: string): Promise<{ ok: boolean; email?: string; scopes?: string[]; error?: string }> {
+    const secret = await this.getSecret(orgId, 'credential', 'google');
+    if (!secret) return { ok: false, error: 'No Google credential configured' };
+
+    let credential: GoogleCredential;
+    try {
+      credential = JSON.parse(secret) as GoogleCredential;
+    } catch {
+      return { ok: false, error: 'Stored Google credential is not valid JSON' };
+    }
+    if (!credential.client_id || !credential.client_secret || !credential.refresh_token) {
+      return { ok: false, error: 'Credential must include client_id, client_secret and refresh_token' };
+    }
+
+    try {
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: credential.client_id,
+          client_secret: credential.client_secret,
+          refresh_token: credential.refresh_token,
+          grant_type: 'refresh_token',
+        }),
+      });
+      const tokenBody = (await tokenRes.json()) as {
+        access_token?: string; scope?: string; error_description?: string; error?: string;
+      };
+      if (!tokenBody.access_token) {
+        return { ok: false, error: tokenBody.error_description ?? tokenBody.error ?? 'Token exchange failed' };
+      }
+
+      const profileRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+        headers: { Authorization: `Bearer ${tokenBody.access_token}` },
+      });
+      const profile = (await profileRes.json()) as { emailAddress?: string; error?: { message?: string } };
+      if (!profileRes.ok) {
+        return { ok: false, scopes: tokenBody.scope?.split(' '), error: profile.error?.message ?? 'Gmail profile failed' };
+      }
+
+      return { ok: true, email: profile.emailAddress, scopes: tokenBody.scope?.split(' ') ?? [] };
+    } catch (error) {
+      return { ok: false, error: (error as Error).message };
+    }
+  }
+
   private assertKnownProvider(kind: IntegrationKind, provider: string) {
-    const known = kind === 'model' ? KNOWN_MODEL_PROVIDERS : KNOWN_CHANNEL_PROVIDERS;
+    const known = kind === 'model'
+      ? KNOWN_MODEL_PROVIDERS
+      : kind === 'channel' ? KNOWN_CHANNEL_PROVIDERS : KNOWN_CREDENTIAL_PROVIDERS;
     if (!known.includes(provider)) {
       throw new BadRequestException(`Unknown ${kind} provider: ${provider}`);
     }

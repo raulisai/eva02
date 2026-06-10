@@ -88,6 +88,16 @@ describe('IntegrationsService', () => {
             createMcpConnection: jest.fn(),
             updateMcpConnection: jest.fn(),
             deleteMcpConnection: jest.fn().mockResolvedValue(undefined),
+            listWearDevices: jest.fn().mockResolvedValue([]),
+            createWearDevice: jest.fn().mockImplementation(async (input) => ({
+              id: 'dev-1',
+              org_id: input.orgId,
+              user_id: input.userId,
+              kind: 'wear',
+              label: input.label,
+              status: 'pending_pairing',
+              created_at: now,
+            })),
           } satisfies Partial<IntegrationsRepository>,
         },
       ],
@@ -160,5 +170,66 @@ describe('IntegrationsService', () => {
     const [view] = await service.list(ORG);
     expect(view.has_secret).toBe(true);
     expect(JSON.stringify(view)).not.toContain('topsecret');
+  });
+
+  it('returns the wear overview with the command catalog and defaults', async () => {
+    const overview = await service.getWearOverview(ORG);
+
+    expect(overview.status).toBe('disabled');
+    expect(overview.commands.length).toBeGreaterThan(10);
+    expect(overview.commands.some((command) => command.id === 'wear.open_app')).toBe(true);
+    expect(overview.enabled_commands).toContain('agent.ask');
+    expect(overview.enabled_commands).not.toContain('wear.open_app'); // L1 default-off
+    expect(overview.endpoints.fast_path).toContain('/wear-fast-path/request');
+  });
+
+  it('registers a wear device and auto-enables the wear channel', async () => {
+    const device = await service.registerWearDevice({ orgId: ORG, userId: 'user-1', label: 'Galaxy Watch' });
+
+    expect(device.status).toBe('pending_pairing');
+    expect(repo.upsertIntegration).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'channel',
+      provider: 'wear',
+      status: 'active',
+    }));
+  });
+
+  it('validates a Google credential end-to-end via refresh token + Gmail profile', async () => {
+    repo.findIntegration.mockResolvedValue(row({
+      kind: 'credential',
+      provider: 'google',
+      secret_ciphertext: SecretCipher.encrypt(JSON.stringify({
+        client_id: 'cid',
+        client_secret: 'csecret',
+        refresh_token: 'rtoken',
+      })),
+    }));
+
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ access_token: 'at-123', scope: 'https://www.googleapis.com/auth/gmail.readonly' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ emailAddress: 'raulisai97@gmail.com' }),
+      });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await service.testGoogle(ORG);
+
+    expect(result).toEqual({
+      ok: true,
+      email: 'raulisai97@gmail.com',
+      scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+    });
+    expect(fetchMock.mock.calls[0][0]).toBe('https://oauth2.googleapis.com/token');
+    expect(String(fetchMock.mock.calls[0][1].body)).toContain('refresh_token=rtoken');
+  });
+
+  it('reports a clear error when no Google credential is stored', async () => {
+    repo.findIntegration.mockResolvedValue(null);
+    const result = await service.testGoogle(ORG);
+    expect(result).toEqual({ ok: false, error: 'No Google credential configured' });
   });
 });

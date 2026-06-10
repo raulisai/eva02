@@ -1,4 +1,4 @@
-export type IntegrationKind = 'model' | 'channel';
+export type IntegrationKind = 'model' | 'channel' | 'credential';
 export type IntegrationStatus = 'active' | 'disabled' | 'error';
 
 export interface OrgIntegration {
@@ -67,4 +67,21 @@ export interface ChannelSettings {
   config: Record<string, unknown>;
   secret: string | null;
   webhookSecret: string | null;
+}
+
+export interface WearDevice {
+  id: string;
+  org_id: string;
+  user_id: string | null;
+  kind: string;
+  label: string | null;
+  status: string | null;
+  created_at: string;
+}
+
+/** Google credential payload stored encrypted as a JSON blob. */
+export interface GoogleCredential {
+  client_id: string;
+  client_secret: string;
+  refresh_token: string;
 }

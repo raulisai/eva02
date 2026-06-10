@@ -6,6 +6,7 @@ import {
   McpConnection,
   McpStatus,
   OrgIntegration,
+  WearDevice,
 } from './integrations.types';
 
 @Injectable()
@@ -170,6 +171,35 @@ export class IntegrationsRepository {
       .eq('id', id);
 
     if (error) this.fail('mcp_connections.delete', error);
+  }
+
+  async listWearDevices(orgId: string): Promise<WearDevice[]> {
+    const { data, error } = await this.db.admin
+      .from('devices')
+      .select('*')
+      .eq('org_id', orgId)
+      .eq('kind', 'wear')
+      .order('created_at', { ascending: false });
+
+    if (error) this.fail('devices.list', error);
+    return (data ?? []) as WearDevice[];
+  }
+
+  async createWearDevice(input: { orgId: string; userId: string; label: string }): Promise<WearDevice> {
+    const { data, error } = await this.db.admin
+      .from('devices')
+      .insert({
+        org_id: input.orgId,
+        user_id: input.userId,
+        kind: 'wear',
+        label: input.label,
+        status: 'pending_pairing',
+      })
+      .select()
+      .single();
+
+    if (error) this.fail('devices.create', error);
+    return data as WearDevice;
   }
 
   private fail(scope: string, error: unknown): never {
