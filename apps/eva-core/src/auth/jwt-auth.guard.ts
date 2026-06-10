@@ -1,4 +1,4 @@
-import { Injectable, ExecutionContext } from '@nestjs/common';
+import { Injectable, ExecutionContext, Logger, UnauthorizedException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Reflector } from '@nestjs/core';
 
@@ -6,6 +6,8 @@ export const IS_PUBLIC_KEY = 'isPublic';
 
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('supabase-jwt') {
+  private readonly logger = new Logger(JwtAuthGuard.name);
+
   constructor(private reflector: Reflector) {
     super();
   }
@@ -17,5 +19,13 @@ export class JwtAuthGuard extends AuthGuard('supabase-jwt') {
     ]);
     if (isPublic) return true;
     return super.canActivate(context);
+  }
+
+  handleRequest(err: any, user: any, info: any) {
+    if (err || !user) {
+      this.logger.warn(`Auth failed — info: ${info?.message ?? info} | err: ${err?.message ?? err}`);
+      throw err ?? new UnauthorizedException(info?.message ?? 'Unauthorized');
+    }
+    return user;
   }
 }

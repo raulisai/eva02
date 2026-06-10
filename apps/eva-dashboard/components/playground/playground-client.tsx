@@ -50,6 +50,18 @@ export function PlaygroundClient() {
   const status: TaskStatus = liveStatus ?? task?.status ?? 'pending';
   const prevStatus = useRef<TaskStatus | null>(null);
 
+  // When task.completed WS event arrives, patch the task result immediately.
+  useEffect(() => {
+    if (!task) return;
+    const completed = events.find(
+      e => e.type === 'task.completed' && e.taskId === task.id,
+    );
+    if (completed) {
+      const text = (completed.payload as Record<string, unknown>)['result'] as string | undefined;
+      if (text) setTask(prev => prev ? { ...prev, result: { text } } : prev);
+    }
+  }, [events, task]);
+
   // Track how long the task has been sitting in the current stage.
   useEffect(() => {
     if (status !== prevStatus.current) {
@@ -73,6 +85,25 @@ export function PlaygroundClient() {
   const msInStage = now - stageSince;
   const active = task ? stageIndex(status) : -1;
   const terminalVariant = status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'cancelled';
+
+  // Chronological view of what EVA says and does (events arrive newest-first).
+  const chronological = useMemo(() => [...events].reverse(), [events]);
+  const sayMessages = chronological
+    .filter((event) => event.type === 'task.say')
+    .map((event) => ({ ts: event.ts, text: String((event.payload as Record<string, unknown>)['text'] ?? '') }));
+  const resultEvent = chronological.find((event) => event.type === 'task.result');
+  const resultText = resultEvent
+    ? String((resultEvent.payload as Record<string, unknown>)['text'] ?? '')
+    : (task?.result as Record<string, unknown> | null)?.['text'] as string | undefined;
+  const resultMeta = resultEvent?.payload as { model?: string; latency_ms?: number } | undefined;
+  const actionLog = chronological.filter((event) =>
+    event.type === 'task.log' || event.type.startsWith('task.') && ['task.created', 'task.started', 'task.completed', 'task.failed', 'task.waiting_approval'].includes(event.type));
+  const isWorking = task !== null && active >= 0 && active < 4 && !resultText;
+
+  const logEndRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [actionLog.length]);
 
   const stuck = useMemo(() => {
     if (!task || active === 4) return null;
@@ -216,21 +247,89 @@ export function PlaygroundClient() {
               </p>
             )}
 
-            {/* Live event trace */}
-            <section className="space-y-2">
-              <h3 className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">Event trace</h3>
-              {events.length === 0 && (
-                <p className="text-xs font-mono text-zinc-600">Waiting for events…</p>
-              )}
-              {events.map((event, index) => (
-                <div key={`${event.type}-${event.ts}-${index}`} className="flex items-center gap-3 text-xs border-b border-zinc-800/50 py-1.5">
-                  <span className="font-mono text-zinc-600 flex-shrink-0">
-                    {new Date(event.ts).toLocaleTimeString()}
-                  </span>
-                  <span className="font-mono text-cyan-400">{event.type}</span>
-                  <span className="font-mono text-zinc-600 truncate">{JSON.stringify(event.payload)}</span>
+            {/* Conversation — what EVA says while she works */}
+            <section className="space-y-2" data-testid="conversation">
+              <h3 className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">Conversation</h3>
+
+              {/* User order */}
+              <div className="flex justify-end">
+                <div className="max-w-[80%] border border-zinc-700 bg-zinc-800/60 rounded-sm px-3 py-2 text-xs text-zinc-200">
+                  {task.description ?? task.title}
+                </div>
+              </div>
+
+              {/* EVA instant acknowledgments */}
+              {sayMessages.map((message, index) => (
+                <div key={`say-${message.ts}-${index}`} className="flex justify-start animate-slide-up">
+                  <div className="max-w-[80%] border border-cyan-500/30 bg-cyan-500/5 rounded-sm px-3 py-2 text-xs text-cyan-100">
+                    {message.text}
+                  </div>
                 </div>
               ))}
+
+              {/* Typing indicator while working */}
+              {isWorking && (
+                <div className="flex justify-start">
+                  <div className="border border-zinc-800 rounded-sm px-3 py-2 inline-flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse [animation-delay:150ms]" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse [animation-delay:300ms]" />
+                    <span className="text-[10px] font-mono text-zinc-500 ml-1.5">EVA está trabajando…</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Final answer */}
+              {resultText && (
+                <div className="flex justify-start animate-slide-up">
+                  <div className="max-w-[85%] border border-emerald-500/30 bg-emerald-500/5 rounded-sm px-3 py-2 space-y-1.5">
+                    <p className="text-xs text-zinc-100 whitespace-pre-wrap leading-relaxed">{resultText}</p>
+                    {resultMeta?.model && (
+                      <p className="text-[9px] font-mono text-zinc-600">
+                        {resultMeta.model} · {resultMeta.latency_ms}ms
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* Transparent action log — every step EVA takes, live */}
+            <section className="space-y-2" data-testid="action-log">
+              <h3 className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">
+                Action log · {actionLog.length} entries
+              </h3>
+              <div className="border border-zinc-800 rounded-sm bg-zinc-950/80 max-h-72 overflow-y-auto font-mono text-[11px]">
+                {actionLog.length === 0 && (
+                  <p className="px-3 py-3 text-zinc-600">Waiting for the agent to start…</p>
+                )}
+                {actionLog.map((event, index) => {
+                  const payload = event.payload as { message?: string; scope?: string; status?: string; error?: string };
+                  const isLog = event.type === 'task.log';
+                  const isError = Boolean(payload.error) || payload.message?.startsWith('ERROR');
+                  return (
+                    <div
+                      key={`${event.type}-${event.ts}-${index}`}
+                      className="flex items-start gap-2 px-3 py-1 border-b border-zinc-800/40 animate-fade-in"
+                    >
+                      <span className="text-zinc-600 flex-shrink-0">
+                        {new Date(event.ts).toLocaleTimeString()}
+                      </span>
+                      <span className={cn(
+                        'flex-shrink-0 uppercase tracking-wider text-[9px] mt-0.5 px-1 rounded-sm border',
+                        isError ? 'text-red-400 border-red-500/40' :
+                          isLog ? 'text-cyan-400 border-cyan-500/30' : 'text-amber-400 border-amber-500/30',
+                      )}>
+                        {isLog ? (payload.scope ?? 'log') : event.type.replace('task.', '')}
+                      </span>
+                      <span className={cn('break-all', isError ? 'text-red-300' : 'text-zinc-300')}>
+                        {payload.message ?? payload.error ?? (payload.status ? `status → ${payload.status}` : JSON.stringify(event.payload))}
+                      </span>
+                    </div>
+                  );
+                })}
+                <div ref={logEndRef} />
+              </div>
             </section>
           </div>
         </ScrollArea>

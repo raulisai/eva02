@@ -1,10 +1,11 @@
 'use client';
 
 import { useState } from 'react';
-import { KeyRound, Trash2, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { KeyRound, Trash2, Loader2, CheckCircle2, XCircle, Zap } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 import { coreFetch } from '@/lib/core-api';
 import type { Integration } from '@/lib/types';
@@ -22,10 +23,34 @@ interface ModelsClientProps {
 }
 
 export function ModelsClient({ initialIntegrations }: ModelsClientProps) {
+  const { toast } = useToast();
   const [integrations, setIntegrations] = useState(initialIntegrations);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const [latency, setLatency] = useState<Record<string, number>>({});
+
+  async function testProvider(provider: string) {
+    setBusy(`test-${provider}`);
+    try {
+      const result = await coreFetch<{ ok: boolean; latency_ms?: number; detail?: string; error?: string }>(
+        `/integrations/model/${provider}/test`,
+        { method: 'POST' },
+      );
+      if (result.ok) {
+        setLatency((prev) => ({ ...prev, [provider]: result.latency_ms ?? 0 }));
+        setFeedback((prev) => ({ ...prev, [provider]: { ok: true, text: `Connected in ${result.latency_ms}ms — ${result.detail}` } }));
+        toast(`${provider}: ${result.latency_ms}ms ⚡`, 'success');
+      } else {
+        setFeedback((prev) => ({ ...prev, [provider]: { ok: false, text: result.error ?? 'Connection failed' } }));
+        toast(`${provider}: ${result.error}`, 'error');
+      }
+    } catch (error) {
+      setFeedback((prev) => ({ ...prev, [provider]: { ok: false, text: (error as Error).message } }));
+    } finally {
+      setBusy(null);
+    }
+  }
 
   function patchLocal(updated: Integration) {
     setIntegrations((prev) => {
@@ -87,6 +112,12 @@ export function ModelsClient({ initialIntegrations }: ModelsClientProps) {
                 {current?.secret_hint
                   ? <Badge variant="completed">configured {current.secret_hint}</Badge>
                   : <Badge variant="cancelled">not set</Badge>}
+                {latency[provider] !== undefined && (
+                  <Badge variant="running">
+                    <Zap className="w-2.5 h-2.5" />
+                    {latency[provider]}ms
+                  </Badge>
+                )}
               </div>
               <p className="text-[11px] text-zinc-600">{blurb}</p>
 
@@ -103,6 +134,16 @@ export function ModelsClient({ initialIntegrations }: ModelsClientProps) {
                 <Button size="sm" onClick={() => save(provider)} disabled={busy !== null || !drafts[provider]?.trim()}>
                   {busy === provider && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                   Save
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => testProvider(provider)}
+                  disabled={busy !== null}
+                  title="Test connectivity with the stored key (env fallback)"
+                >
+                  {busy === `test-${provider}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+                  Test
                 </Button>
                 {current && (
                   <Button size="sm" variant="destructive" onClick={() => remove(provider)} disabled={busy !== null}>

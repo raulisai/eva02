@@ -28,7 +28,12 @@ export class TasksService {
     return this.repo.findByIdOrThrow(taskId, orgId);
   }
 
-  async transition(taskId: string, orgId: string, nextStatus: TaskStatus): Promise<Task> {
+  async transition(
+    taskId: string,
+    orgId: string,
+    nextStatus: TaskStatus,
+    outcome: Partial<Pick<Task, 'result' | 'error'>> = {},
+  ): Promise<Task> {
     const task = await this.repo.findByIdOrThrow(taskId, orgId);
 
     if (!isValidTransition(task.status, nextStatus)) {
@@ -38,18 +43,19 @@ export class TasksService {
     }
 
     const now = new Date().toISOString();
-    const extras: Parameters<typeof this.repo.updateStatus>[3] = {};
+    const extras: Parameters<typeof this.repo.updateStatus>[3] = { ...outcome };
 
     if (nextStatus === 'running' && !task.started_at) extras.started_at = now;
     if (nextStatus === 'completed' || nextStatus === 'failed') extras.completed_at = now;
 
     const updated = await this.repo.updateStatus(taskId, orgId, nextStatus, extras);
 
-    const eventTypeMap: Partial<Record<TaskStatus, 'task.started' | 'task.completed' | 'task.failed' | 'task.cancelled'>> = {
+    const eventTypeMap: Partial<Record<TaskStatus, 'task.started' | 'task.completed' | 'task.failed' | 'task.cancelled' | 'task.waiting_approval'>> = {
       running:   'task.started',
       completed: 'task.completed',
       failed:    'task.failed',
       cancelled: 'task.cancelled',
+      waiting_for_approval: 'task.waiting_approval',
     };
 
     const eventType = eventTypeMap[nextStatus];
@@ -58,7 +64,7 @@ export class TasksService {
         type: eventType,
         orgId,
         taskId,
-        payload: { taskId, status: nextStatus },
+        payload: { taskId, status: nextStatus, ...(outcome.error ? { error: outcome.error } : {}) },
       });
     }
 

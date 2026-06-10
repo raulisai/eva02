@@ -3,10 +3,15 @@ import Redis from 'ioredis';
 
 export type EvaEventType =
   | 'task.created'
+  | 'task.update'
   | 'task.started'
   | 'task.completed'
   | 'task.failed'
   | 'task.cancelled'
+  | 'task.waiting_approval'
+  | 'task.say'      // immediate acknowledgment EVA speaks while working
+  | 'task.log'      // transparent step-by-step action log
+  | 'task.result'   // final answer text
   | 'approval.requested'
   | 'approval.resolved'
   | 'dev.task.created'

@@ -50,10 +50,16 @@ export function WsProvider({ token, children }: { token: string; children: React
 
     const EVA_EVENTS: Array<{ name: string; status?: TaskStatus }> = [
       { name: 'task.created' },
-      { name: 'task.started',   status: 'running' },
-      { name: 'task.completed', status: 'completed' },
-      { name: 'task.failed',    status: 'failed' },
-      { name: 'task.cancelled', status: 'cancelled' },
+      { name: 'task.update' },
+      { name: 'task.started',          status: 'running' },
+      { name: 'task.completed',        status: 'completed' },
+      { name: 'task.failed',           status: 'failed' },
+      { name: 'task.cancelled',        status: 'cancelled' },
+      { name: 'task.waiting_approval', status: 'waiting_for_approval' },
+      { name: 'task.say' },
+      { name: 'task.log' },
+      { name: 'task.result' },
+      { name: 'approval.requested' },
     ];
 
     EVA_EVENTS.forEach(({ name, status }) => {

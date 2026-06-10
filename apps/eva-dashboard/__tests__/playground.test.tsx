@@ -57,6 +57,14 @@ describe('PlaygroundClient', () => {
     ['Received', 'Planning', 'Executing', 'Approval', 'Done'].forEach((stage) => {
       expect(screen.getByText(stage)).toBeInTheDocument();
     });
-    expect(screen.getByText('Resume mis notificaciones')).toBeInTheDocument();
+    // Appears both in the header and as the user bubble in the conversation
+    expect(screen.getAllByText('Resume mis notificaciones').length).toBeGreaterThanOrEqual(2);
+
+    // Conversation shows the user order and the working indicator;
+    // the action log console is live from the start.
+    expect(screen.getByTestId('conversation')).toBeInTheDocument();
+    expect(screen.getByText('EVA está trabajando…')).toBeInTheDocument();
+    expect(screen.getByTestId('action-log')).toBeInTheDocument();
+    expect(screen.getByText('Waiting for the agent to start…')).toBeInTheDocument();
   });
 });

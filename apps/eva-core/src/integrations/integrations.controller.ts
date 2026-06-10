@@ -56,6 +56,12 @@ export class IntegrationsController {
     return this.integrations.testGoogle(req.user.orgId);
   }
 
+  @Post('model/:provider/test')
+  @HttpCode(HttpStatus.OK)
+  testModelProvider(@Param('provider') provider: string, @Req() req: AuthenticatedRequest) {
+    return this.integrations.testModelProvider(req.user.orgId, provider);
+  }
+
   @Get('mcp/connections')
   listMcp(@Req() req: AuthenticatedRequest) {
     return this.integrations.listMcp(req.user.orgId);

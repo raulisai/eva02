@@ -10,6 +10,8 @@ export interface GenerateOptions {
   temperature?: number;
   maxTokens?: number;
   responseFormat?: 'text' | 'json';
+  /** When set, org-stored provider keys take precedence over env keys. */
+  orgId?: string;
 }
 
 export interface GenerateResult {

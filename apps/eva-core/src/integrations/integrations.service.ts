@@ -245,6 +245,63 @@ export class IntegrationsService {
   }
 
   /**
+   * Live connectivity test for a model provider using the org-stored key
+   * (env fallback). Returns round-trip latency so the dashboard can show
+   * how fast the provider responds.
+   */
+  async testModelProvider(orgId: string, provider: string): Promise<{
+    ok: boolean; latency_ms?: number; detail?: string; error?: string;
+  }> {
+    this.assertKnownProvider('model', provider);
+    const key = (await this.getSecret(orgId, 'model', provider))
+      ?? this.envKeyFor(provider);
+    if (!key) return { ok: false, error: 'No API key configured for this provider' };
+
+    const probes: Record<string, { url: string; headers: Record<string, string> }> = {
+      anthropic:  { url: 'https://api.anthropic.com/v1/models', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' } },
+      openai:     { url: 'https://api.openai.com/v1/models', headers: { Authorization: `Bearer ${key}` } },
+      google:     { url: `https://generativelanguage.googleapis.com/v1beta/models?key=${key}`, headers: {} },
+      groq:       { url: 'https://api.groq.com/openai/v1/models', headers: { Authorization: `Bearer ${key}` } },
+      openrouter: { url: 'https://openrouter.ai/api/v1/models', headers: { Authorization: `Bearer ${key}` } },
+    };
+    const probe = probes[provider];
+
+    const started = Date.now();
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      const res = await fetch(probe.url, { headers: probe.headers, signal: controller.signal });
+      clearTimeout(timer);
+      const latency = Date.now() - started;
+
+      if (!res.ok) {
+        const body = await res.text();
+        return { ok: false, latency_ms: latency, error: `HTTP ${res.status}: ${body.slice(0, 200)}` };
+      }
+      const body = (await res.json().catch(() => ({}))) as { data?: unknown[]; models?: unknown[] };
+      const count = body.data?.length ?? body.models?.length;
+      return {
+        ok: true,
+        latency_ms: latency,
+        detail: count !== undefined ? `${count} models available` : 'connected',
+      };
+    } catch (error) {
+      return { ok: false, latency_ms: Date.now() - started, error: (error as Error).message };
+    }
+  }
+
+  private envKeyFor(provider: string): string | undefined {
+    const map: Record<string, string | undefined> = {
+      anthropic: process.env.ANTHROPIC_API_KEY,
+      openai: process.env.OPENAI_API_KEY,
+      google: process.env.GOOGLE_API_KEY,
+      groq: process.env.GROQ_API_KEY,
+      openrouter: process.env.OPENROUTER_API_KEY,
+    };
+    return map[provider];
+  }
+
+  /**
    * Wear channel overview: registered devices, the full command catalog and
    * which commands the org has enabled — everything the watch app needs.
    */

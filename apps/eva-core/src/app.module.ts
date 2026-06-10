@@ -18,6 +18,7 @@ import { ApprovalsModule } from './approvals/approvals.module';
 import { WearFastPathModule } from './wear-fast-path/wear-fast-path.module';
 import { CommunicationModule } from './communication/communication.module';
 import { IntegrationsModule } from './integrations/integrations.module';
+import { AgentModule } from './agent/agent.module';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { IntegrationsModule } from './integrations/integrations.module';
     BrowserModule,
     CommunicationModule,
     IntegrationsModule,
+    AgentModule,
     ApprovalsModule,
     WearFastPathModule,
   ],

@@ -1,53 +1,52 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
-import { ExtractJwt, Strategy } from 'passport-jwt';
+import { Strategy } from 'passport-custom';
 import { DatabaseService } from '../database/database.service';
-import { JwtPayload } from '../common/types';
 
 @Injectable()
 export class SupabaseJwtStrategy extends PassportStrategy(Strategy, 'supabase-jwt') {
+  private readonly logger = new Logger(SupabaseJwtStrategy.name);
+
   constructor(private db: DatabaseService) {
-    super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
-      ignoreExpiration: false,
-      secretOrKey: process.env.SUPABASE_JWT_SECRET ?? 'super-secret-jwt-token-with-at-least-32-characters-long',
-      passReqToCallback: true,
-    });
+    super();
   }
 
-  async validate(req: Express.Request, payload: JwtPayload) {
-    const userId = payload.sub;
-    if (!userId) throw new UnauthorizedException('Invalid token: missing sub');
+  async validate(req: any): Promise<{ userId: string; orgId: string; role: string; jwt: string }> {
+    const authHeader: string | undefined = req.headers?.authorization;
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    if (!token) throw new UnauthorizedException('Missing bearer token');
 
-    // Resolve org_id: prefer JWT claim, fall back to DB lookup
-    let orgId: string | null = payload.app_metadata?.org_id ?? null;
+    // Validate via Supabase — works for any JWT algorithm (HS256, RS256, etc.)
+    const { data, error } = await this.db.admin.auth.getUser(token);
+    if (error || !data?.user) {
+      this.logger.warn(`Supabase auth.getUser failed: ${error?.message}`);
+      throw new UnauthorizedException(error?.message ?? 'Invalid token');
+    }
+
+    const userId = data.user.id;
+    let orgId: string | null = (data.user.app_metadata?.org_id as string) ?? null;
 
     if (!orgId) {
-      const headerOrgId = (req as any).headers?.['x-org-id'] as string | undefined;
+      const headerOrgId = req.headers?.['x-org-id'] as string | undefined;
       if (headerOrgId) {
-        // Validate the user actually belongs to this org
-        const member = await this.db.admin
+        const { data: member } = await this.db.admin
           .from('users')
           .select('org_id')
           .eq('id', userId)
           .eq('org_id', headerOrgId)
           .maybeSingle();
-
-        if (member.data) orgId = member.data.org_id;
+        if (member) orgId = member.org_id;
       }
     }
 
     if (!orgId) {
-      // Auto-select if user belongs to exactly one org
-      const { data } = await this.db.admin
+      const { data: rows } = await this.db.admin
         .from('users')
         .select('org_id')
         .eq('id', userId)
         .limit(2);
 
-      if (data?.length === 1) {
-        orgId = data[0].org_id;
-      }
+      if (rows?.length === 1) orgId = rows[0].org_id;
     }
 
     if (!orgId) {
@@ -56,13 +55,6 @@ export class SupabaseJwtStrategy extends PassportStrategy(Strategy, 'supabase-jw
       );
     }
 
-    const rawJwt = ExtractJwt.fromAuthHeaderAsBearerToken()(req as any) ?? '';
-
-    return {
-      userId,
-      orgId,
-      role: payload.role,
-      jwt: rawJwt,
-    };
+    return { userId, orgId, role: data.user.role ?? 'authenticated', jwt: token };
   }
 }

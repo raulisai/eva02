@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { IntegrationsService } from '../integrations/integrations.service';
 import {
   GenerateOptions,
   GenerateResult,
@@ -9,9 +10,16 @@ import {
   EMBED_MODELS,
 } from './model-router.types';
 
+interface ResolvedKeys {
+  openai?: string;
+  claude?: string;
+}
+
 @Injectable()
 export class ModelRouterService {
   private readonly logger = new Logger(ModelRouterService.name);
+
+  constructor(@Optional() private readonly integrations?: IntegrationsService) {}
 
   private get openaiKey()     { return process.env.OPENAI_API_KEY; }
   private get anthropicKey()  { return process.env.ANTHROPIC_API_KEY; }
@@ -21,17 +29,35 @@ export class ModelRouterService {
     return 'openai'; // fallback still selected, generate() will use stub
   }
 
+  /** Org-stored keys (dashboard /settings/models) take precedence over env. */
+  private async resolveKeys(orgId?: string): Promise<ResolvedKeys> {
+    const keys: ResolvedKeys = { openai: this.openaiKey, claude: this.anthropicKey };
+    if (!orgId || !this.integrations) return keys;
+    try {
+      const [anthropic, openai] = await Promise.all([
+        this.integrations.getSecret(orgId, 'model', 'anthropic'),
+        this.integrations.getSecret(orgId, 'model', 'openai'),
+      ]);
+      if (anthropic) keys.claude = anthropic;
+      if (openai) keys.openai = openai;
+    } catch (error) {
+      this.logger.warn(`Org key lookup failed, falling back to env keys: ${(error as Error).message}`);
+    }
+    return keys;
+  }
+
   // ── generate ──────────────────────────────────────────────────────────────
 
   async generate(prompt: string, opts: GenerateOptions = {}): Promise<GenerateResult> {
-    const backend = this.resolveBackend(opts.backend);
+    const keys = await this.resolveKeys(opts.orgId);
+    const backend = this.resolveBackend(opts.backend, keys);
     const budget  = opts.budget ?? 'balanced';
 
-    if (backend === 'claude' && this.anthropicKey) {
-      return this.generateClaude(prompt, opts, budget);
+    if (backend === 'claude' && keys.claude) {
+      return this.generateClaude(prompt, opts, budget, keys.claude);
     }
-    if (backend === 'openai' && this.openaiKey) {
-      return this.generateOpenAI(prompt, opts, budget);
+    if (backend === 'openai' && keys.openai) {
+      return this.generateOpenAI(prompt, opts, budget, keys.openai);
     }
 
     this.logger.warn('No LLM API key configured — returning deterministic stub');
@@ -93,7 +119,9 @@ export class ModelRouterService {
     prompt: string,
     opts: GenerateOptions,
     budget: string,
+    apiKey?: string,
   ): Promise<GenerateResult> {
+    const key = apiKey ?? this.openaiKey;
     const model = opts.model ?? MODEL_CATALOGUE[budget as keyof typeof MODEL_CATALOGUE]?.openai ?? 'gpt-4o-mini';
 
     const messages: { role: string; content: string }[] = [];
@@ -112,7 +140,7 @@ export class ModelRouterService {
 
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.openaiKey}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
       body:    JSON.stringify(body),
     });
 
@@ -145,7 +173,9 @@ export class ModelRouterService {
     prompt: string,
     opts: GenerateOptions,
     budget: string,
+    apiKey?: string,
   ): Promise<GenerateResult> {
+    const key = apiKey ?? this.anthropicKey;
     const model = opts.model ?? MODEL_CATALOGUE[budget as keyof typeof MODEL_CATALOGUE]?.claude ?? 'claude-haiku-4-5-20251001';
 
     const body: Record<string, unknown> = {
@@ -160,7 +190,7 @@ export class ModelRouterService {
       method: 'POST',
       headers: {
         'Content-Type':      'application/json',
-        'x-api-key':         this.anthropicKey!,
+        'x-api-key':         key!,
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(body),
@@ -227,8 +257,10 @@ export class ModelRouterService {
     };
   }
 
-  private resolveBackend(requested?: ModelBackend): ModelBackend {
+  private resolveBackend(requested?: ModelBackend, keys?: ResolvedKeys): ModelBackend {
     if (requested && requested !== 'auto') return requested;
+    if (keys?.claude && !keys?.openai) return 'claude';
+    if (keys?.openai) return 'openai';
     return this.preferredBackend;
   }
 
