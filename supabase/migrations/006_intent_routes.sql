@@ -10,7 +10,7 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS intent_routes (
   id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id      UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  org_id      UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   task_id     UUID REFERENCES tasks(id) ON DELETE SET NULL,
   input_hash  TEXT NOT NULL,
   intent      intent_type NOT NULL,

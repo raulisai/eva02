@@ -8,11 +8,13 @@ import {
   MessageBody,
   ConnectedSocket,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import * as jwt from 'jsonwebtoken';
 import { EvaEvent } from '../events/event-bus.service';
+import { DatabaseService } from '../database/database.service';
 
+@Injectable()
 @WebSocketGateway({
   namespace: '/eva',
   cors: { origin: '*', credentials: true },
@@ -22,6 +24,8 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   server!: Server;
 
   private readonly logger = new Logger(AppGateway.name);
+
+  constructor(private readonly db: DatabaseService) {}
 
   afterInit() {
     this.logger.log('WebSocket gateway initialised at namespace /eva');
@@ -41,18 +45,28 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     try {
       const secret = process.env.SUPABASE_JWT_SECRET ?? '';
       const payload = jwt.verify(token, secret) as Record<string, unknown>;
-      const orgId = (payload['app_metadata'] as any)?.org_id as string | undefined;
+      const userId = payload['sub'] as string;
 
-      if (!orgId) {
-        client.emit('error', { message: 'Token missing org_id in app_metadata' });
+      // Look up org_id from users table
+      const { data, error } = await this.db.admin
+        .from('users')
+        .select('org_id')
+        .eq('id', userId)
+        .limit(1)
+        .single();
+
+      if (error || !data?.org_id) {
+        client.emit('error', { message: 'User has no org membership' });
         client.disconnect(true);
         return;
       }
 
+      const orgId = data.org_id as string;
+
       // Join org-scoped room so only org members receive events
       await client.join(`org:${orgId}`);
       (client.data as any).orgId = orgId;
-      (client.data as any).userId = payload['sub'];
+      (client.data as any).userId = userId;
 
       this.logger.debug(`Client ${client.id} joined org:${orgId}`);
       client.emit('connected', { orgId });

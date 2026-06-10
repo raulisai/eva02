@@ -15,7 +15,7 @@ END $$;
 -- Tasks are always scoped to an org
 CREATE TABLE IF NOT EXISTS tasks (
   id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id       UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  org_id       UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   created_by   UUID NOT NULL REFERENCES auth.users(id),
   title        TEXT NOT NULL,
   description  TEXT,

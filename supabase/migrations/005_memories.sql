@@ -13,7 +13,7 @@ END $$;
 -- Core memory records
 CREATE TABLE IF NOT EXISTS memories (
   id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  org_id      UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  org_id      UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   agent_id    TEXT,
   task_id     UUID REFERENCES tasks(id) ON DELETE SET NULL,
   content     TEXT NOT NULL,
@@ -41,7 +41,7 @@ CREATE TRIGGER memories_updated_at
 CREATE TABLE IF NOT EXISTS memory_embeddings (
   id        UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   memory_id UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-  org_id    UUID NOT NULL REFERENCES orgs(id)    ON DELETE CASCADE,
+  org_id    UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   embedding vector(1536) NOT NULL,
   model     TEXT NOT NULL DEFAULT 'text-embedding-3-small',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

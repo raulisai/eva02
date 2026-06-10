@@ -43,13 +43,22 @@ export class EventBusService implements OnModuleInit, OnModuleDestroy {
   private readonly handlers = new Map<EvaEventType, Array<(e: EvaEvent) => Promise<void>>>();
   private consuming = false;
 
-  onModuleInit() {
+  async onModuleInit() {
     const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
     this.publisher = new Redis(url, { lazyConnect: true });
     this.subscriber = new Redis(url, { lazyConnect: true });
 
     this.publisher.on('error', (err) => this.logger.error('Redis publisher error', err));
     this.subscriber.on('error', (err) => this.logger.error('Redis subscriber error', err));
+
+    try {
+      await this.publisher.connect();
+      await this.subscriber.connect();
+      this.logger.log(`Redis connected: ${url}`);
+    } catch (err) {
+      this.logger.error(`Redis connection FAILED (${url}) — app will not serve correctly`, err);
+      throw err;
+    }
   }
 
   async onModuleDestroy() {
