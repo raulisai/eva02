@@ -1,12 +1,13 @@
+
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "baseUrl": "./",
+    "outDir": "./dist",
     "paths": {
-      "@eva/*": ["src/*"],
-      "@eva/browser-runtime": ["../../packages/browser-runtime/src"]
+      "@eva/*": ["src/*"]
     }
   },
-  "include": ["src/**/*", "test/**/*", "../../packages/browser-runtime/src/**/*"],
+  "include": ["src/**/*", "test/**/*"],
   "exclude": ["node_modules", "dist"]
 }
