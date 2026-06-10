@@ -27,7 +27,7 @@ export class SupabaseJwtStrategy extends PassportStrategy(Strategy, 'supabase-jw
       if (headerOrgId) {
         // Validate the user actually belongs to this org
         const member = await this.db.admin
-          .from('org_members')
+          .from('users')
           .select('org_id')
           .eq('user_id', userId)
           .eq('org_id', headerOrgId)
@@ -40,7 +40,7 @@ export class SupabaseJwtStrategy extends PassportStrategy(Strategy, 'supabase-jw
     if (!orgId) {
       // Auto-select if user belongs to exactly one org
       const { data } = await this.db.admin
-        .from('org_members')
+        .from('users')
         .select('org_id')
         .eq('user_id', userId)
         .limit(2);
