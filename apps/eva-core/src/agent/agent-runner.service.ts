@@ -22,6 +22,7 @@ import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
 import { MediaService } from './media.service';
 import { MemoryRecallService } from './memory-recall.service';
 import { MissingInformationError, ResearchToolsService } from './research-tools.service';
+import { SandboxService } from './sandbox.service';
 import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
 import { AgentSoulContext, Goal, PersonalProfile, SoulContextService } from './soul-context.service';
@@ -237,6 +238,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly scheduledJobs: ScheduledJobsService,
     private readonly comms: CommunicationService,
     private readonly agentLoop: AgentLoopService,
+    private readonly sandbox: SandboxService,
   ) {}
 
   onApplicationBootstrap() {
@@ -539,7 +541,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       // delegación a sub-agente) hasta resolver. Si el bucle no puede
       // (sin keys, sin decisiones válidas), cae al pipeline clásico.
       if (tier.tier === 'long') {
-        const handled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt);
+        const handled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt, task.created_by);
         if (handled) return;
         await this.log(orgId, taskId, 'agent-loop no resolvió — usando pipeline clásico', 'loop');
       }
@@ -686,7 +688,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         const reason = staleReason ?? 'non-actionable';
         await this.log(orgId, taskId, `model answer rejected as ${reason}; trying project tools`, 'model');
         // El bucle agéntico tiene más herramientas e itera; es la primera opción.
-        const loopHandled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt);
+        const loopHandled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt, task.created_by);
         if (loopHandled) return;
         const recovered = await this.recoverWithTools(orgId, taskId, contextualInput, startedAt, input);
         if (recovered) return;
@@ -1590,6 +1592,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     input: string,
     conversationContext: ConversationContextTurn[],
     startedAt: number,
+    userId?: string,
   ): Promise<boolean> {
     try {
       const context = conversationContext.length > 0
@@ -1600,6 +1603,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         : undefined;
       const outcome = await this.agentLoop.run(orgId, taskId, input, {
         context,
+        userId,
         log: (message, scope) => this.log(orgId, taskId, message, scope),
       });
       if (!outcome.ok || !outcome.text) return false;
@@ -1620,6 +1624,9 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       }
       await this.log(orgId, taskId, `agent-loop falló: ${(error as Error).message}`, 'loop');
       return false;
+    } finally {
+      // El workspace de la tarea muere con el loop; el sandbox es por-tarea.
+      void this.sandbox.release(taskId).catch(() => undefined);
     }
   }
 
@@ -2276,6 +2283,25 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             ? `✅ Evento eliminado de tu calendario.`
             : `❌ No pude eliminar el evento: ${r.error}`;
           break;
+        }
+        case 'sandbox.network_exec': {
+          // Aprobada por el usuario: código del agent-loop que pidió red.
+          // La tarea puede estar ya cerrada (el loop entregó y dejó esto
+          // pendiente), así que se publica el resultado sin re-transicionar.
+          const language = String(payload.language ?? 'python') as 'python' | 'node' | 'bash';
+          const r = await this.sandbox.runOneShot({ language, code: String(payload.code ?? ''), orgId, network: true });
+          const text = r.ok
+            ? `✅ Ejecución con red aprobada y completada (${language}):\n\n\`\`\`\n${r.output || '(sin salida)'}\n\`\`\``
+            : `❌ La ejecución con red falló: ${r.error ?? r.output}`;
+          await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'sandbox-network', latency_ms: Date.now() - startedAt } });
+          try {
+            const current = await this.tasks.getTask(taskId, orgId);
+            if (!['completed', 'failed', 'cancelled'].includes(current.status)) {
+              await this.tasks.transition(taskId, orgId, 'completed', { result: { text, model: 'sandbox-network' } });
+            }
+          } catch { /* el resultado ya salió por el event bus */ }
+          await this.log(orgId, taskId, `sandbox network exec done in ${Date.now() - startedAt}ms`, 'approval');
+          return;
         }
         default:
           await this.log(orgId, taskId, `executeApprovedAction: unknown action_type "${actionType}"`, 'approval');

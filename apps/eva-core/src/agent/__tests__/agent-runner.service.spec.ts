@@ -16,6 +16,7 @@ import { GoogleCalendarService } from '../google-calendar.service';
 import { MediaService } from '../media.service';
 import { MemoryRecallService } from '../memory-recall.service';
 import { MissingInformationError, ResearchToolsService } from '../research-tools.service';
+import { SandboxService } from '../sandbox.service';
 import { ScheduleService } from '../schedule.service';
 import { ScriptForgeService } from '../script-forge.service';
 import { SoulContextService } from '../soul-context.service';
@@ -215,6 +216,13 @@ describe('AgentRunnerService', () => {
           // Default ok:false → callers fall through to the classic pipeline.
           useValue: {
             run: jest.fn().mockResolvedValue({ ok: false, text: '', steps: [], tokensUsed: 0, toolsUsed: [] }),
+          },
+        },
+        {
+          provide: SandboxService,
+          useValue: {
+            release: jest.fn().mockResolvedValue(undefined),
+            runOneShot: jest.fn().mockResolvedValue({ ok: true, output: 'net ok' }),
           },
         },
         {
@@ -1512,5 +1520,65 @@ describe('AgentRunnerService', () => {
     expect(gmail.sendEmail).toHaveBeenCalledWith(ORG, 'test@example.com', 'Hola', 'La reunión es el jueves.');
     const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
     expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('Correo enviado') }));
+  });
+
+  it('releases the task sandbox workspace after the agent loop finishes', async () => {
+    const sandbox = module.get(SandboxService) as jest.Mocked<SandboxService>;
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'automatiza un reporte diario de ventas con gráficos y envíalo',
+    }));
+    agentLoop.run.mockResolvedValue({
+      ok: true, text: 'Listo.', steps: [], tokensUsed: 10, toolsUsed: ['code_execute'],
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(agentLoop.run).toHaveBeenCalledWith(ORG, TASK, expect.any(String), expect.objectContaining({
+      userId: 'user-1',
+    }));
+    expect(sandbox.release).toHaveBeenCalledWith(TASK);
+  });
+
+  it('executes approved sandbox.network_exec runs with network and publishes the result', async () => {
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+    const sandbox = module.get(SandboxService) as jest.Mocked<SandboxService>;
+
+    approvals.consumeApproved.mockResolvedValue({
+      id: 'approval-2',
+      org_id: ORG,
+      task_id: TASK,
+      action_type: 'sandbox.network_exec',
+      action_hash: 'b'.repeat(64),
+      nonce: 'n2',
+      status: 'approved',
+      level: 1,
+      payload: { language: 'python', code: 'import requests; print("ok")' },
+      summary: null,
+      screenshot_ref: null,
+      source: 'core_path',
+      requested_by: 'user-1',
+      reviewed_by: 'user-1',
+      reviewed_by_2: null,
+      reviewed_at: new Date().toISOString(),
+      nonce_used_at: null,
+      expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    } as never);
+    // La tarea ya cerró (el loop entregó y dejó la ejecución pendiente)
+    tasks.getTask.mockResolvedValue(makeTask({ status: 'completed' }));
+
+    service.onApplicationBootstrap();
+    const onCalls = (events.on as jest.Mock).mock.calls as [string, (event: unknown) => Promise<void>][];
+    const resolvedHandler = onCalls.find(([type]) => type === 'approval.resolved')![1];
+    await resolvedHandler({ type: 'approval.resolved', orgId: ORG, taskId: TASK, payload: { approvalId: 'approval-2', status: 'approved' }, ts: Date.now() });
+
+    expect(sandbox.runOneShot).toHaveBeenCalledWith({
+      language: 'python', code: 'import requests; print("ok")', orgId: ORG, network: true,
+    });
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('net ok') }));
+    // Tarea ya terminal → no se fuerza otra transición a completed
+    expect(tasks.transition).not.toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
   });
 });

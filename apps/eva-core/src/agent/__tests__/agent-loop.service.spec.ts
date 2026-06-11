@@ -1,13 +1,17 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AgentLoopService } from '../agent-loop.service';
+import { ApprovalsService } from '../../approvals/approvals.service';
+import { IntegrationsService } from '../../integrations/integrations.service';
 import { ModelRouterService } from '../../model-router/model-router.service';
 import { GmailService } from '../gmail.service';
 import { GoogleCalendarService } from '../google-calendar.service';
 import { GoogleDriveService } from '../google-drive.service';
 import { MemoryAgentService } from '../../memory/memory-agent.service';
 import { MissingInformationError, ResearchToolsService } from '../research-tools.service';
+import { SandboxService } from '../sandbox.service';
 import { ScheduleService } from '../schedule.service';
 import { ScriptForgeService } from '../script-forge.service';
+import { SkillLibraryService } from '../skill-library.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -29,6 +33,9 @@ describe('AgentLoopService', () => {
   let gmail: jest.Mocked<GmailService>;
   let forge: jest.Mocked<ScriptForgeService>;
   let memoryAgent: jest.Mocked<MemoryAgentService>;
+  let sandbox: jest.Mocked<SandboxService>;
+  let skillLibrary: jest.Mocked<SkillLibraryService>;
+  let approvals: jest.Mocked<ApprovalsService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -62,7 +69,10 @@ describe('AgentLoopService', () => {
         },
         {
           provide: MemoryAgentService,
-          useValue: { recall: jest.fn().mockResolvedValue([]) },
+          useValue: {
+            recall: jest.fn().mockResolvedValue([]),
+            ingest: jest.fn().mockResolvedValue({ stored: true }),
+          },
         },
         {
           provide: ScriptForgeService,
@@ -73,6 +83,33 @@ describe('AgentLoopService', () => {
             }),
           },
         },
+        {
+          provide: SandboxService,
+          useValue: {
+            execInSession: jest.fn().mockResolvedValue({ ok: true, output: 'resultado: 7' }),
+            runOneShot: jest.fn().mockResolvedValue({ ok: true, output: 'net ok' }),
+            readBackgroundOutput: jest.fn().mockResolvedValue({ ok: true, output: 'bg log' }),
+            release: jest.fn().mockResolvedValue(undefined),
+            dockerAvailable: jest.fn().mockResolvedValue(true),
+          },
+        },
+        {
+          provide: SkillLibraryService,
+          useValue: {
+            findRelevant: jest.fn().mockResolvedValue([]),
+            getRunnable: jest.fn().mockResolvedValue(null),
+          },
+        },
+        {
+          provide: ApprovalsService,
+          useValue: {
+            requestForPreparedAction: jest.fn().mockResolvedValue({ id: 'ap-1', action_hash: 'hash-1234567890ab' }),
+          },
+        },
+        {
+          provide: IntegrationsService,
+          useValue: { list: jest.fn().mockResolvedValue([]), getSecret: jest.fn().mockResolvedValue(null) },
+        },
       ],
     }).compile();
 
@@ -82,6 +119,9 @@ describe('AgentLoopService', () => {
     gmail = module.get(GmailService);
     forge = module.get(ScriptForgeService);
     memoryAgent = module.get(MemoryAgentService);
+    sandbox = module.get(SandboxService);
+    skillLibrary = module.get(SkillLibraryService);
+    approvals = module.get(ApprovalsService);
   });
 
   it('returns the final answer when the model answers directly', async () => {
@@ -228,5 +268,180 @@ describe('AgentLoopService', () => {
 
     expect(memoryAgent.recall).toHaveBeenCalledWith('café', ORG, 5, 0.6);
     expect(result.steps[0].observation).toContain('[2026-06-01] Le gusta el café');
+  });
+
+  // ── code_execute: el modelo escribe código literal ─────────────────────────
+
+  it('executes literal model-written code in the task sandbox session', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"calcular","tool":"code_execute","args":{"language":"python","code":"print(3+4)"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"Es 7."}}'));
+
+    const result = await service.run(ORG, TASK, 'calcula 3+4 con código');
+
+    expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, { kind: 'python', code: 'print(3+4)', orgId: ORG });
+    expect(result.steps[0].observation).toBe('resultado: 7');
+    expect(result.text).toBe('Es 7.');
+  });
+
+  it('feeds sandbox errors back so the model can fix its own code', async () => {
+    sandbox.execInSession
+      .mockResolvedValueOnce({ ok: false, output: 'SyntaxError: invalid syntax', error: 'exit 1' })
+      .mockResolvedValueOnce({ ok: true, output: '7' });
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"v1","tool":"code_execute","args":{"language":"python","code":"print(3+4"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"corrijo","tool":"code_execute","args":{"language":"python","code":"print(3+4)"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"7"}}'));
+
+    const result = await service.run(ORG, TASK, 'suma con código');
+
+    expect(result.steps[0].observation).toContain('SyntaxError');
+    // El segundo decide ve el error y el código anterior en PASOS PREVIOS
+    const secondPrompt = modelRouter.generate.mock.calls[1][0] as string;
+    expect(secondPrompt).toContain('SyntaxError');
+    expect(secondPrompt).toContain('print(3+4');
+    expect(result.text).toBe('7');
+  });
+
+  it('routes network execution through the Approval Engine instead of running it', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"necesito red","tool":"code_execute","args":{"language":"python","code":"import requests","network":true}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"aviso","tool":"final_answer","args":{"text":"Quedó pendiente de aprobación."}}'));
+
+    const result = await service.run(ORG, TASK, 'llama una API', { userId: 'user-1' });
+
+    expect(approvals.requestForPreparedAction).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG, userId: 'user-1', taskId: TASK,
+      actionType: 'sandbox.network_exec',
+      payload: { language: 'python', code: 'import requests' },
+    }));
+    expect(sandbox.execInSession).not.toHaveBeenCalled();
+    expect(sandbox.runOneShot).not.toHaveBeenCalled();
+    expect(result.steps[0].observation).toContain('PENDIENTE DE APROBACIÓN');
+  });
+
+  // ── terminal ───────────────────────────────────────────────────────────────
+
+  it('runs terminal commands and reads background output', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"inspecciono","tool":"terminal_run","args":{"cmd":"ls /work"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"leo bg","tool":"terminal_output","args":{}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"listo"}}'));
+
+    const result = await service.run(ORG, TASK, 'inspecciona el workspace');
+
+    expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, { kind: 'terminal', code: 'ls /work', orgId: ORG, background: false });
+    expect(sandbox.readBackgroundOutput).toHaveBeenCalledWith(TASK);
+    expect(result.steps[1].observation).toBe('bg log');
+  });
+
+  // ── skills reutilizables ───────────────────────────────────────────────────
+
+  it('injects relevant saved skills into the prompt and runs them via skill_run', async () => {
+    skillLibrary.findRelevant.mockResolvedValue([
+      { slug: 'gen-cleaner', display_name: 'cleaner.py', description: 'Limpia descargas' },
+    ]);
+    skillLibrary.getRunnable.mockResolvedValue({
+      slug: 'gen-cleaner', language: 'python', code: 'print("clean")', filename: 'cleaner.py',
+    });
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"reuso","tool":"skill_run","args":{"slug":"gen-cleaner"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"Limpio."}}'));
+
+    const result = await service.run(ORG, TASK, 'limpia mis descargas');
+
+    const firstPrompt = modelRouter.generate.mock.calls[0][0] as string;
+    expect(firstPrompt).toContain('SKILLS GUARDADAS');
+    expect(firstPrompt).toContain('gen-cleaner');
+    expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, { kind: 'python', code: 'print("clean")', orgId: ORG });
+    expect(result.steps[0].observation).toContain('[skill gen-cleaner]');
+  });
+
+  it('reports missing skills as observations', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"x","tool":"skill_run","args":{"slug":"no-existe"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"sin skill"}}'));
+
+    const result = await service.run(ORG, TASK, 'objetivo');
+
+    expect(result.steps[0].observation).toContain('no encontré la skill');
+  });
+
+  // ── secrets en prompt ──────────────────────────────────────────────────────
+
+  it('lists available secret aliases in the prompt without exposing values', async () => {
+    const integrations = (service as unknown as { integrations: { list: jest.Mock } }).integrations;
+    integrations.list.mockResolvedValue([
+      { provider: 'stripe', has_secret: true, status: 'active' },
+      { provider: 'inactivo', has_secret: true, status: 'disabled' },
+    ]);
+    modelRouter.generate.mockResolvedValueOnce(
+      modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"hecho"}}'),
+    );
+
+    await service.run(ORG, TASK, 'usa la API de stripe');
+
+    const prompt = modelRouter.generate.mock.calls[0][0] as string;
+    expect(prompt).toContain('§§secret(stripe)');
+    expect(prompt).not.toContain('inactivo');
+  });
+
+  // ── delegate con rol ───────────────────────────────────────────────────────
+
+  it('passes the delegated role into the sub-agent prompt', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"divide","tool":"delegate","args":{"goal":"analiza datos","role":"programador"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"soy sub","tool":"final_answer","args":{"text":"análisis listo"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"cierro","tool":"final_answer","args":{"text":"Todo listo."}}'));
+
+    const result = await service.run(ORG, TASK, 'proyecto de datos');
+
+    const subPrompt = modelRouter.generate.mock.calls[1][0] as string;
+    expect(subPrompt).toContain('actuando como programador');
+    expect(result.steps[0].observation).toBe('análisis listo');
+  });
+
+  // ── memoria de soluciones ──────────────────────────────────────────────────
+
+  it('memorizes the working solution as procedural memory after code success', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"código","tool":"code_execute","args":{"language":"python","code":"print(7)"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"Es 7."}}'));
+
+    await service.run(ORG, TASK, 'calcula con código');
+    await new Promise((r) => setImmediate(r)); // ingest es fire-and-forget
+
+    expect(memoryAgent.ingest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        memory_type: 'procedural',
+        summary: expect.stringContaining('Solución técnica'),
+        metadata: expect.objectContaining({ solution: true }),
+      }),
+      ORG,
+    );
+  });
+
+  it('does not memorize solutions for read-only tool runs', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"buscar","tool":"web_search","args":{"query":"clima"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"22°C"}}'));
+
+    await service.run(ORG, TASK, 'clima de hoy');
+    await new Promise((r) => setImmediate(r));
+
+    expect(memoryAgent.ingest).not.toHaveBeenCalled();
+  });
+
+  it('exposes the verification discipline rules in every decide prompt', async () => {
+    modelRouter.generate.mockResolvedValueOnce(
+      modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"hecho"}}'),
+    );
+
+    await service.run(ORG, TASK, 'objetivo');
+
+    const prompt = modelRouter.generate.mock.calls[0][0] as string;
+    expect(prompt).toContain('inspeccionar→preparar→ejecutar→verificar');
+    expect(prompt).toContain('Nunca declares éxito');
+    expect(prompt).toContain('/work persisten');
   });
 });

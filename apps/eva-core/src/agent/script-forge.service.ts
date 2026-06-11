@@ -1,26 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { DatabaseService } from '../database/database.service';
 import { ModelRouterService } from '../model-router/model-router.service';
-
-const execFileAsync = promisify(execFile);
+import { SandboxLanguage, SandboxService } from './sandbox.service';
 
 const FORGE_PROMPT = `Eres EVA. Genera UN script autocontenido que resuelva la tarea del usuario.
 Responde SOLO con JSON válido: {"language": "python"|"node"|"bash", "filename": "...",
 "description": "una línea", "code": "el script completo"}.
 El script no debe requerir red ni dependencias externas; imprime su resultado por stdout.`;
-
-/** Sandbox images per language — no network, capped resources, auto-removed. */
-const RUNTIMES: Record<string, { image: string; cmd: (file: string) => string[] }> = {
-  python: { image: 'python:3.12-alpine', cmd: (file) => ['python', file] },
-  node:   { image: 'node:20-alpine',     cmd: (file) => ['node', file] },
-  bash:   { image: 'alpine:3.20',        cmd: (file) => ['sh', file] },
-};
 
 export interface ForgeOutcome {
   scriptUrl?: string;
@@ -34,9 +21,9 @@ export interface ForgeOutcome {
 }
 
 /**
- * Autonomy core: EVA writes her own script for the task, runs it inside an
- * isolated Docker container when available, persists it as an artifact and
- * registers it as a reusable skill.
+ * Autonomy core: EVA writes her own script for the task, runs it inside the
+ * shared sandbox (SandboxService), persists it as an artifact and registers
+ * it as a reusable skill that SkillLibraryService can re-run later.
  */
 @Injectable()
 export class ScriptForgeService {
@@ -45,6 +32,7 @@ export class ScriptForgeService {
   constructor(
     private readonly db: DatabaseService,
     private readonly modelRouter: ModelRouterService,
+    private readonly sandbox: SandboxService,
   ) {}
 
   /** Cheap signal: does this order ask for code/automation EVA should build? */
@@ -79,43 +67,31 @@ export class ScriptForgeService {
     });
     if (skillSlug) await log(`registrada como skill "${skillSlug}"`, 'forge');
 
-    // Execute in a throwaway sandbox if Docker is around
-    const runtime = RUNTIMES[spec.language] ?? RUNTIMES.bash;
-    const docker = await this.dockerAvailable();
-    if (!docker) {
+    // Execute in the shared throwaway sandbox if Docker is around
+    if (!(await this.sandbox.dockerAvailable())) {
       await log('docker no disponible en este nodo — script guardado sin ejecutar', 'sandbox');
       return { ...spec, executed: false, skillSlug, note: 'Docker no disponible; el script quedó como artifact + skill.' };
     }
 
-    await log(`ejecutando en sandbox docker (${runtime.image}, sin red, 60s máx)…`, 'sandbox');
-    const dir = await mkdtemp(join(tmpdir(), 'eva-forge-'));
-    try {
-      await writeFile(join(dir, spec.filename), spec.code, 'utf8');
-      const { stdout, stderr } = await execFileAsync('docker', [
-        'run', '--rm',
-        '--network', 'none',
-        '--memory', '256m',
-        '--cpus', '0.5',
-        '--read-only',
-        '-v', `${dir}:/work:ro`,
-        '-w', '/work',
-        runtime.image,
-        ...runtime.cmd(spec.filename),
-      ], { timeout: 60_000, maxBuffer: 1024 * 512 });
+    await log(`ejecutando en sandbox docker (sin red, 60s máx)…`, 'sandbox');
+    const result = await this.sandbox.runOneShot({
+      language: spec.language as SandboxLanguage,
+      code: spec.code,
+      filename: spec.filename,
+      orgId,
+    });
 
-      const output = [stdout, stderr].filter(Boolean).join('\n').trim().slice(0, 4000);
-      await log(`sandbox terminó OK (${output.length} bytes de salida)`, 'sandbox');
-      await this.saveArtifact(orgId, taskId, 'text', `${spec.filename}.output`, output || '(sin salida)', {
-        execution: true,
-      });
-      return { ...spec, executed: true, output, skillSlug };
-    } catch (error) {
-      const message = (error as Error).message.slice(0, 500);
+    if (!result.ok) {
+      const message = (result.error ?? result.output).slice(0, 500);
       await log(`sandbox falló: ${message}`, 'sandbox');
       return { ...spec, executed: false, skillSlug, note: `Ejecución falló: ${message}` };
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+
+    await log(`sandbox terminó OK (${result.output.length} bytes de salida)`, 'sandbox');
+    await this.saveArtifact(orgId, taskId, 'text', `${spec.filename}.output`, result.output || '(sin salida)', {
+      execution: true,
+    });
+    return { ...spec, executed: true, output: result.output, skillSlug };
   }
 
   private parseSpec(raw: string): { language: string; filename: string; description: string; code: string } {
@@ -168,14 +144,5 @@ export class ScriptForgeService {
     }, { onConflict: 'org_id,skill_id,version' });
 
     return slug;
-  }
-
-  private async dockerAvailable(): Promise<boolean> {
-    try {
-      await execFileAsync('docker', ['version', '--format', '{{.Server.Version}}'], { timeout: 5000 });
-      return true;
-    } catch {
-      return false;
-    }
   }
 }

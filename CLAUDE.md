@@ -28,6 +28,19 @@ docker/            Postgres init scripts
 | `tasks` | Task Engine: CRUD + state machine |
 | `gateway` | Socket.io WebSocket gateway (`/eva`); verifica token via `supabase.auth.getUser()`, busca `org_id` en tabla `users` |
 | `health` | Public GET /health |
+| `agent` | AgentRunner (fast-paths) + AgentLoop (bucle agéntico estilo agent-zero) + SandboxService (ejecución de código en Docker) + SkillLibrary (skills reutilizables) |
+
+## Sandbox de código (agent-loop)
+El bucle agéntico ejecuta código que el propio modelo escribe (`code_execute`, `terminal_run`, `skill_run`) en un contenedor Docker **por tarea**: `/work` persiste entre pasos, rootfs read-only, sin red, recursos acotados; se destruye al terminar la tarea.
+
+```bash
+docker build -t eva-sandbox docker/sandbox   # imagen python enriquecida (pandas, requests, numpy…)
+```
+- Sin la imagen, cae a `python:3.12-alpine` / `node:20-alpine` / `alpine:3.20`.
+- `EVA_SANDBOX_IMAGE` — override de imagen (vacío = forzar fallback alpine).
+- `EVA_SANDBOX_ALLOW_NETWORK=true` — permite `code_execute` con red SIN approval (solo dev). En prod, la ejecución con red siempre crea una approval (`sandbox.network_exec`).
+- Secrets en código generado: alias `§§secret(provider)` (kind `credential`) — se sustituye al ejecutar y se enmascara en la salida; el modelo nunca ve el valor.
+- Smoke test real: `npx ts-node --transpile-only scripts/sandbox-smoke.ts` (requiere Docker).
 
 ## Task state machine
 ```

@@ -20,8 +20,10 @@ import { GoogleDriveService } from './google-drive.service';
 import { MediaService } from './media.service';
 import { MemoryRecallService } from './memory-recall.service';
 import { ResearchToolsService } from './research-tools.service';
+import { SandboxService } from './sandbox.service';
 import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
+import { SkillLibraryService } from './skill-library.service';
 import { SoulContextService } from './soul-context.service';
 import { JobsModule } from '../jobs/jobs.module';
 import { CommunicationModule } from '../communication/communication.module';
@@ -37,7 +39,9 @@ import { CommunicationModule } from '../communication/communication.module';
     AgentRunnerService,
     MediaService,
     ResearchToolsService,
+    SandboxService,
     ScriptForgeService,
+    SkillLibraryService,
     SoulContextService,
     GmailService,
     GoogleCalendarService,
