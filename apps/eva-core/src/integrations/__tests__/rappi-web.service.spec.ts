@@ -22,6 +22,26 @@ describe('RappiWebService', () => {
       typeCharacters: jest.fn().mockResolvedValue({}),
       getOrCreateProfile: jest.fn().mockResolvedValue({ id: 'profile-rappi', encrypted_state: null }),
       findLatestOpenSession: jest.fn().mockResolvedValue({ id: SESSION }),
+      findLatestSession: jest.fn().mockResolvedValue({
+        id: SESSION,
+        current_url: 'https://www.rappi.com.mx/',
+        metadata: {
+          email: 'raul@example.com',
+          last_state: 'logged_in',
+          last_current_url: 'https://www.rappi.com.mx/',
+          last_verified_at: '2026-06-11T18:00:00.000Z',
+        },
+      }),
+      findLatestScreenshotForProfile: jest.fn().mockResolvedValue({
+        id: 'shot-1',
+        org_id: ORG,
+        session_id: SESSION,
+        task_id: TASK,
+        image_base64: 'cmFwcGk=',
+        mime_type: 'image/png',
+        created_at: new Date().toISOString(),
+      }),
+      updateSessionMetadata: jest.fn().mockResolvedValue({}),
       saveProfileState: jest.fn().mockResolvedValue({}),
       screenshot: jest.fn().mockResolvedValue({
         id: 'shot-1',
@@ -42,14 +62,18 @@ describe('RappiWebService', () => {
   // ──────────────────────────────────────────────────────────────────────────
   it('reports has_session=false when no encrypted_state in profile', async () => {
     browser.getOrCreateProfile.mockResolvedValueOnce({ id: 'profile-rappi', encrypted_state: null } as any);
-    const result = await service.getProfile(ORG);
-    expect(result.encrypted_state).toBeNull();
+    const result = await service.getStoredStatus(ORG);
+    expect(result.has_session).toBe(false);
   });
 
   it('reports has_session=true when profile has encrypted_state', async () => {
     browser.getOrCreateProfile.mockResolvedValueOnce({ id: 'profile-rappi', encrypted_state: 'enc123' } as any);
-    const result = await service.getProfile(ORG);
-    expect(result.encrypted_state).toBe('enc123');
+    const result = await service.getStoredStatus(ORG);
+    expect(result).toEqual(expect.objectContaining({
+      has_session: true,
+      email: 'raul@example.com',
+      screenshot: expect.objectContaining({ image_base64: 'cmFwcGk=' }),
+    }));
   });
 
   // ──────────────────────────────────────────────────────────────────────────

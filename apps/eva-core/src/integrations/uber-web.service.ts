@@ -22,6 +22,18 @@ export interface UberSessionStatus {
   screenshot?: BrowserScreenshot;
 }
 
+export interface UberStoredSessionStatus {
+  ok: true;
+  has_session: boolean;
+  session_id: string | null;
+  state: UberWebState | null;
+  current_url: string | null;
+  title?: string;
+  email?: string;
+  last_verified_at?: string;
+  screenshot?: BrowserScreenshot;
+}
+
 export interface UberQuoteCandidate {
   label: string;
   price: string;
@@ -94,6 +106,7 @@ export interface UberCodeSubmitResult {
 @Injectable()
 export class UberWebService {
   private readonly logger = new Logger(UberWebService.name);
+  private readonly pendingPasswords = new Map<string, string>();
 
   constructor(
     private readonly browser: BrowserService,
@@ -113,12 +126,13 @@ export class UberWebService {
     await this.browser.wait(opened.id, orgId, this.settleMs());
     const signals = await this.inspectPage(opened.id, orgId);
     const screenshot = await this.browser.screenshot(opened.id, orgId);
+    await this.persistSessionCheck(opened.id, orgId, signals, screenshot);
 
     return {
       session_id: opened.id,
       state: signals.state === 'quote_ready' ? 'logged_in' : signals.state,
-      current_url: opened.current_url,
-      title: opened.title,
+      current_url: signals.currentUrl ?? opened.current_url,
+      title: signals.title ?? opened.title,
       google_login_available: signals.googleLoginAvailable,
       screenshot,
     };
@@ -147,11 +161,15 @@ export class UberWebService {
     await this.browser.wait(opened.id, orgId, this.settleMs());
     const signals = await this.inspectPage(opened.id, orgId);
     const screenshot = await this.browser.screenshot(opened.id, orgId);
+    await this.persistSessionCheck(opened.id, orgId, signals, screenshot, {
+      origin: input.origin,
+      destination: input.destination,
+    });
     const session: UberSessionStatus = {
       session_id: opened.id,
       state: signals.state,
-      current_url: opened.current_url,
-      title: opened.title,
+      current_url: signals.currentUrl ?? opened.current_url,
+      title: signals.title ?? opened.title,
       google_login_available: signals.googleLoginAvailable,
       screenshot,
     };
@@ -238,6 +256,7 @@ export class UberWebService {
     const signals = await this.inspectPage(opened.id, orgId);
     if (signals.state !== 'login_required') {
       const screenshot = await this.browser.screenshot(opened.id, orgId);
+      await this.persistSessionCheck(opened.id, orgId, signals, screenshot);
       return {
         ok: true,
         reason: 'logged_in',
@@ -263,16 +282,16 @@ export class UberWebService {
       url: UBER_EMAIL_URL,
       task_id: taskId,
       reuse_open: false,
-      metadata: { service: UBER_SERVICE, purpose: 'uber-email-login', email, ...(password ? { temp_password: password } : {}) },
+      metadata: { service: UBER_SERVICE, purpose: 'uber-email-login', email },
     }, orgId);
+    if (password) this.pendingPasswords.set(opened.id, password);
     await this.browser.wait(opened.id, orgId, this.settleMs());
 
     let signals = await this.inspectPage(opened.id, orgId);
     if (signals.state === 'logged_in' || signals.state === 'quote_ready') {
-      await this.browser.saveProfileState(opened.id, orgId).catch((err) => {
-        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
-      });
       const screenshot = await this.browser.screenshot(opened.id, orgId);
+      await this.persistSessionCheck(opened.id, orgId, signals, screenshot, { email });
+      this.pendingPasswords.delete(opened.id);
       return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Uber Web ya tiene sesión activa.', screenshot };
     }
 
@@ -306,6 +325,7 @@ export class UberWebService {
     const entered = await this.typeEmailAndContinue(opened.id, orgId, email);
     if (!entered) {
       const screenshot = await this.browser.screenshot(opened.id, orgId);
+      await this.persistSessionCheck(opened.id, orgId, signals, screenshot, { email });
       return { ok: false, reason: 'no_email_field', session_id: opened.id, text: 'No encontré el campo de email en Uber. Te envié screenshot para resolverlo manualmente.', screenshot };
     }
 
@@ -322,6 +342,8 @@ export class UberWebService {
         }
       } else {
         const screenshot = await this.browser.screenshot(opened.id, orgId);
+        await this.persistSessionCheck(opened.id, orgId, signals, screenshot, { email });
+        this.pendingPasswords.delete(opened.id);
         return { ok: false, reason: 'unknown', session_id: opened.id, text: 'Uber pide contraseña, pero no la proporcionaste. Vuelve a iniciar sesión incluyendo tu contraseña.', screenshot };
       }
     }
@@ -354,11 +376,14 @@ export class UberWebService {
         }
       } else {
         const screenshot = await this.browser.screenshot(opened.id, orgId);
+        await this.persistSessionCheck(opened.id, orgId, afterSignals, screenshot, { email });
+        this.pendingPasswords.delete(opened.id);
         return { ok: false, reason: 'unknown', session_id: opened.id, text: 'Uber pide contraseña, pero no la proporcionaste. Vuelve a iniciar sesión incluyendo tu contraseña.', screenshot };
       }
     }
 
     const screenshot = await this.browser.screenshot(opened.id, orgId);
+    await this.persistSessionCheck(opened.id, orgId, afterSignals, screenshot, { email });
 
     if (afterSignals.state === 'code_required') {
       return {
@@ -370,16 +395,9 @@ export class UberWebService {
       };
     }
 
-    // Since we are in a terminal state (not code_required), delete temp_password from metadata
-    if (password) {
-      const { temp_password, ...cleanMetadata } = (opened.metadata || {}) as any;
-      await this.browser.updateSessionMetadata(opened.id, orgId, cleanMetadata);
-    }
+    this.pendingPasswords.delete(opened.id);
 
     if (afterSignals.state === 'logged_in' || afterSignals.state === 'quote_ready') {
-      await this.browser.saveProfileState(opened.id, orgId).catch((err) => {
-        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
-      });
       return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Uber Web quedó autenticado directamente con el correo.', screenshot };
     }
 
@@ -404,7 +422,7 @@ export class UberWebService {
 
     // If it asks for password AFTER code entry!
     if (signals.state === 'password_required') {
-      const sessionPassword = session.metadata?.temp_password;
+      const sessionPassword = this.pendingPasswords.get(session.id);
       if (typeof sessionPassword === 'string' && sessionPassword) {
         const passwordEntered = await this.typePasswordAndSubmit(session.id, orgId, sessionPassword);
         if (passwordEntered) {
@@ -413,6 +431,7 @@ export class UberWebService {
         }
       } else {
         const screenshot = await this.browser.screenshot(session.id, orgId);
+        await this.persistSessionCheck(session.id, orgId, signals, screenshot);
         return {
           ok: false,
           reason: 'unknown',
@@ -424,17 +443,13 @@ export class UberWebService {
     }
 
     const screenshot = await this.browser.screenshot(session.id, orgId);
+    await this.persistSessionCheck(session.id, orgId, signals, screenshot);
 
-    // Clean up password from metadata if we are in a terminal state (not code_required)
     if (signals.state !== 'code_required') {
-      const { temp_password, ...cleanMetadata } = (session.metadata || {}) as any;
-      await this.browser.updateSessionMetadata(session.id, orgId, cleanMetadata);
+      this.pendingPasswords.delete(session.id);
     }
 
     if (signals.state === 'logged_in' || signals.state === 'quote_ready') {
-      await this.browser.saveProfileState(session.id, orgId).catch((err) => {
-        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
-      });
       return { ok: true, reason: 'logged_in', session_id: session.id, text: '✅ Uber Web quedó autenticado. Ya puedes pedir cotizaciones.', screenshot };
     }
 
@@ -459,6 +474,29 @@ export class UberWebService {
         'Completa el login de Google/Uber ahí, cierra esa ventana y luego vuelve a validar o pide la cotización.',
         'EVA no recibió ni guardó tu contraseña; solo reutilizará la sesión local del perfil.',
       ].join('\n'),
+    };
+  }
+
+  async getStoredStatus(orgId: string): Promise<UberStoredSessionStatus> {
+    const profile = await this.browser.getOrCreateProfile(orgId, UBER_SERVICE);
+    const latestSession = await this.browser.findLatestSession(profile.id, orgId);
+    const screenshot = await this.browser.findLatestScreenshotForProfile(profile.id, orgId);
+    const metadata = (latestSession?.metadata ?? {}) as Record<string, unknown>;
+    const state = this.asUberState(metadata.last_state);
+    const hasActiveLastState = !state || state === 'logged_in' || state === 'quote_ready';
+
+    return {
+      ok: true,
+      has_session: Boolean(profile.encrypted_state) && hasActiveLastState,
+      session_id: latestSession?.id ?? null,
+      state: state ?? null,
+      current_url: typeof metadata.last_current_url === 'string'
+        ? metadata.last_current_url
+        : latestSession?.current_url ?? null,
+      title: typeof metadata.last_title === 'string' ? metadata.last_title : undefined,
+      email: typeof metadata.email === 'string' ? metadata.email : undefined,
+      last_verified_at: typeof metadata.last_verified_at === 'string' ? metadata.last_verified_at : undefined,
+      screenshot: screenshot ?? undefined,
     };
   }
 
@@ -593,6 +631,7 @@ export class UberWebService {
     const signals = await this.inspectPage(sessionId, orgId);
     const screenshot = await this.browser.screenshot(sessionId, orgId);
     const session = this.sessionFromSignals(sessionId, signals, screenshot);
+    await this.persistSessionCheck(sessionId, orgId, signals, screenshot);
     const uberReady = signals.state !== 'login_required' && signals.state !== 'loading' && signals.state !== 'unknown';
 
     if (uberReady) {
@@ -959,5 +998,46 @@ export class UberWebService {
 
   async getProfile(orgId: string) {
     return this.browser.getOrCreateProfile(orgId, UBER_SERVICE);
+  }
+
+  private async persistSessionCheck(
+    sessionId: string,
+    orgId: string,
+    signals: UberPageSignals,
+    screenshot?: BrowserScreenshot,
+    extra: Record<string, unknown> = {},
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    const active = signals.state === 'logged_in' || signals.state === 'quote_ready';
+    if (active) {
+      await this.browser.saveProfileState(sessionId, orgId).catch((err) => {
+        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
+      });
+    }
+    await this.browser.updateSessionMetadata(sessionId, orgId, {
+      ...extra,
+      last_state: signals.state === 'quote_ready' ? 'logged_in' : signals.state,
+      last_current_url: signals.currentUrl ?? null,
+      last_title: signals.title ?? null,
+      last_verified_at: now,
+      ...(screenshot ? { last_screenshot_id: screenshot.id } : {}),
+      ...(active ? { last_success_at: now } : {}),
+    }).catch((err) => {
+      this.logger.warn(`Failed to persist Uber session metadata: ${err.message}`);
+    });
+  }
+
+  private asUberState(value: unknown): UberWebState | null {
+    if (typeof value !== 'string') return null;
+    return [
+      'logged_in',
+      'login_required',
+      'email_required',
+      'code_required',
+      'password_required',
+      'quote_ready',
+      'loading',
+      'unknown',
+    ].includes(value) ? value as UberWebState : null;
   }
 }

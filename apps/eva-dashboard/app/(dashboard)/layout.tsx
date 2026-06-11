@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { Sidebar } from '@/components/layout/sidebar';
+import { DashboardViewCache } from '@/components/layout/dashboard-view-cache';
 import { ToastProvider } from '@/components/ui/toast';
 import { WsProvider } from '@/hooks/use-ws';
 
@@ -19,7 +20,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
         <ToastProvider>
           <Sidebar />
           <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
-            {children}
+            <DashboardViewCache>{children}</DashboardViewCache>
           </main>
         </ToastProvider>
       </WsProvider>

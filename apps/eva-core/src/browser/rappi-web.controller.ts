@@ -8,11 +8,7 @@ export class RappiWebController {
 
   @Get('status')
   async getStatus(@Req() req: AuthenticatedRequest) {
-    const profile = await this.rappi.getProfile(req.user.orgId);
-    return {
-      ok: true,
-      has_session: profile.encrypted_state !== null,
-    };
+    return this.rappi.getStoredStatus(req.user.orgId);
   }
 
   @Post('start-session')

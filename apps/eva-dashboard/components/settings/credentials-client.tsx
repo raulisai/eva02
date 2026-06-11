@@ -60,6 +60,8 @@ interface CredentialsClientProps {
   initialIntegrations: Integration[];
 }
 
+type BusyMap = Record<string, boolean>;
+
 interface GoogleWebLoginResult {
   ok: boolean;
   state: 'logged_in' | 'email_required' | 'account_picker' | 'password_required' | 'consent_required' | 'mfa_required' | 'challenge_required' | 'blocked' | 'loading' | 'unknown' | 'no_credential';
@@ -76,6 +78,17 @@ interface EmailLoginResult {
   text: string;
 }
 
+interface StoredEmailLoginStatus {
+  ok: true;
+  has_session: boolean;
+  session_id: string | null;
+  state: string | null;
+  current_url: string | null;
+  email?: string;
+  last_verified_at?: string;
+  screenshot?: { image_base64: string; mime_type: string };
+}
+
 type EmailLoginStep = 'idle' | 'code_required' | 'done' | 'error';
 
 interface EmailLoginState {
@@ -89,6 +102,41 @@ interface EmailLoginState {
 
 function initEmailLogin(): EmailLoginState {
   return { step: 'idle', email: '', password: '', code: '', result: null, shot: null };
+}
+
+function screenshotDataUrl(screenshot?: { image_base64: string; mime_type: string }) {
+  return screenshot?.image_base64
+    ? `data:${screenshot.mime_type};base64,${screenshot.image_base64}`
+    : null;
+}
+
+function storedStatusResult(status: StoredEmailLoginStatus): EmailLoginResult | null {
+  if (!status.session_id && !status.screenshot) return null;
+  const state = status.state ?? 'sin verificar';
+  return {
+    ok: status.has_session,
+    reason: status.has_session ? 'logged_in' : 'unknown',
+    session_id: status.session_id ?? undefined,
+    text: status.has_session
+      ? `Sesión guardada: activa${status.last_verified_at ? ` (última verificación ${status.last_verified_at})` : ''}.`
+      : `Último estado guardado: ${state}. Verifica sesión para actualizar.`,
+  };
+}
+
+function applyStoredEmailStatus(
+  status: StoredEmailLoginStatus,
+  setState: React.Dispatch<React.SetStateAction<EmailLoginState>>,
+) {
+  if (!status.has_session && !status.email && !status.session_id && !status.state && !status.screenshot) return;
+  const shot = screenshotDataUrl(status.screenshot);
+  const result = storedStatusResult(status);
+  setState((prev) => ({
+    ...prev,
+    email: status.email ?? prev.email,
+    result: result ?? prev.result,
+    shot: shot ?? prev.shot,
+    step: status.has_session ? 'done' : result ? 'error' : prev.step,
+  }));
 }
 
 const inputClass = 'w-full bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60';
@@ -117,15 +165,15 @@ function EmailLoginSection({
   capabilities: string[];
   state: EmailLoginState;
   setState: React.Dispatch<React.SetStateAction<EmailLoginState>>;
-  busy: string | null;
+  busy: BusyMap;
   onStartEmailLogin: (service: 'uber' | 'rappi', setState: React.Dispatch<React.SetStateAction<EmailLoginState>>) => void;
   onSubmitCode: (service: 'uber' | 'rappi', state: EmailLoginState, setState: React.Dispatch<React.SetStateAction<EmailLoginState>>) => void;
   onVerifySession: (service: 'uber' | 'rappi', setState: React.Dispatch<React.SetStateAction<EmailLoginState>>) => void;
   showPassword?: boolean;
 }) {
-  const isEmailBusy = busy === `${service}-email`;
-  const isCodeBusy = busy === `${service}-code`;
-  const isVerifyBusy = busy === `${service}-verify`;
+  const isEmailBusy = Boolean(busy[`${service}-email`]);
+  const isCodeBusy = Boolean(busy[`${service}-code`]);
+  const isVerifyBusy = Boolean(busy[`${service}-verify`]);
   const isBusy = isEmailBusy || isCodeBusy || isVerifyBusy;
 
   return (
@@ -282,7 +330,7 @@ function EmailLoginSection({
 export function CredentialsClient({ initialIntegrations }: CredentialsClientProps) {
   const { toast } = useToast();
   const [integrations, setIntegrations] = useState(initialIntegrations);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<BusyMap>({});
   const [google, setGoogle] = useState({ client_id: '', client_secret: '', refresh_token: '' });
   const [googleWebCookies, setGoogleWebCookies] = useState('');
   const [googleWebResult, setGoogleWebResult] = useState<GoogleWebLoginResult | null>(null);
@@ -297,21 +345,35 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
   const [uberLogin, setUberLogin] = useState<EmailLoginState>(initEmailLogin());
   const [rappiLogin, setRappiLogin] = useState<EmailLoginState>(initEmailLogin());
 
+  function markBusy(key: string, active: boolean) {
+    setBusy((prev) => {
+      if (active) return prev[key] ? prev : { ...prev, [key]: true };
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }
+
+  function isBusy(key: string): boolean {
+    return Boolean(busy[key]);
+  }
+
+  function isAnyBusy(...keys: string[]): boolean {
+    return keys.some((key) => isBusy(key));
+  }
+
   useEffect(() => {
     async function loadStatuses() {
       try {
-        const uberRes = await coreFetch<{ has_session: boolean }>('/integrations/uber/status');
-        if (uberRes.has_session) {
-          setUberLogin((prev) => ({ ...prev, step: 'done' }));
-        }
+        const uberRes = await coreFetch<StoredEmailLoginStatus>('/integrations/uber/status');
+        applyStoredEmailStatus(uberRes, setUberLogin);
       } catch (err) {
         console.error('Failed to load Uber session status', err);
       }
       try {
-        const rappiRes = await coreFetch<{ has_session: boolean }>('/integrations/rappi/status');
-        if (rappiRes.has_session) {
-          setRappiLogin((prev) => ({ ...prev, step: 'done' }));
-        }
+        const rappiRes = await coreFetch<StoredEmailLoginStatus>('/integrations/rappi/status');
+        applyStoredEmailStatus(rappiRes, setRappiLogin);
       } catch (err) {
         console.error('Failed to load Rappi session status', err);
       }
@@ -333,7 +395,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
   // ── Google OAuth ──────────────────────────────────────────────────────────
 
   async function saveGoogle() {
-    setBusy('google');
+    markBusy('google', true);
     try {
       const updated = await coreFetch<Integration>('/integrations/credential/google', {
         method: 'PUT',
@@ -349,12 +411,12 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     } catch (error) {
       toast((error as Error).message, 'error');
     } finally {
-      setBusy(null);
+      markBusy('google', false);
     }
   }
 
   async function testGoogle() {
-    setBusy('google-test');
+    markBusy('google-test', true);
     try {
       const result = await coreFetch<{
         ok: boolean;
@@ -396,7 +458,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     } catch (error) {
       toast((error as Error).message, 'error');
     } finally {
-      setBusy(null);
+      markBusy('google-test', false);
     }
   }
 
@@ -412,7 +474,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
       toast('El JSON de cookies no es válido. Exporta de nuevo desde Cookie-Editor.', 'error');
       return;
     }
-    setBusy('google-web-import');
+    markBusy('google-web-import', true);
     setGoogleWebImportResult(null);
     setGoogleWebResult(null);
     setGoogleWebShot(null);
@@ -427,12 +489,12 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     } catch (error) {
       toast((error as Error).message, 'error');
     } finally {
-      setBusy(null);
+      markBusy('google-web-import', false);
     }
   }
 
   async function testGoogleWebSession() {
-    setBusy('google-web-test');
+    markBusy('google-web-test', true);
     setGoogleWebResult(null);
     setGoogleWebShot(null);
     try {
@@ -448,7 +510,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     } catch (error) {
       toast((error as Error).message, 'error');
     } finally {
-      setBusy(null);
+      markBusy('google-web-test', false);
     }
   }
 
@@ -462,7 +524,8 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     const email = loginState.email;
     const password = loginState.password;
     if (!email.trim()) return;
-    setBusy(`${service}-email`);
+    const busyKey = `${service}-email`;
+    markBusy(busyKey, true);
     setState((prev) => ({ ...prev, result: null, shot: null }));
     try {
       const result = await coreFetch<EmailLoginResult>(
@@ -487,10 +550,15 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
       }));
       toast(result.text, result.ok ? 'success' : 'info');
     } catch (error) {
-      toast((error as Error).message, 'error');
-      setState((prev) => ({ ...prev, step: 'error' }));
+      const text = (error as Error).message;
+      toast(text, 'error');
+      setState((prev) => ({
+        ...prev,
+        step: 'error',
+        result: { ok: false, reason: 'unknown', text },
+      }));
     } finally {
-      setBusy(null);
+      markBusy(busyKey, false);
     }
   }
 
@@ -500,7 +568,8 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     setState: React.Dispatch<React.SetStateAction<EmailLoginState>>,
   ) {
     if (!state.code.trim()) return;
-    setBusy(`${service}-code`);
+    const busyKey = `${service}-code`;
+    markBusy(busyKey, true);
     try {
       const result = await coreFetch<EmailLoginResult>(
         `/integrations/${service}/submit-login-code`,
@@ -518,9 +587,15 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
       }));
       toast(result.text, result.ok ? 'success' : 'error');
     } catch (error) {
-      toast((error as Error).message, 'error');
+      const text = (error as Error).message;
+      toast(text, 'error');
+      setState((prev) => ({
+        ...prev,
+        step: 'error',
+        result: { ok: false, reason: 'unknown', text },
+      }));
     } finally {
-      setBusy(null);
+      markBusy(busyKey, false);
     }
   }
 
@@ -528,7 +603,8 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     service: 'uber' | 'rappi',
     setState: React.Dispatch<React.SetStateAction<EmailLoginState>>,
   ) {
-    setBusy(`${service}-verify`);
+    const busyKey = `${service}-verify`;
+    markBusy(busyKey, true);
     setState((prev) => ({ ...prev, result: null, shot: null }));
     try {
       const result = await coreFetch<any>(`/integrations/${service}/start-session`, {
@@ -551,10 +627,15 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
       }));
       toast(ok ? 'Sesión activa' : 'Sesión inactiva o requiere iniciar sesión', ok ? 'success' : 'info');
     } catch (error) {
-      toast((error as Error).message, 'error');
-      setState((prev) => ({ ...prev, step: 'error' }));
+      const text = (error as Error).message;
+      toast(text, 'error');
+      setState((prev) => ({
+        ...prev,
+        step: 'error',
+        result: { ok: false, reason: 'unknown', text },
+      }));
     } finally {
-      setBusy(null);
+      markBusy(busyKey, false);
     }
   }
 
@@ -563,7 +644,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
   async function saveSimple(provider: string) {
     const secret = drafts[provider]?.trim();
     if (!secret) return;
-    setBusy(provider);
+    markBusy(provider, true);
     try {
       const updated = await coreFetch<Integration>(`/integrations/credential/${provider}`, {
         method: 'PUT',
@@ -575,12 +656,12 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     } catch (error) {
       toast((error as Error).message, 'error');
     } finally {
-      setBusy(null);
+      markBusy(provider, false);
     }
   }
 
   async function remove(provider: string) {
-    setBusy(provider);
+    markBusy(provider, true);
     try {
       await coreFetch(`/integrations/credential/${provider}`, { method: 'DELETE' });
       setIntegrations((prev) => prev.filter((i) => i.provider !== provider));
@@ -589,7 +670,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     } catch (error) {
       toast((error as Error).message, 'error');
     } finally {
-      setBusy(null);
+      markBusy(provider, false);
     }
   }
 
@@ -696,17 +777,17 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
             <Button
               size="sm"
               onClick={saveGoogle}
-              disabled={busy !== null || !google.client_id || !google.client_secret || !google.refresh_token}
+              disabled={isAnyBusy('google', 'google-test') || !google.client_id || !google.client_secret || !google.refresh_token}
             >
-              {busy === 'google' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              {isBusy('google') && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               Save credential
             </Button>
-            <Button size="sm" variant="outline" onClick={testGoogle} disabled={busy !== null || !googleIntegration}>
-              {busy === 'google-test' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PlugZap className="w-3.5 h-3.5" />}
+            <Button size="sm" variant="outline" onClick={testGoogle} disabled={isAnyBusy('google', 'google-test') || !googleIntegration}>
+              {isBusy('google-test') ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PlugZap className="w-3.5 h-3.5" />}
               Test Gmail · Calendar · Drive
             </Button>
             {googleIntegration && (
-              <Button size="sm" variant="destructive" onClick={() => remove('google')} disabled={busy !== null}>
+              <Button size="sm" variant="destructive" onClick={() => remove('google')} disabled={isAnyBusy('google', 'google-test')}>
                 <Trash2 className="w-3.5 h-3.5" />
               </Button>
             )}
@@ -795,9 +876,9 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
             <Button
               size="sm"
               onClick={importGoogleSession}
-              disabled={busy !== null || !googleWebCookies.trim()}
+              disabled={isAnyBusy('google-web-import', 'google-web-test') || !googleWebCookies.trim()}
             >
-              {busy === 'google-web-import'
+              {isBusy('google-web-import')
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 : <Upload className="w-3.5 h-3.5" />}
               Importar sesión
@@ -806,9 +887,9 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
               size="sm"
               variant="outline"
               onClick={testGoogleWebSession}
-              disabled={busy !== null}
+              disabled={isAnyBusy('google-web-import', 'google-web-test')}
             >
-              {busy === 'google-web-test'
+              {isBusy('google-web-test')
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 : <PlugZap className="w-3.5 h-3.5" />}
               Verificar sesión
@@ -880,12 +961,12 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
                   placeholder={placeholder}
                   className={inputClass}
                 />
-                <Button size="sm" onClick={() => saveSimple(provider)} disabled={busy !== null || !drafts[provider]?.trim()}>
-                  {busy === provider && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <Button size="sm" onClick={() => saveSimple(provider)} disabled={isBusy(provider) || !drafts[provider]?.trim()}>
+                  {isBusy(provider) && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                   Save
                 </Button>
                 {current && (
-                  <Button size="sm" variant="destructive" onClick={() => remove(provider)} disabled={busy !== null}>
+                  <Button size="sm" variant="destructive" onClick={() => remove(provider)} disabled={isBusy(provider)}>
                     <Trash2 className="w-3.5 h-3.5" />
                   </Button>
                 )}

@@ -24,6 +24,17 @@ export interface RappiSessionStatus {
   screenshot?: BrowserScreenshot;
 }
 
+export interface RappiStoredSessionStatus {
+  ok: true;
+  has_session: boolean;
+  session_id: string | null;
+  state: RappiWebState | null;
+  current_url: string | null;
+  email?: string;
+  last_verified_at?: string;
+  screenshot?: BrowserScreenshot;
+}
+
 export interface RappiEmailLoginStartResult {
   ok: boolean;
   reason: 'code_required' | 'already_logged_in' | 'no_email_field' | 'unknown';
@@ -66,7 +77,8 @@ export class RappiWebService {
     await this.browser.wait(opened.id, orgId, SETTLE_MS);
     const signals = await this.inspectPage(opened.id, orgId);
     const screenshot = await this.browser.screenshot(opened.id, orgId);
-    return { session_id: opened.id, state: signals.state, current_url: opened.current_url, screenshot };
+    await this.persistSessionCheck(opened.id, orgId, signals, screenshot);
+    return { session_id: opened.id, state: signals.state, current_url: signals.currentUrl ?? opened.current_url, screenshot };
   }
 
   async startEmailLogin(orgId: string, email: string, taskId?: string): Promise<RappiEmailLoginStartResult> {
@@ -82,10 +94,8 @@ export class RappiWebService {
 
     const signals = await this.inspectPage(opened.id, orgId);
     if (signals.state === 'logged_in') {
-      await this.browser.saveProfileState(opened.id, orgId).catch((err) => {
-        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
-      });
       const screenshot = await this.browser.screenshot(opened.id, orgId);
+      await this.persistSessionCheck(opened.id, orgId, signals, screenshot, { email });
       return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Rappi ya tiene sesión activa.', screenshot };
     }
 
@@ -117,12 +127,14 @@ export class RappiWebService {
     const entered = await this.typeEmailAndContinue(opened.id, orgId, email);
     if (!entered) {
       const screenshot = await this.browser.screenshot(opened.id, orgId);
+      await this.persistSessionCheck(opened.id, orgId, signals, screenshot, { email });
       return { ok: false, reason: 'no_email_field', session_id: opened.id, text: 'No encontré el campo de correo en Rappi. Te envié screenshot para resolverlo manualmente.', screenshot };
     }
 
     await this.browser.wait(opened.id, orgId, 3000);
     const afterSignals = await this.inspectPage(opened.id, orgId);
     const screenshot = await this.browser.screenshot(opened.id, orgId);
+    await this.persistSessionCheck(opened.id, orgId, afterSignals, screenshot, { email });
 
     if (afterSignals.state === 'code_required') {
       return {
@@ -135,9 +147,6 @@ export class RappiWebService {
     }
 
     if (afterSignals.state === 'logged_in') {
-      await this.browser.saveProfileState(opened.id, orgId).catch((err) => {
-        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
-      });
       return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Rappi quedó autenticado directamente con el correo.', screenshot };
     }
 
@@ -160,11 +169,9 @@ export class RappiWebService {
     await this.browser.wait(session.id, orgId, 3000);
     const signals = await this.inspectPage(session.id, orgId);
     const screenshot = await this.browser.screenshot(session.id, orgId);
+    await this.persistSessionCheck(session.id, orgId, signals, screenshot);
 
     if (signals.state === 'logged_in') {
-      await this.browser.saveProfileState(session.id, orgId).catch((err) => {
-        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
-      });
       return { ok: true, reason: 'logged_in', session_id: session.id, text: '✅ Rappi quedó autenticado. Ya puedes hacer pedidos.', screenshot };
     }
 
@@ -383,5 +390,63 @@ export class RappiWebService {
 
   async getProfile(orgId: string) {
     return this.browser.getOrCreateProfile(orgId, RAPPI_SERVICE);
+  }
+
+  async getStoredStatus(orgId: string): Promise<RappiStoredSessionStatus> {
+    const profile = await this.browser.getOrCreateProfile(orgId, RAPPI_SERVICE);
+    const latestSession = await this.browser.findLatestSession(profile.id, orgId);
+    const screenshot = await this.browser.findLatestScreenshotForProfile(profile.id, orgId);
+    const metadata = (latestSession?.metadata ?? {}) as Record<string, unknown>;
+    const state = this.asRappiState(metadata.last_state);
+
+    return {
+      ok: true,
+      has_session: Boolean(profile.encrypted_state) && (!state || state === 'logged_in'),
+      session_id: latestSession?.id ?? null,
+      state: state ?? null,
+      current_url: typeof metadata.last_current_url === 'string'
+        ? metadata.last_current_url
+        : latestSession?.current_url ?? null,
+      email: typeof metadata.email === 'string' ? metadata.email : undefined,
+      last_verified_at: typeof metadata.last_verified_at === 'string' ? metadata.last_verified_at : undefined,
+      screenshot: screenshot ?? undefined,
+    };
+  }
+
+  private async persistSessionCheck(
+    sessionId: string,
+    orgId: string,
+    signals: RappiPageSignals,
+    screenshot?: BrowserScreenshot,
+    extra: Record<string, unknown> = {},
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    if (signals.state === 'logged_in') {
+      await this.browser.saveProfileState(sessionId, orgId).catch((err) => {
+        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
+      });
+    }
+    await this.browser.updateSessionMetadata(sessionId, orgId, {
+      ...extra,
+      last_state: signals.state,
+      last_current_url: signals.currentUrl ?? null,
+      last_verified_at: now,
+      ...(screenshot ? { last_screenshot_id: screenshot.id } : {}),
+      ...(signals.state === 'logged_in' ? { last_success_at: now } : {}),
+    }).catch((err) => {
+      this.logger.warn(`Failed to persist Rappi session metadata: ${err.message}`);
+    });
+  }
+
+  private asRappiState(value: unknown): RappiWebState | null {
+    if (typeof value !== 'string') return null;
+    return [
+      'logged_in',
+      'login_required',
+      'email_required',
+      'code_required',
+      'loading',
+      'unknown',
+    ].includes(value) ? value as RappiWebState : null;
   }
 }

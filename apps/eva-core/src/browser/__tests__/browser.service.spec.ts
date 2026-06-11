@@ -53,6 +53,9 @@ describe('BrowserService', () => {
               updated_at: now,
             }),
             createSession: jest.fn().mockResolvedValue(session),
+            findLatestOpenSessionForProfile: jest.fn().mockResolvedValue(null),
+            findOpenSessionsForProfile: jest.fn().mockResolvedValue([]),
+            findLatestSessionForProfile: jest.fn().mockResolvedValue(session),
             findSessionOrThrow: jest.fn().mockResolvedValue(session),
             updateSession: jest.fn().mockImplementation(async (_id, _org, patch) => ({ ...session, ...patch })),
             createScreenshot: jest.fn().mockResolvedValue({
@@ -64,6 +67,7 @@ describe('BrowserService', () => {
               mime_type: 'image/png',
               created_at: now,
             }),
+            findLatestScreenshotForProfile: jest.fn().mockResolvedValue(null),
             createPreparation: jest.fn().mockImplementation(async (input) => ({
               id: PREP,
               org_id: input.orgId,
@@ -127,6 +131,7 @@ describe('BrowserService', () => {
             storageState: jest.fn().mockResolvedValue({ cookies: [{ name: 'sid', value: 'secret' }] }),
             openWithStorageState: jest.fn().mockResolvedValue({ url: 'https://accounts.google.com/', title: 'Google' }),
             typeCharacters: jest.fn(),
+            hasSession: jest.fn().mockReturnValue(false),
           } satisfies BrowserRuntime,
         },
       ],
@@ -244,5 +249,37 @@ describe('BrowserService', () => {
       storageState: mockState,
     });
     expect(result.current_url).toBe('https://accounts.google.com/');
+  });
+
+  it('navigates an already-live encrypted session without relaunching the profile', async () => {
+    const mockState = { cookies: [{ name: 'session-id', value: 'secret', domain: 'example.com' }] };
+    const crypto = new BrowserProfileCrypto();
+    const encrypted = crypto.encryptJson(mockState);
+
+    repo.getOrCreateProfile.mockResolvedValueOnce({
+      id: PROFILE,
+      org_id: ORG,
+      service: 'local-test',
+      label: 'local-test',
+      encrypted_state: encrypted,
+      kms_key_ref: 'dev-kms-mock',
+      created_at: now,
+      updated_at: now,
+    });
+    runtime.hasSession.mockReturnValueOnce(true);
+
+    await service.open({
+      service: 'local-test',
+      url: 'https://example.com',
+      task_id: TASK,
+      reuse_open: true,
+    }, ORG);
+
+    expect(runtime.open).toHaveBeenCalledWith({
+      sessionId: SESSION,
+      profileId: PROFILE,
+      url: 'https://example.com',
+    });
+    expect(runtime.openWithStorageState).not.toHaveBeenCalled();
   });
 });

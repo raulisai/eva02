@@ -158,16 +158,12 @@ export class PlaywrightBrowserRuntime {
   ): Promise<{ url: string; title: string }> {
     const existing = this.sessions.get(input.sessionId);
     if (existing) {
-      await existing.context.close();
-      this.sessions.delete(input.sessionId);
+      await this.closeExistingSession(input.sessionId);
     }
+    await this.closeProfileSessions(input.profileId, input.sessionId);
     const userDataDir = join(this.profilesRoot, input.profileId);
     await mkdir(userDataDir, { recursive: true });
-    try {
-      await unlink(join(userDataDir, 'SingletonLock'));
-    } catch {
-      // Ignore
-    }
+    await this.cleanupSingletonLocks(userDataDir);
     const context = await chromium.launchPersistentContext(userDataDir, {
       headless: this.headless,
       args: this.stealthArgs(),
@@ -216,9 +212,19 @@ export class PlaywrightBrowserRuntime {
     return [];
   }
 
+  hasSession(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    return Boolean(session && !session.page.isClosed());
+  }
+
   private async getOrCreate(sessionId: string, profileId: string): Promise<BrowserRuntimeSession> {
     const existing = this.sessions.get(sessionId);
-    if (existing) return existing;
+    if (existing) {
+      if (!existing.page.isClosed()) return existing;
+      await this.closeExistingSession(sessionId);
+    }
+
+    await this.closeProfileSessions(profileId, sessionId);
 
     const userDataDir = join(this.profilesRoot, profileId);
     await mkdir(userDataDir, { recursive: true });
@@ -252,11 +258,7 @@ export class PlaywrightBrowserRuntime {
   }
 
   private async launchContext(userDataDir: string): Promise<BrowserContext> {
-    try {
-      await unlink(join(userDataDir, 'SingletonLock'));
-    } catch {
-      // Ignore
-    }
+    await this.cleanupSingletonLocks(userDataDir);
     const stealthArgs = this.stealthArgs();
     const attempts = this.channel
       ? [{ headless: this.headless, channel: this.channel, args: stealthArgs }]
@@ -285,6 +287,32 @@ export class PlaywrightBrowserRuntime {
     if (!session) throw new Error(`Browser session ${sessionId} is not open`);
     return session;
   }
+
+  private async closeExistingSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.sessions.delete(sessionId);
+    await session.context.close().catch(() => undefined);
+  }
+
+  private async closeProfileSessions(profileId: string, exceptSessionId?: string): Promise<void> {
+    const staleSessionIds = Array.from(this.sessions.values())
+      .filter((session) => session.profileId === profileId && session.id !== exceptSessionId)
+      .map((session) => session.id);
+    for (const sessionId of staleSessionIds) {
+      await this.closeExistingSession(sessionId);
+    }
+  }
+
+  private async cleanupSingletonLocks(userDataDir: string): Promise<void> {
+    await Promise.all(['SingletonLock', 'SingletonSocket', 'SingletonCookie'].map(async (name) => {
+      try {
+        await unlink(join(userDataDir, name));
+      } catch {
+        // Ignore stale Chromium lock cleanup failures.
+      }
+    }));
+  }
 }
 
 export type BrowserRuntime = Pick<
@@ -301,4 +329,5 @@ export type BrowserRuntime = Pick<
   | 'close'
   | 'storageState'
   | 'openWithStorageState'
+  | 'hasSession'
 >;

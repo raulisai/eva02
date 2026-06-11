@@ -73,6 +73,34 @@ export class BrowserRepository {
     return data as BrowserSession | null;
   }
 
+  async findOpenSessionsForProfile(profileId: string, orgId: string): Promise<BrowserSession[]> {
+    const { data, error } = await this.db.admin
+      .from('browser_sessions')
+      .select('*')
+      .eq('org_id', orgId)
+      .eq('profile_id', profileId)
+      .eq('status', 'open')
+      .order('created_at', { ascending: false });
+
+    if (error) this.fail('browser_sessions.findOpenSessionsForProfile', error);
+    return (data ?? []) as BrowserSession[];
+  }
+
+  async findLatestSessionForProfile(profileId: string, orgId: string): Promise<BrowserSession | null> {
+    const { data, error } = await this.db.admin
+      .from('browser_sessions')
+      .select('*')
+      .eq('org_id', orgId)
+      .eq('profile_id', profileId)
+      .order('updated_at', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) this.fail('browser_sessions.findLatestForProfile', error);
+    return data as BrowserSession | null;
+  }
+
   async findSessionOrThrow(sessionId: string, orgId: string): Promise<BrowserSession> {
     const { data, error } = await this.db.admin
       .from('browser_sessions')
@@ -118,6 +146,33 @@ export class BrowserRepository {
 
     if (error) this.fail('browser_screenshots.create', error);
     return data as BrowserScreenshot;
+  }
+
+  async findLatestScreenshotForProfile(profileId: string, orgId: string): Promise<BrowserScreenshot | null> {
+    const { data: sessions, error: sessionError } = await this.db.admin
+      .from('browser_sessions')
+      .select('id')
+      .eq('org_id', orgId)
+      .eq('profile_id', profileId)
+      .order('updated_at', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    if (sessionError) this.fail('browser_sessions.findForScreenshot', sessionError);
+    const sessionIds = (sessions ?? []).map((session) => session.id);
+    if (sessionIds.length === 0) return null;
+
+    const { data, error } = await this.db.admin
+      .from('browser_screenshots')
+      .select('*')
+      .eq('org_id', orgId)
+      .in('session_id', sessionIds)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) this.fail('browser_screenshots.findLatestForProfile', error);
+    return data as BrowserScreenshot | null;
   }
 
   async createPreparation(input: {

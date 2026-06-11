@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { createClient } from '@/lib/supabase/server';
+import { requireOrgContext } from '@/lib/supabase/org';
 import { Topbar } from '@/components/layout/topbar';
 import { ApprovalList } from '@/components/approvals/approval-list';
 import type { Approval, ApprovalScreenshot } from '@/lib/types';
@@ -8,10 +8,11 @@ export const metadata: Metadata = { title: 'Approvals' };
 export const dynamic = 'force-dynamic';
 
 export default async function ApprovalsPage() {
-  const supabase = createClient();
+  const { supabase, orgId } = await requireOrgContext();
   const { data: approvals } = await supabase
     .from('approvals')
     .select('*')
+    .eq('org_id', orgId)
     .order('created_at', { ascending: false })
     .limit(100);
 
@@ -23,6 +24,7 @@ export default async function ApprovalsPage() {
     ? await supabase
       .from('browser_screenshots')
       .select('id,image_base64,mime_type')
+      .eq('org_id', orgId)
       .in('id', screenshotIds)
     : { data: [] };
 

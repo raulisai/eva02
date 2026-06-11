@@ -63,13 +63,36 @@ const partialResponse = {
   },
 };
 
+const emptyBrowserStatus = {
+  ok: true,
+  has_session: false,
+  session_id: null,
+  state: null,
+  current_url: null,
+};
+
+function mockCoreFetch(handler?: (href: string, init?: RequestInit) => unknown) {
+  global.fetch = jest.fn().mockImplementation(async (url, init) => {
+    const href = String(url);
+    if (href.includes('/integrations/uber/status') || href.includes('/integrations/rappi/status')) {
+      return {
+        ok: true,
+        json: async () => emptyBrowserStatus,
+        text: async () => '',
+      };
+    }
+    const handled = handler?.(href, init);
+    return {
+      ok: true,
+      json: async () => handled ?? fullOkResponse,
+      text: async () => '',
+    };
+  }) as jest.Mock;
+}
+
 describe('CredentialsClient', () => {
   beforeEach(() => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => fullOkResponse,
-      text: async () => '',
-    }) as jest.Mock;
+    mockCoreFetch();
   });
 
   it('shows the Google full integration with its capabilities', () => {
@@ -81,10 +104,10 @@ describe('CredentialsClient', () => {
     expect(screen.getByText('Calendario')).toBeInTheDocument();
     expect(screen.getByText('Google Web Login')).toBeInTheDocument();
     expect(screen.getByText('Uber')).toBeInTheDocument();
-    expect(screen.getByText('Pedir viajes (con aprobación)')).toBeInTheDocument();
+    expect(screen.getByText('Pedir viaje (con aprobación)')).toBeInTheDocument();
     expect(screen.getByLabelText('Google client secret')).toHaveAttribute('type', 'password');
     expect(screen.getByLabelText('Google refresh token')).toHaveAttribute('type', 'password');
-    expect(screen.getByLabelText('Google Web password')).toHaveAttribute('type', 'password');
+    expect(screen.getByLabelText('Google cookies JSON')).toBeInTheDocument();
   });
 
   it('calls /test/full and shows per-service status when all services pass', async () => {
@@ -107,11 +130,7 @@ describe('CredentialsClient', () => {
   });
 
   it('shows which services fail when scopes are missing', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => partialResponse,
-      text: async () => '',
-    }) as jest.Mock;
+    mockCoreFetch(() => partialResponse);
 
     renderWithToast(<CredentialsClient initialIntegrations={[googleIntegration]} />);
 
@@ -127,11 +146,7 @@ describe('CredentialsClient', () => {
   });
 
   it('shows a clear toast error when the refresh token is rejected', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ ok: false, scopes: [], error: 'Token has been expired or revoked.', services: undefined }),
-      text: async () => '',
-    }) as jest.Mock;
+    mockCoreFetch(() => ({ ok: false, scopes: [], error: 'Token has been expired or revoked.', services: undefined }));
 
     renderWithToast(<CredentialsClient initialIntegrations={[googleIntegration]} />);
 
@@ -151,8 +166,15 @@ describe('CredentialsClient', () => {
     fireEvent.change(screen.getByLabelText('Google refresh token'), { target: { value: '1//refresh' } });
     fireEvent.click(screen.getByText('Save credential'));
 
-    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
-    const [, init] = (global.fetch as jest.Mock).mock.calls[0];
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/integrations/credential/google'),
+        expect.objectContaining({ method: 'PUT' }),
+      );
+    });
+    const [, init] = (global.fetch as jest.Mock).mock.calls.find(([url]) =>
+      String(url).includes('/integrations/credential/google'),
+    );
     const body = JSON.parse(init.body);
     const secret = JSON.parse(body.secret);
     expect(secret).toEqual({
@@ -162,38 +184,44 @@ describe('CredentialsClient', () => {
     });
   });
 
-  it('saves Google Web email/password separately for browser login', async () => {
+  it('imports Google Web cookies as a browser session', async () => {
     renderWithToast(<CredentialsClient initialIntegrations={[]} />);
 
-    fireEvent.change(screen.getByLabelText('Google Web email'), { target: { value: 'operator@example.com' } });
-    fireEvent.change(screen.getByLabelText('Google Web password'), { target: { value: 'secret-password' } });
-    fireEvent.click(screen.getByText('Save web login'));
-
-    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
-    const [url, init] = (global.fetch as jest.Mock).mock.calls[0];
-    const body = JSON.parse(init.body);
-    expect(String(url)).toContain('/integrations/credential/google_web');
-    expect(JSON.parse(body.secret)).toEqual({
-      email: 'operator@example.com',
-      password: 'secret-password',
+    fireEvent.change(screen.getByLabelText('Google cookies JSON'), {
+      target: { value: '[{"name":"SID","value":"abc","domain":".google.com","path":"/"}]' },
     });
+    fireEvent.click(screen.getByText('Importar sesión'));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/integrations/google-web/import-session'),
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+    const [url, init] = (global.fetch as jest.Mock).mock.calls.find(([callUrl]) =>
+      String(callUrl).includes('/integrations/google-web/import-session'),
+    );
+    const body = JSON.parse(init.body);
+    expect(String(url)).toContain('/integrations/google-web/import-session');
+    expect(body.cookies).toEqual([
+      { name: 'SID', value: 'abc', domain: '.google.com', path: '/' },
+    ]);
   });
 
   it('starts the Google Web login test and renders the 2FA screenshot', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    mockCoreFetch((href) => {
+      if (href.includes('/integrations/google-web/start-session')) return {
         ok: false,
         state: 'mfa_required',
         text: 'Google pidió verificación en dos pasos para raulisai97@gmail.com.',
         screenshot: { image_base64: 'Z29vZ2xl', mime_type: 'image/png' },
-      }),
-      text: async () => '',
-    }) as jest.Mock;
+      };
+      return fullOkResponse;
+    });
 
     renderWithToast(<CredentialsClient initialIntegrations={[googleWebIntegration]} />);
 
-    fireEvent.click(screen.getByText('Test browser login'));
+    fireEvent.click(screen.getAllByText('Verificar sesión')[0]);
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
@@ -202,6 +230,46 @@ describe('CredentialsClient', () => {
       );
     });
     expect((await screen.findAllByText(/verificación en dos pasos/)).length).toBeGreaterThan(0);
-    expect(screen.getByAltText('Google Web login screenshot')).toHaveAttribute('src', 'data:image/png;base64,Z29vZ2xl');
+    expect(screen.getByAltText('Google Web session screenshot')).toHaveAttribute('src', 'data:image/png;base64,Z29vZ2xl');
+  });
+
+  it('rehydrates saved Uber email, status, and last screenshot', async () => {
+    global.fetch = jest.fn().mockImplementation(async (url) => {
+      const href = String(url);
+      if (href.includes('/integrations/uber/status')) {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            has_session: true,
+            session_id: 'session-uber',
+            state: 'logged_in',
+            current_url: 'https://m.uber.com/go/home',
+            email: 'eva02.ia@gmail.com',
+            last_verified_at: '2026-06-11T18:00:00.000Z',
+            screenshot: { image_base64: 'dWJlcg==', mime_type: 'image/png' },
+          }),
+          text: async () => '',
+        };
+      }
+      if (href.includes('/integrations/rappi/status')) {
+        return {
+          ok: true,
+          json: async () => emptyBrowserStatus,
+          text: async () => '',
+        };
+      }
+      return {
+        ok: true,
+        json: async () => fullOkResponse,
+        text: async () => '',
+      };
+    }) as jest.Mock;
+
+    renderWithToast(<CredentialsClient initialIntegrations={[]} />);
+
+    expect(await screen.findByDisplayValue('eva02.ia@gmail.com')).toBeInTheDocument();
+    expect(await screen.findByText(/Sesión guardada: activa/)).toBeInTheDocument();
+    expect(screen.getByAltText('Uber screenshot')).toHaveAttribute('src', 'data:image/png;base64,dWJlcg==');
   });
 });

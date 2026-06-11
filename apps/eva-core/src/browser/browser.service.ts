@@ -2,7 +2,7 @@ import * as childProcess from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BadRequestException, Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { BrowserProfileCrypto, BrowserRuntime } from '@eva/browser-runtime';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { EventBusService } from '../events/event-bus.service';
@@ -49,20 +49,18 @@ export class BrowserService {
 
   async open(dto: OpenBrowserDto, orgId: string) {
     const profile = await this.repo.getOrCreateProfile(orgId, dto.service);
-    const session = dto.reuse_open
+    const reusableSession = dto.reuse_open
       ? await this.repo.findLatestOpenSessionForProfile(profile.id, orgId)
-        ?? await this.repo.createSession({
-          orgId,
-          profileId: profile.id,
-          taskId: dto.task_id,
-          metadata: dto.metadata,
-        })
-      : await this.repo.createSession({
+      : null;
+    const session = reusableSession
+      ?? await this.repo.createSession({
         orgId,
         profileId: profile.id,
         taskId: dto.task_id,
         metadata: dto.metadata,
       });
+
+    await this.closeOtherOpenSessionsForProfile(profile.id, orgId, session.id);
 
     let decryptedState: any = null;
     if (profile.encrypted_state) {
@@ -89,7 +87,8 @@ export class BrowserService {
 
     let result: { url: string; title: string };
     try {
-      if (decryptedState) {
+      const hasLiveRuntimeSession = this.runtime.hasSession(session.id);
+      if (decryptedState && !hasLiveRuntimeSession) {
         result = await this.runtime.openWithStorageState({
           sessionId: session.id,
           profileId: profile.id,
@@ -104,6 +103,14 @@ export class BrowserService {
         });
       }
     } catch (error) {
+      await this.repo.updateSession(session.id, orgId, {
+        status: 'failed',
+        metadata: {
+          ...session.metadata,
+          last_error: (error as Error).message,
+          failed_at: new Date().toISOString(),
+        },
+      }).catch(() => undefined);
       await this.logBrowserAction(orgId, {
         action: 'browser.open.failed',
         message: `browser open failed: ${(error as Error).message}`,
@@ -113,6 +120,12 @@ export class BrowserService {
         level: 'error',
         data: { service: dto.service, url: this.safeUrlForLog(dto.url) },
       });
+      if (this.isProfileLockError(error)) {
+        throw new ConflictException(
+          `El perfil local de ${dto.service} parece estar abierto en otra ventana o quedó bloqueado. `
+          + 'Cierra esa ventana del navegador y vuelve a verificar la sesión.',
+        );
+      }
       throw error;
     }
 
@@ -320,6 +333,14 @@ export class BrowserService {
     return this.repo.findLatestOpenSessionForProfile(profileId, orgId);
   }
 
+  async findLatestSession(profileId: string, orgId: string) {
+    return this.repo.findLatestSessionForProfile(profileId, orgId);
+  }
+
+  async findLatestScreenshotForProfile(profileId: string, orgId: string) {
+    return this.repo.findLatestScreenshotForProfile(profileId, orgId);
+  }
+
   async updateSessionMetadata(sessionId: string, orgId: string, metadata: Record<string, any>) {
     const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     return this.repo.updateSession(sessionId, orgId, {
@@ -360,7 +381,9 @@ export class BrowserService {
 
   async close(sessionId: string, orgId: string) {
     const session = await this.repo.findSessionOrThrow(sessionId, orgId);
-    await this.saveProfileState(sessionId, orgId);
+    await this.saveProfileState(sessionId, orgId).catch((error) => {
+      this.logger.warn(`Could not save browser profile state before close: ${(error as Error).message}`);
+    });
     await this.runtime.close(sessionId);
     const updated = await this.repo.updateSession(sessionId, orgId, { status: 'closed' });
     await this.logBrowserAction(orgId, {
@@ -498,6 +521,25 @@ export class BrowserService {
     return true;
   }
 
+  private async closeOtherOpenSessionsForProfile(profileId: string, orgId: string, keepSessionId: string): Promise<void> {
+    const openSessions = await this.repo.findOpenSessionsForProfile(profileId, orgId);
+    for (const existing of openSessions) {
+      if (existing.id === keepSessionId) continue;
+      try {
+        await this.close(existing.id, orgId);
+      } catch (error) {
+        this.logger.warn(`Could not close stale browser session ${this.shortSession(existing.id)}: ${(error as Error).message}`);
+        await this.repo.updateSession(existing.id, orgId, {
+          status: 'closed',
+          metadata: {
+            ...existing.metadata,
+            closed_as_stale_for_session: keepSessionId,
+          },
+        }).catch(() => undefined);
+      }
+    }
+  }
+
   private profileDir(profileId: string): string {
     return join(process.env.BROWSER_PROFILES_DIR ?? join(homedir(), '.eva-browser-profiles'), profileId);
   }
@@ -546,5 +588,10 @@ export class BrowserService {
         resolve();
       });
     });
+  }
+
+  private isProfileLockError(error: unknown): boolean {
+    const message = (error as Error).message ?? '';
+    return /Target page, context or browser has been closed|SingletonLock|ProcessSingleton|user data dir|profile.*in use|browser has been closed/i.test(message);
   }
 }

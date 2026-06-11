@@ -22,8 +22,27 @@ describe('UberWebService', () => {
       evaluate: jest.fn(),
       clickNow: jest.fn().mockResolvedValue({}),
       typeCharacters: jest.fn().mockResolvedValue({}),
-      getOrCreateProfile: jest.fn().mockResolvedValue({ id: 'profile-1' }),
-      findLatestOpenSession: jest.fn().mockResolvedValue({ id: SESSION }),
+      getOrCreateProfile: jest.fn().mockResolvedValue({ id: 'profile-1', encrypted_state: 'enc-state' }),
+      findLatestOpenSession: jest.fn().mockResolvedValue({ id: SESSION, metadata: {} }),
+      findLatestSession: jest.fn().mockResolvedValue({
+        id: SESSION,
+        current_url: 'https://m.uber.com/go/home',
+        metadata: {
+          email: 'raul@example.com',
+          last_state: 'logged_in',
+          last_current_url: 'https://m.uber.com/go/home',
+          last_verified_at: '2026-06-11T18:00:00.000Z',
+        },
+      }),
+      findLatestScreenshotForProfile: jest.fn().mockResolvedValue({
+        id: 'shot-1',
+        org_id: ORG,
+        session_id: SESSION,
+        task_id: TASK,
+        image_base64: 'dWJlcg==',
+        mime_type: 'image/png',
+        created_at: new Date().toISOString(),
+      }),
       updateSessionMetadata: jest.fn().mockResolvedValue({}),
       saveProfileState: jest.fn().mockResolvedValue({}),
       screenshot: jest.fn().mockResolvedValue({
@@ -225,8 +244,9 @@ describe('UberWebService', () => {
     const result = await service.startEmailLogin(ORG, 'raul@example.com', 'mypassword', TASK);
 
     expect(browser.open).toHaveBeenCalledWith(expect.objectContaining({
-      metadata: expect.objectContaining({ temp_password: 'mypassword' }),
+      metadata: expect.objectContaining({ email: 'raul@example.com' }),
     }), ORG);
+    expect(JSON.stringify(browser.open.mock.calls[0][0].metadata)).not.toContain('mypassword');
     expect(result.ok).toBe(true);
     expect(result.reason).toBe('code_required');
     expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, expect.stringContaining('password'), { timeout: 1500 });
@@ -236,8 +256,9 @@ describe('UberWebService', () => {
   it('submits verification code and types password if requested after code entry', async () => {
     browser.findLatestOpenSession.mockResolvedValueOnce({
       id: SESSION,
-      metadata: { temp_password: 'mypassword' },
+      metadata: {},
     } as any);
+    (service as any).pendingPasswords.set(SESSION, 'mypassword');
 
     browser.evaluate
       // 1. inspectPage (after code entry) -> password_required
@@ -262,5 +283,20 @@ describe('UberWebService', () => {
     expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, expect.stringContaining('password'), { timeout: 1500 });
     expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, 'mypassword', 80);
     expect(browser.updateSessionMetadata).toHaveBeenCalledWith(SESSION, ORG, expect.not.objectContaining({ temp_password: expect.any(String) }));
+  });
+
+  it('returns stored status with last screenshot and email', async () => {
+    const result = await service.getStoredStatus(ORG);
+
+    expect(browser.getOrCreateProfile).toHaveBeenCalledWith(ORG, 'uber_web');
+    expect(browser.findLatestSession).toHaveBeenCalledWith('profile-1', ORG);
+    expect(browser.findLatestScreenshotForProfile).toHaveBeenCalledWith('profile-1', ORG);
+    expect(result).toEqual(expect.objectContaining({
+      has_session: true,
+      session_id: SESSION,
+      state: 'logged_in',
+      email: 'raul@example.com',
+      screenshot: expect.objectContaining({ image_base64: 'dWJlcg==' }),
+    }));
   });
 });

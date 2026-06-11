@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { createClient } from '@/lib/supabase/server';
+import { requireOrgContext } from '@/lib/supabase/org';
 import { Topbar } from '@/components/layout/topbar';
 import { JobsClient } from '@/components/jobs/jobs-client';
 import type { ScheduledJob } from '@/lib/types';
@@ -8,11 +8,12 @@ export const metadata: Metadata = { title: 'Jobs' };
 export const dynamic = 'force-dynamic';
 
 export default async function JobsPage() {
-  const supabase = createClient();
+  const { supabase, orgId } = await requireOrgContext();
 
   const { data: jobs } = await supabase
     .from('scheduled_jobs')
     .select('*')
+    .eq('org_id', orgId)
     .order('created_at', { ascending: true });
 
   const active = (jobs ?? []).filter((j) => j.status === 'active').length;
