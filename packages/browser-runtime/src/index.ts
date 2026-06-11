@@ -82,14 +82,14 @@ export class PlaywrightBrowserRuntime {
     return { url: session.page.url(), title };
   }
 
-  async click(sessionId: string, selector: string): Promise<void> {
+  async click(sessionId: string, selector: string, options?: { timeout?: number }): Promise<void> {
     const session = this.requireSession(sessionId);
-    await session.page.locator(selector).click();
+    await session.page.locator(selector).click(options);
   }
 
-  async type(sessionId: string, selector: string, text: string): Promise<void> {
+  async type(sessionId: string, selector: string, text: string, options?: { timeout?: number }): Promise<void> {
     const session = this.requireSession(sessionId);
-    await session.page.locator(selector).fill(text);
+    await session.page.locator(selector).fill(text, options);
   }
 
   async screenshot(sessionId: string): Promise<Buffer> {

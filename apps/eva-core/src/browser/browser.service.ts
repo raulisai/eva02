@@ -153,15 +153,15 @@ export class BrowserService {
     return { sessionId };
   }
 
-  async clickNow(sessionId: string, orgId: string, selector: string) {
+  async clickNow(sessionId: string, orgId: string, selector: string, options?: { timeout?: number }) {
     await this.repo.findSessionOrThrow(sessionId, orgId);
-    await this.runtime.click(sessionId, selector);
+    await this.runtime.click(sessionId, selector, options);
     return { sessionId, selector };
   }
 
-  async typeNow(sessionId: string, orgId: string, selector: string, text: string) {
+  async typeNow(sessionId: string, orgId: string, selector: string, text: string, options?: { timeout?: number }) {
     await this.repo.findSessionOrThrow(sessionId, orgId);
-    await this.runtime.type(sessionId, selector, text);
+    await this.runtime.type(sessionId, selector, text, options);
     return { sessionId, selector };
   }
 
@@ -171,6 +171,13 @@ export class BrowserService {
 
   async findLatestOpenSession(profileId: string, orgId: string) {
     return this.repo.findLatestOpenSessionForProfile(profileId, orgId);
+  }
+
+  async updateSessionMetadata(sessionId: string, orgId: string, metadata: Record<string, any>) {
+    const session = await this.repo.findSessionOrThrow(sessionId, orgId);
+    return this.repo.updateSession(sessionId, orgId, {
+      metadata: { ...session.metadata, ...metadata },
+    });
   }
 
   async openWithStorageState(

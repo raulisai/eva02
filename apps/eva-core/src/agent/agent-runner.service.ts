@@ -906,19 +906,23 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     startedAt: number,
   ): Promise<void> {
     const email = this.extractEmailFromInput(input);
+    const password = this.extractPasswordFromInput(input);
     if (!email) {
       throw new MissingInformationError(
-        'Para iniciar sesión en Uber con correo necesito tu dirección de email.',
+        'Para iniciar sesión en Uber con correo necesito tu dirección de email y opcionalmente tu contraseña.',
         {
           form_key: 'uber.email_login',
           title: 'Iniciar sesión en Uber',
-          description: 'Ingresaré tu correo en Uber y te pediré el código de verificación.',
-          fields: [{ id: 'email', type: 'text', label: 'Correo electrónico', required: true }],
+          description: 'Ingresaré tu correo y contraseña en Uber, y después te pediré el código de verificación.',
+          fields: [
+            { id: 'email', type: 'text', label: 'Correo electrónico', required: true },
+            { id: 'password', type: 'text', label: 'Contraseña (opcional)', required: false },
+          ],
         },
       );
     }
     await this.log(orgId, taskId, `Uber email login for ${email}`, 'tools');
-    const result = await this.uber.startEmailLogin(orgId, email, taskId);
+    const result = await this.uber.startEmailLogin(orgId, email, password ?? undefined, taskId);
     if (result.screenshot) await this.maybePublishBrowserScreenshot(orgId, taskId, result.screenshot, 'Uber Web');
     await this.deliver(orgId, taskId, result.text, 'uber-web', Date.now() - startedAt);
   }
@@ -972,8 +976,34 @@ export class AgentRunnerService implements OnApplicationBootstrap {
   }
 
   private extractEmailFromInput(input: string): string | null {
+    try {
+      const parsed = JSON.parse(input);
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.email === 'string' && parsed.email) return parsed.email.trim();
+        if (typeof parsed.correo === 'string' && parsed.correo) return parsed.correo.trim();
+      }
+    } catch {
+      // Not JSON
+    }
     const m = input.match(/\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b/i);
     return m ? m[0] : null;
+  }
+
+  private extractPasswordFromInput(input: string): string | null {
+    try {
+      const parsed = JSON.parse(input);
+      if (parsed && typeof parsed === 'object') {
+        if (typeof parsed.password === 'string' && parsed.password) return parsed.password.trim();
+        if (typeof parsed.contrasena === 'string' && parsed.contrasena) return parsed.contrasena.trim();
+      }
+    } catch {
+      // Not JSON
+    }
+    const m = input.match(/\b(?:contrase[ñn]a|password|pass|clave|pw)[:\s]+(".*?"|'.*?'|\S+)/i);
+    if (m) {
+      return m[1].replace(/^[",']|[",']$/g, '').trim();
+    }
+    return null;
   }
 
   private async extractUberRoute(input: string, orgId: string): Promise<{ origin: string; destination: string }> {

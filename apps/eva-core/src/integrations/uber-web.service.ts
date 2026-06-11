@@ -11,7 +11,7 @@ const UBER_EMAIL_URL = 'https://auth.uber.com/v2/?next_url=https%3A%2F%2Fwww.ube
 const UBER_SERVICE = 'uber_web';
 const DEFAULT_SETTLE_MS = 5000;
 
-export type UberWebState = 'logged_in' | 'login_required' | 'email_required' | 'code_required' | 'quote_ready' | 'loading' | 'unknown';
+export type UberWebState = 'logged_in' | 'login_required' | 'email_required' | 'code_required' | 'password_required' | 'quote_ready' | 'loading' | 'unknown';
 
 export interface UberSessionStatus {
   session_id: string;
@@ -256,18 +256,18 @@ export class UberWebService {
     return this.loginUberWithGoogleFromSession(orgId, opened.id, taskId);
   }
 
-  async startEmailLogin(orgId: string, email: string, taskId?: string): Promise<UberEmailLoginStartResult> {
+  async startEmailLogin(orgId: string, email: string, password?: string, taskId?: string): Promise<UberEmailLoginStartResult> {
     // Navigate directly to the email-login form — avoids the "choose method" screen
     const opened = await this.browser.open({
       service: UBER_SERVICE,
       url: UBER_EMAIL_URL,
       task_id: taskId,
       reuse_open: false,
-      metadata: { service: UBER_SERVICE, purpose: 'uber-email-login', email },
+      metadata: { service: UBER_SERVICE, purpose: 'uber-email-login', email, ...(password ? { temp_password: password } : {}) },
     }, orgId);
     await this.browser.wait(opened.id, orgId, this.settleMs());
 
-    const signals = await this.inspectPage(opened.id, orgId);
+    let signals = await this.inspectPage(opened.id, orgId);
     if (signals.state === 'logged_in' || signals.state === 'quote_ready') {
       const screenshot = await this.browser.screenshot(opened.id, orgId);
       return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Uber Web ya tiene sesión activa.', screenshot };
@@ -308,6 +308,20 @@ export class UberWebService {
 
     // Increased wait time for Uber to redirect to the challenge screen
     await this.browser.wait(opened.id, orgId, 5000);
+
+    // Check if it asks for password immediately
+    signals = await this.inspectPage(opened.id, orgId);
+    if (signals.state === 'password_required') {
+      if (password) {
+        const passwordEntered = await this.typePasswordAndSubmit(opened.id, orgId, password);
+        if (passwordEntered) {
+          await this.browser.wait(opened.id, orgId, 5000);
+        }
+      } else {
+        const screenshot = await this.browser.screenshot(opened.id, orgId);
+        return { ok: false, reason: 'unknown', session_id: opened.id, text: 'Uber pide contraseña, pero no la proporcionaste. Vuelve a iniciar sesión incluyendo tu contraseña.', screenshot };
+      }
+    }
     
     // Check for "Send code via SMS" or similar intermediate challenge screens
     // Use native Playwright click — much more reliable than JS injection
@@ -325,7 +339,22 @@ export class UberWebService {
 
     await this.browser.wait(opened.id, orgId, 2000);
     
-    const afterSignals = await this.inspectPage(opened.id, orgId);
+    let afterSignals = await this.inspectPage(opened.id, orgId);
+
+    // Check password again (if it asks for it after intermediate challenge)
+    if (afterSignals.state === 'password_required') {
+      if (password) {
+        const passwordEntered = await this.typePasswordAndSubmit(opened.id, orgId, password);
+        if (passwordEntered) {
+          await this.browser.wait(opened.id, orgId, 5000);
+          afterSignals = await this.inspectPage(opened.id, orgId);
+        }
+      } else {
+        const screenshot = await this.browser.screenshot(opened.id, orgId);
+        return { ok: false, reason: 'unknown', session_id: opened.id, text: 'Uber pide contraseña, pero no la proporcionaste. Vuelve a iniciar sesión incluyendo tu contraseña.', screenshot };
+      }
+    }
+
     const screenshot = await this.browser.screenshot(opened.id, orgId);
 
     if (afterSignals.state === 'code_required') {
@@ -336,6 +365,12 @@ export class UberWebService {
         text: `Ingresé el correo **${email}** en Uber. Te enviaron un código de verificación — dímelo y lo escribo para completar el login.`,
         screenshot,
       };
+    }
+
+    // Since we are in a terminal state (not code_required), delete temp_password from metadata
+    if (password) {
+      const { temp_password, ...cleanMetadata } = (opened.metadata || {}) as any;
+      await this.browser.updateSessionMetadata(opened.id, orgId, cleanMetadata);
     }
 
     if (afterSignals.state === 'logged_in' || afterSignals.state === 'quote_ready') {
@@ -358,9 +393,37 @@ export class UberWebService {
       return { ok: false, reason: 'unknown', session_id: session.id, text: 'No encontré el campo de código en la pantalla actual de Uber. Te envié screenshot.', screenshot };
     }
 
-    await this.browser.wait(session.id, orgId, 3000);
-    const signals = await this.inspectPage(session.id, orgId);
+    await this.browser.wait(session.id, orgId, 4000);
+    let signals = await this.inspectPage(session.id, orgId);
+
+    // If it asks for password AFTER code entry!
+    if (signals.state === 'password_required') {
+      const sessionPassword = session.metadata?.temp_password;
+      if (typeof sessionPassword === 'string' && sessionPassword) {
+        const passwordEntered = await this.typePasswordAndSubmit(session.id, orgId, sessionPassword);
+        if (passwordEntered) {
+          await this.browser.wait(session.id, orgId, 5000);
+          signals = await this.inspectPage(session.id, orgId);
+        }
+      } else {
+        const screenshot = await this.browser.screenshot(session.id, orgId);
+        return {
+          ok: false,
+          reason: 'unknown',
+          session_id: session.id,
+          text: 'Ingresé el código y ahora Uber pide contraseña. Por favor, vuelve a iniciar sesión incluyendo tu contraseña al principio.',
+          screenshot,
+        };
+      }
+    }
+
     const screenshot = await this.browser.screenshot(session.id, orgId);
+
+    // Clean up password from metadata if we are in a terminal state (not code_required)
+    if (signals.state !== 'code_required') {
+      const { temp_password, ...cleanMetadata } = (session.metadata || {}) as any;
+      await this.browser.updateSessionMetadata(session.id, orgId, cleanMetadata);
+    }
 
     if (signals.state === 'logged_in' || signals.state === 'quote_ready') {
       return { ok: true, reason: 'logged_in', session_id: session.id, text: '✅ Uber Web quedó autenticado. Ya puedes pedir cotizaciones.', screenshot };
@@ -442,11 +505,20 @@ export class UberWebService {
             };
           });
 
+        const passwordRequired = (/enter your password|ingresa tu contrase[ñn]a|contrase[ñn]a/i.test(text)
+          || (/welcome back/i.test(text) && /password/i.test(text)))
+          && !googleLoginAvailable
+          && !/continue with google|continuar con google/i.test(text);
+
         const codeRequired = (/verifica|verification code|c[oó]digo de verificaci[oó]n|enter.*code|ingresa.*c[oó]digo|check your email|revisa tu correo|one-time|otp|almost there|casi listo|digit.*code|sent via sms/i.test(text))
           && !googleLoginAvailable
           && !/continue with google|continuar con google/i.test(text);
 
-        // Check code/OTP screen BEFORE login_required — Uber's OTP URL contains /auth which would match
+        // Check password/OTP screens BEFORE login_required
+        if (passwordRequired) {
+          return { state: 'password_required', googleLoginAvailable, quoteCandidates: [], textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
+        }
+
         if (codeRequired) {
           return { state: 'code_required', googleLoginAvailable, quoteCandidates: [], textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
         }
@@ -661,7 +733,7 @@ export class UberWebService {
 
     for (const selector of smsSelectors) {
       try {
-        await this.browser.clickNow(sessionId, orgId, selector);
+        await this.browser.clickNow(sessionId, orgId, selector, { timeout: 1500 });
         this.logger.log(`Clicked intermediate challenge button: ${selector}`);
         return true;
       } catch {
@@ -675,18 +747,20 @@ export class UberWebService {
   private async typeCodeAndSubmit(sessionId: string, orgId: string, code: string): Promise<boolean> {
     // Find the first visible input on the OTP screen and click it
     const otpSelectors = [
-      'input[autocomplete="one-time-code"]',
-      'input[maxlength="1"]',
-      'input[type="tel"]',
-      'input[type="number"]',
-      'input[name*="code"]',
-      'input[name*="otp"]',
+      'input[autocomplete="one-time-code"] >> nth=0',
+      'input[maxlength="1"] >> nth=0',
+      'input[type="tel"] >> nth=0',
+      'input[type="number"] >> nth=0',
+      'input[name*="code"] >> nth=0',
+      'input[name*="otp"] >> nth=0',
+      'input[type="text"] >> nth=0',
+      'input >> nth=0',
     ];
 
     let clicked = false;
     for (const sel of otpSelectors) {
       try {
-        await this.browser.clickNow(sessionId, orgId, sel);
+        await this.browser.clickNow(sessionId, orgId, sel, { timeout: 1500 });
         clicked = true;
         break;
       } catch {
@@ -694,7 +768,37 @@ export class UberWebService {
       }
     }
 
-    if (!clicked) return false;
+    if (!clicked) {
+      // Fallback: try using evaluate to find the first visible input and click/focus it
+      const evaluated = await this.browser.evaluate<boolean>(sessionId, orgId, () => {
+        const isVisible = (el: HTMLElement | null) => {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0;
+        };
+        const selectors = [
+          'input[autocomplete="one-time-code"]',
+          'input[maxlength="1"]',
+          'input[type="tel"]',
+          'input[type="number"]',
+          'input[name*="code"]',
+          'input[name*="otp"]',
+          'input[type="text"]',
+          'input',
+        ];
+        for (const s of selectors) {
+          const inputs = Array.from(document.querySelectorAll(s)) as HTMLInputElement[];
+          const firstVisible = inputs.find(isVisible);
+          if (firstVisible) {
+            firstVisible.focus();
+            firstVisible.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (!evaluated) return false;
+    }
 
     // Use native Playwright keyboard.type — works with all OTP widgets (single or multi-box)
     await this.browser.typeCharacters(sessionId, orgId, code, 120);
@@ -702,16 +806,89 @@ export class UberWebService {
 
     // Click Next/Submit button
     const submitSelectors = [
-      'text=Next',
-      'text=Siguiente',
-      'text=Verify',
-      'text=Verificar',
-      'text=Confirmar',
-      'button[type="submit"]',
+      'text=Next >> nth=0',
+      'text=Siguiente >> nth=0',
+      'text=Verify >> nth=0',
+      'text=Verificar >> nth=0',
+      'text=Confirmar >> nth=0',
+      'button[type="submit"] >> nth=0',
     ];
     for (const sel of submitSelectors) {
       try {
-        await this.browser.clickNow(sessionId, orgId, sel);
+        await this.browser.clickNow(sessionId, orgId, sel, { timeout: 1500 });
+        break;
+      } catch {
+        // try next
+      }
+    }
+
+    return true;
+  }
+
+  private async typePasswordAndSubmit(sessionId: string, orgId: string, password?: string): Promise<boolean> {
+    if (!password) return false;
+
+    const selectors = [
+      'input[type="password"] >> nth=0',
+      'input[name="password"] >> nth=0',
+      'input[placeholder*="password" i] >> nth=0',
+      'input[placeholder*="contraseña" i] >> nth=0',
+    ];
+
+    let clicked = false;
+    for (const sel of selectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, sel, { timeout: 1500 });
+        clicked = true;
+        break;
+      } catch {
+        // try next
+      }
+    }
+
+    if (!clicked) {
+      // Fallback: try using evaluate to find the first visible input and click/focus it
+      const evaluated = await this.browser.evaluate<boolean>(sessionId, orgId, () => {
+        const isVisible = (el: HTMLElement | null) => {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0;
+        };
+        const selectors = [
+          'input[type="password"]',
+          'input[name="password"]',
+          'input[placeholder*="password" i]',
+          'input[placeholder*="contraseña" i]',
+        ];
+        for (const s of selectors) {
+          const inputs = Array.from(document.querySelectorAll(s)) as HTMLInputElement[];
+          const firstVisible = inputs.find(isVisible);
+          if (firstVisible) {
+            firstVisible.focus();
+            firstVisible.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (!evaluated) return false;
+    }
+
+    await this.browser.typeCharacters(sessionId, orgId, password, 80);
+    await this.browser.wait(sessionId, orgId, 800);
+
+    // Click Next button
+    const submitSelectors = [
+      'text=Next >> nth=0',
+      'text=Siguiente >> nth=0',
+      'text=Verify >> nth=0',
+      'text=Verificar >> nth=0',
+      'text=Confirmar >> nth=0',
+      'button[type="submit"] >> nth=0',
+    ];
+    for (const sel of submitSelectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, sel, { timeout: 1500 });
         break;
       } catch {
         // try next

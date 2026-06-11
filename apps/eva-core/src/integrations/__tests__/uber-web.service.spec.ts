@@ -20,6 +20,11 @@ describe('UberWebService', () => {
       }),
       wait: jest.fn().mockResolvedValue({}),
       evaluate: jest.fn(),
+      clickNow: jest.fn().mockResolvedValue({}),
+      typeCharacters: jest.fn().mockResolvedValue({}),
+      getOrCreateProfile: jest.fn().mockResolvedValue({ id: 'profile-1' }),
+      findLatestOpenSession: jest.fn().mockResolvedValue({ id: SESSION }),
+      updateSessionMetadata: jest.fn().mockResolvedValue({}),
       screenshot: jest.fn().mockResolvedValue({
         id: 'shot-1',
         org_id: ORG,
@@ -141,5 +146,120 @@ describe('UberWebService', () => {
     expect(browser.open).toHaveBeenCalledTimes(2);
     expect(result.ok).toBe(true);
     expect(result.text).toContain('UberX');
+  });
+
+  it('submits verification code successfully via selectors', async () => {
+    browser.evaluate.mockResolvedValueOnce({
+      state: 'logged_in',
+      googleLoginAvailable: false,
+      quoteCandidates: [],
+      textSample: 'Where to?',
+    });
+
+    const result = await service.submitLoginCode(ORG, '1234');
+
+    expect(browser.getOrCreateProfile).toHaveBeenCalledWith(ORG, 'uber_web');
+    expect(browser.findLatestOpenSession).toHaveBeenCalledWith('profile-1', ORG);
+    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, expect.stringContaining('nth=0'), { timeout: 1500 });
+    expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, '1234', 120);
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('logged_in');
+  });
+
+  it('submits verification code via evaluate fallback when selectors fail', async () => {
+    browser.clickNow.mockRejectedValue(new Error('Strict mode violation'));
+    browser.evaluate
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce({
+        state: 'logged_in',
+        googleLoginAvailable: false,
+        quoteCandidates: [],
+        textSample: 'Where to?',
+      });
+
+    const result = await service.submitLoginCode(ORG, '1234');
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('logged_in');
+    expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, '1234', 120);
+  });
+
+  it('starts email login, types email, and types password if requested', async () => {
+    browser.evaluate
+      // 1. inspectPage (initial check) -> login_required
+      .mockResolvedValueOnce({
+        state: 'login_required',
+        googleLoginAvailable: false,
+        quoteCandidates: [],
+        textSample: 'Sign in',
+      })
+      // 2. hasVisibleEmailField
+      .mockResolvedValueOnce(true)
+      // 3. typeEmailAndContinue (Phase 1)
+      .mockResolvedValueOnce(true)
+      // 4. typeEmailAndContinue (Phase 3)
+      .mockResolvedValueOnce(true)
+      // 5. inspectPage (after email entry) -> password_required
+      .mockResolvedValueOnce({
+        state: 'password_required',
+        googleLoginAvailable: false,
+        quoteCandidates: [],
+        textSample: 'Enter your password',
+      })
+      // 6. inspectPage (after password entry) -> code_required
+      .mockResolvedValueOnce({
+        state: 'code_required',
+        googleLoginAvailable: false,
+        quoteCandidates: [],
+        textSample: 'Enter code',
+      })
+      // 7. inspectPage (final) -> code_required
+      .mockResolvedValueOnce({
+        state: 'code_required',
+        googleLoginAvailable: false,
+        quoteCandidates: [],
+        textSample: 'Enter code',
+      });
+
+    const result = await service.startEmailLogin(ORG, 'raul@example.com', 'mypassword', TASK);
+
+    expect(browser.open).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({ temp_password: 'mypassword' }),
+    }), ORG);
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('code_required');
+    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, expect.stringContaining('password'), { timeout: 1500 });
+    expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, 'mypassword', 80);
+  });
+
+  it('submits verification code and types password if requested after code entry', async () => {
+    browser.findLatestOpenSession.mockResolvedValueOnce({
+      id: SESSION,
+      metadata: { temp_password: 'mypassword' },
+    } as any);
+
+    browser.evaluate
+      // 1. inspectPage (after code entry) -> password_required
+      .mockResolvedValueOnce({
+        state: 'password_required',
+        googleLoginAvailable: false,
+        quoteCandidates: [],
+        textSample: 'Enter your password',
+      })
+      // 2. inspectPage (final) -> logged_in
+      .mockResolvedValueOnce({
+        state: 'logged_in',
+        googleLoginAvailable: false,
+        quoteCandidates: [],
+        textSample: 'Where to?',
+      });
+
+    const result = await service.submitLoginCode(ORG, '1234', TASK);
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('logged_in');
+    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, expect.stringContaining('password'), { timeout: 1500 });
+    expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, 'mypassword', 80);
+    expect(browser.updateSessionMetadata).toHaveBeenCalledWith(SESSION, ORG, expect.not.objectContaining({ temp_password: expect.any(String) }));
   });
 });

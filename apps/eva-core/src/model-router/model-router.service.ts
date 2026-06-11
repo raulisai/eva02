@@ -1,5 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { IntegrationsService } from '../integrations/integrations.service';
+import { DatabaseService } from '../database/database.service';
+import { calculateCost } from './model-pricing';
 import {
   GenerateOptions,
   GenerateResult,
@@ -21,7 +23,10 @@ interface ResolvedKeys {
 export class ModelRouterService {
   private readonly logger = new Logger(ModelRouterService.name);
 
-  constructor(@Optional() private readonly integrations?: IntegrationsService) {}
+  constructor(
+    @Optional() private readonly db?: DatabaseService,
+    @Optional() private readonly integrations?: IntegrationsService,
+  ) {}
 
   private get openaiKey()     { return process.env.OPENAI_API_KEY; }
   private get anthropicKey()  { return process.env.ANTHROPIC_API_KEY; }
@@ -59,18 +64,48 @@ export class ModelRouterService {
     const budget  = opts.budget ?? this.inferBudget(prompt, opts);
     const backend = this.resolveBackend(opts.backend, keys, budget);
 
+    let result: GenerateResult;
     if (backend === 'google' && keys.google) {
-      return this.generateGoogle(prompt, opts, budget, keys.google);
-    }
-    if (backend === 'claude' && keys.claude) {
-      return this.generateClaude(prompt, opts, budget, keys.claude);
-    }
-    if (backend === 'openai' && keys.openai) {
-      return this.generateOpenAI(prompt, opts, budget, keys.openai);
+      result = await this.generateGoogle(prompt, opts, budget, keys.google);
+    } else if (backend === 'claude' && keys.claude) {
+      result = await this.generateClaude(prompt, opts, budget, keys.claude);
+    } else if (backend === 'openai' && keys.openai) {
+      result = await this.generateOpenAI(prompt, opts, budget, keys.openai);
+    } else {
+      this.logger.warn('No LLM API key configured — returning deterministic stub');
+      result = this.generateStub(prompt, opts);
     }
 
-    this.logger.warn('No LLM API key configured — returning deterministic stub');
-    return this.generateStub(prompt, opts);
+    // Log token usage to database asynchronously
+    if (opts.orgId && this.db) {
+      const dbClient = this.db;
+      const promptTokens = result.usage?.promptTokens ?? 0;
+      const completionTokens = result.usage?.completionTokens ?? 0;
+      const totalTokens = result.usage?.totalTokens ?? (promptTokens + completionTokens);
+      const costUsd = calculateCost(result.model, promptTokens, completionTokens);
+      const requestType = opts.requestType ?? this.inferRequestType(prompt, opts);
+
+      (async () => {
+        try {
+          const { error } = await dbClient.admin.from('token_logs').insert({
+            org_id: opts.orgId,
+            model: result.model,
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+            total_tokens: totalTokens,
+            cost_usd: costUsd,
+            request_type: requestType,
+          });
+          if (error) {
+            this.logger.warn(`Failed to log token usage: ${error.message}`);
+          }
+        } catch (err) {
+          this.logger.warn(`Failed to log token usage: ${(err as Error).message}`);
+        }
+      })();
+    }
+
+    return result;
   }
 
   // ── embed ─────────────────────────────────────────────────────────────────
@@ -133,9 +168,25 @@ export class ModelRouterService {
     const key = apiKey ?? this.openaiKey;
     const model = opts.model ?? MODEL_CATALOGUE[budget as keyof typeof MODEL_CATALOGUE]?.openai ?? 'gpt-4o-mini';
 
-    const messages: { role: string; content: string }[] = [];
+    const messages: { role: string; content: string | any[] }[] = [];
     if (opts.systemPrompt) messages.push({ role: 'system', content: opts.systemPrompt });
-    messages.push({ role: 'user', content: prompt });
+    
+    if (opts.imageBase64) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:${opts.imageMimeType ?? 'image/png'};base64,${opts.imageBase64}`,
+            },
+          },
+        ],
+      });
+    } else {
+      messages.push({ role: 'user', content: prompt });
+    }
 
     const body: Record<string, unknown> = {
       model,
@@ -195,10 +246,25 @@ export class ModelRouterService {
       system = system ? `${system}\n\n${jsonRule}` : jsonRule;
     }
 
+    let content: any = prompt;
+    if (opts.imageBase64) {
+      content = [
+        { type: 'text', text: prompt },
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: opts.imageMimeType ?? 'image/png',
+            data: opts.imageBase64,
+          },
+        },
+      ];
+    }
+
     const body: Record<string, unknown> = {
       model,
       max_tokens: opts.maxTokens ?? 1024,
-      messages:   [{ role: 'user', content: prompt }],
+      messages:   [{ role: 'user', content }],
     };
     if (system) body['system'] = system;
     if (opts.temperature !== undefined) body['temperature'] = opts.temperature;
@@ -250,9 +316,20 @@ export class ModelRouterService {
     const key = apiKey ?? this.googleKey;
     const model = opts.model ?? MODEL_CATALOGUE[budget as keyof typeof MODEL_CATALOGUE]?.google ?? 'gemini-2.5-flash-lite';
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
-    const parts = opts.systemPrompt
-      ? [{ text: `${opts.systemPrompt}\n\n${prompt}` }]
-      : [{ text: prompt }];
+    const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [];
+    if (opts.systemPrompt) {
+      parts.push({ text: `${opts.systemPrompt}\n\n${prompt}` });
+    } else {
+      parts.push({ text: prompt });
+    }
+    if (opts.imageBase64) {
+      parts.push({
+        inlineData: {
+          mimeType: opts.imageMimeType ?? 'image/png',
+          data: opts.imageBase64,
+        },
+      });
+    }
     const body: Record<string, unknown> = {
       contents: [{ role: 'user', parts }],
       generationConfig: {
@@ -375,5 +452,40 @@ export class ModelRouterService {
     }
     const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
     return vec.map(v => v / norm);
+  }
+
+  private inferRequestType(prompt: string, opts: GenerateOptions): 'reasoning' | 'tools' | 'code' | 'response' {
+    const sys = (opts.systemPrompt ?? '').toLowerCase();
+    const p = prompt.toLowerCase();
+    if (sys.includes('forge') || sys.includes('script') || p.includes('script_forge')) {
+      return 'code';
+    }
+    if (sys.includes('briefing') || sys.includes('chat') || sys.includes('conversaci') || sys.includes('warmth')) {
+      return 'response';
+    }
+    if (
+      sys.includes('planificador') || 
+      sys.includes('intent') || 
+      sys.includes('bucle') || 
+      sys.includes('agent-loop') || 
+      sys.includes('decide')
+    ) {
+      return 'reasoning';
+    }
+    return 'response';
+  }
+
+  async getStats(orgId: string) {
+    if (!this.db) {
+      return { summary: {}, by_model: [], by_type: [], by_day: [] };
+    }
+    const { data, error } = await this.db.admin.rpc('get_billing_stats', {
+      p_org_id: orgId,
+    });
+    if (error) {
+      this.logger.error(`Error calling get_billing_stats: ${error.message}`);
+      throw error;
+    }
+    return data;
   }
 }

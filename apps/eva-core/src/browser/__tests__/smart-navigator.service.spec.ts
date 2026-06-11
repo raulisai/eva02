@@ -29,7 +29,13 @@ const emailForm: PageSnapshot = {
 
 describe('SmartNavigatorService', () => {
   let service: SmartNavigatorService;
-  let browser: { evaluate: jest.Mock; wait: jest.Mock };
+  let browser: {
+    evaluate: jest.Mock;
+    wait: jest.Mock;
+    screenshot: jest.Mock;
+    clickNow: jest.Mock;
+    typeNow: jest.Mock;
+  };
   let models: { generate: jest.Mock };
 
   async function build(): Promise<void> {
@@ -44,14 +50,24 @@ describe('SmartNavigatorService', () => {
   }
 
   beforeEach(() => {
-    browser = { evaluate: jest.fn(), wait: jest.fn().mockResolvedValue(undefined) };
+    browser = {
+      evaluate: jest.fn(),
+      wait: jest.fn().mockResolvedValue(undefined),
+      screenshot: jest.fn().mockResolvedValue({ image_base64: 'mocked-base64' }),
+      clickNow: jest.fn().mockRejectedValue(new Error('native click failed')),
+      typeNow: jest.fn().mockRejectedValue(new Error('native type failed')),
+    };
     models = { generate: jest.fn() };
   });
 
   it('clicks "continue with email" then reports done — never picking a payment element', async () => {
     // perceive() calls evaluate with no arg; click/type pass an arg object.
     const snapshots = [methodChoice, emailForm];
-    browser.evaluate.mockImplementation(async (_sid: string, _org: string, _fn: unknown, arg?: unknown) => {
+    browser.evaluate.mockImplementation(async (_sid: string, _org: string, fn: any, arg?: unknown) => {
+      const fnStr = fn ? fn.toString() : '';
+      if (fnStr.includes('readyState') || fnStr.includes('spinner')) {
+        return;
+      }
       if (arg === undefined) return snapshots.shift() ?? emailForm;
       return true; // click/type executors
     });
@@ -79,7 +95,11 @@ describe('SmartNavigatorService', () => {
       textSample: 'Your cart',
       elements: [{ idx: 0, kind: 'button', label: 'Pagar ahora', value: '', disabled: false }],
     };
-    browser.evaluate.mockImplementation(async (_sid: string, _org: string, _fn: unknown, arg?: unknown) => {
+    browser.evaluate.mockImplementation(async (_sid: string, _org: string, fn: any, arg?: unknown) => {
+      const fnStr = fn ? fn.toString() : '';
+      if (fnStr.includes('readyState') || fnStr.includes('spinner')) {
+        return;
+      }
       if (arg === undefined) return checkoutPage;
       return true;
     });
@@ -107,5 +127,32 @@ describe('SmartNavigatorService', () => {
     const result = await noModel.navigate(ORG, SESSION, 'anything');
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/unavailable/);
+  });
+
+  it('calls native clickNow and typeNow when they succeed without falling back', async () => {
+    browser.evaluate.mockImplementation(async (_sid: string, _org: string, fn: any, arg?: unknown) => {
+      const fnStr = fn ? fn.toString() : '';
+      if (fnStr.includes('readyState') || fnStr.includes('spinner')) {
+        return;
+      }
+      return emailForm;
+    });
+    browser.clickNow.mockResolvedValue(undefined);
+    browser.typeNow.mockResolvedValue(undefined);
+    
+    models.generate.mockResolvedValueOnce({
+      text: JSON.stringify({ action: 'click', target: 1, value: null, reason: 'native click' }),
+      model: 'm',
+      backend: 'google',
+      usage: {},
+    });
+
+    await build();
+    const result = await service.navigate(ORG, SESSION, 'click email continue', { maxSteps: 1, settleMs: 300 });
+
+    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, '[data-eva-idx="1"]');
+    // evaluate was only called for perceive, not for the click effect
+    const evaluateCalls = browser.evaluate.mock.calls.filter((c) => c[3] !== undefined);
+    expect(evaluateCalls).toHaveLength(0);
   });
 });

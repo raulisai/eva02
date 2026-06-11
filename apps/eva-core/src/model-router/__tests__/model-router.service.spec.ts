@@ -1,5 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ModelRouterService } from '../model-router.service';
+import { DatabaseService } from '../../database/database.service';
+import { calculateCost } from '../model-pricing';
 
 global.fetch = jest.fn();
 
@@ -356,6 +358,73 @@ describe('ModelRouterService', () => {
         ok: false, status: 403, text: async () => 'forbidden',
       });
       await expect(service.realtimeToken('org-1')).rejects.toThrow(/403/);
+    });
+  });
+
+  // ── token logging & cost calculation ───────────────────────────────────────
+
+  describe('token logging & cost calculation', () => {
+    it('correctly calculates costs for OpenAI, Claude, and Gemini models', () => {
+      // gpt-4o-mini: input $0.15/1M, output $0.60/1M
+      // 1,000,000 prompt, 1,000,000 completion -> $0.75
+      expect(calculateCost('gpt-4o-mini', 1_000_000, 1_000_000)).toBe(0.75);
+      expect(calculateCost('gpt-4o-mini-2024-07-18', 100_000, 100_000)).toBe(0.075);
+      
+      // claude-sonnet-4-6: input $3.00/1M, output $15.00/1M
+      // 100k prompt, 50k completion -> 0.3 + 0.75 = 1.05
+      expect(calculateCost('claude-sonnet-4-6', 100_000, 50_000)).toBe(1.05);
+
+      // gemini-2.5-flash: input $0.075/1M, output $0.30/1M
+      // 1M prompt, 1M completion -> 0.075 + 0.3 = 0.375
+      expect(calculateCost('gemini-2.5-flash', 1_000_000, 1_000_000)).toBe(0.375);
+
+      // stub model -> 0
+      expect(calculateCost('stub-0', 1000, 1000)).toBe(0);
+    });
+
+    it('asynchronously logs token usage to db if db and orgId are provided', async () => {
+      process.env.OPENAI_API_KEY = 'sk-openai-test';
+      
+      const mockInsert = jest.fn().mockReturnValue({ data: null, error: null });
+      const mockFrom = jest.fn().mockReturnValue({ insert: mockInsert });
+      const mockDb = { admin: { from: mockFrom } };
+
+      const customTestingModule = await Test.createTestingModule({
+        providers: [
+          ModelRouterService,
+          { provide: DatabaseService, useValue: mockDb },
+        ],
+      }).compile();
+
+      const customService = customTestingModule.get(ModelRouterService);
+
+      (fetch as jest.Mock).mockResolvedValueOnce({
+        ok:   true,
+        json: async () => ({
+          choices: [{ message: { content: 'response text' } }],
+          model:   'gpt-4o-mini',
+          usage:   { prompt_tokens: 1000, completion_tokens: 2000, total_tokens: 3000 },
+        }),
+      });
+
+      await customService.generate('Hi EVA', {
+        orgId: 'org-test-uuid',
+        requestType: 'reasoning',
+      });
+
+      // Wait a tick for the async IIFE to run
+      await new Promise(resolve => process.nextTick(resolve));
+
+      expect(mockFrom).toHaveBeenCalledWith('token_logs');
+      expect(mockInsert).toHaveBeenCalledWith({
+        org_id: 'org-test-uuid',
+        model: 'gpt-4o-mini',
+        prompt_tokens: 1000,
+        completion_tokens: 2000,
+        total_tokens: 3000,
+        cost_usd: calculateCost('gpt-4o-mini', 1000, 2000),
+        request_type: 'reasoning',
+      });
     });
   });
 });

@@ -19,6 +19,7 @@ export interface PageSnapshot {
   title: string;
   elements: NavElement[];
   textSample: string;
+  screenshotBase64?: string;
 }
 
 export type NavActionKind = 'click' | 'type' | 'wait' | 'done' | 'fail';
@@ -57,15 +58,16 @@ export interface NavigateOptions {
 const PAYMENT_GUARD = /\b(pagar|paga|comprar|compra|checkout|place order|confirmar pago|pay now|purchase|order now|finalizar compra)\b/i;
 
 const SYSTEM_PROMPT = [
-  'Eres un copiloto de automatización web. Recibes un GOAL y la lista de ELEMENTS interactivos visibles en la página actual.',
+  'Eres un copiloto de automatización web. Recibes un GOAL, la lista de ELEMENTS interactivos visibles en la página actual, y una captura de pantalla (screenshot) de la página.',
   'Elige la ÚNICA mejor acción siguiente. Responde SOLO con JSON estricto, sin texto adicional:',
   '{"action":"click|type|wait|done|fail","target":<índice del elemento o null>,"value":<string o null>,"reason":<string corto>}',
   'Reglas:',
+  '- Usa la captura de pantalla para confirmar visualmente el estado de la página (modales, spinners de carga, errores que no aparecen en el texto o elementos deshabilitados).',
   '- "type" requiere target (índice de un input) y value (el texto a escribir).',
   '- "click" requiere target.',
   '- "done" cuando el GOAL ya está cumplido por el estado actual de la página.',
   '- "wait" si la página parece estar cargando y conviene esperar.',
-  '- "fail" si ningún elemento permite avanzar hacia el GOAL.',
+  '- "fail" si ningún elemento permite avanzar hacia el GOAL o si la página muestra errores insalvables.',
   '- NUNCA elijas elementos cuyo label sugiera pago/compra/checkout. Si solo quedan esos, responde "fail".',
   '- Prefiere elementos habilitados (disabled=false).',
   '- No vuelvas a escribir en un campo que ya muestra el value correcto.',
@@ -112,6 +114,7 @@ export class SmartNavigatorService {
       : goal;
 
     for (let step = 0; step < maxSteps; step += 1) {
+      await this.waitForPageStability(sessionId, orgId);
       const snapshot = await this.perceive(sessionId, orgId);
 
       if (snapshot.elements.length === 0) {
@@ -161,7 +164,7 @@ export class SmartNavigatorService {
 
   private async perceive(sessionId: string, orgId: string): Promise<PageSnapshot> {
     try {
-      return await this.browser.evaluate<PageSnapshot>(sessionId, orgId, () => {
+      const snapshot = await this.browser.evaluate<PageSnapshot>(sessionId, orgId, () => {
         const isVisible = (el: Element | null): boolean => {
           if (!el) return false;
           const he = el as HTMLElement;
@@ -174,7 +177,7 @@ export class SmartNavigatorService {
         const elements: Array<{ idx: number; kind: string; label: string; value: string; disabled: boolean }> = [];
         let idx = 0;
         for (const el of all) {
-          if (idx >= 40) break;
+          if (idx >= 100) break;
           if (!isVisible(el)) continue;
           el.setAttribute('data-eva-idx', String(idx));
           const tag = el.tagName.toLowerCase();
@@ -193,9 +196,24 @@ export class SmartNavigatorService {
           elements.push({ idx, kind, label, value, disabled });
           idx += 1;
         }
-        const text = (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 600);
+        const text = (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 4000);
         return { url: location.href, title: document.title, elements, textSample: text };
       });
+
+      let screenshotBase64: string | undefined;
+      try {
+        const screenshot = await this.browser.screenshot(sessionId, orgId).catch(() => null);
+        if (screenshot) {
+          screenshotBase64 = screenshot.image_base64;
+        }
+      } catch (error) {
+        this.logger.warn(`Failed to capture screenshot during perceive: ${(error as Error).message}`);
+      }
+
+      return {
+        ...snapshot,
+        screenshotBase64,
+      };
     } catch (error) {
       this.logger.warn(`perceive failed: ${(error as Error).message}`);
       return { url: '', title: '', elements: [], textSample: '' };
@@ -228,6 +246,8 @@ export class SmartNavigatorService {
         systemPrompt: SYSTEM_PROMPT,
         maxTokens: 220,
         temperature: 0,
+        imageBase64: snapshot.screenshotBase64,
+        imageMimeType: 'image/png',
       });
       return this.parseAction(res.text);
     } catch (error) {
@@ -266,32 +286,91 @@ export class SmartNavigatorService {
   // ── act ─────────────────────────────────────────────────────────────────
 
   private async clickIdx(sessionId: string, orgId: string, idx: number): Promise<boolean> {
-    return this.browser.evaluate<boolean, { idx: number }>(sessionId, orgId, ({ idx }) => {
-      const el = document.querySelector(`[data-eva-idx="${idx}"]`) as HTMLElement | null;
-      if (!el) return false;
-      el.scrollIntoView({ block: 'center' });
-      el.click();
+    try {
+      await this.browser.clickNow(sessionId, orgId, `[data-eva-idx="${idx}"]`);
       return true;
-    }, { idx });
+    } catch (error) {
+      this.logger.warn(`Native click failed on index ${idx}, falling back to JS click: ${(error as Error).message}`);
+      return this.browser.evaluate<boolean, { idx: number }>(sessionId, orgId, ({ idx }) => {
+        const el = document.querySelector(`[data-eva-idx="${idx}"]`) as HTMLElement | null;
+        if (!el) return false;
+        el.scrollIntoView({ block: 'center' });
+        el.click();
+        return true;
+      }, { idx });
+    }
   }
 
   private async typeIdx(sessionId: string, orgId: string, idx: number, text: string): Promise<boolean> {
-    const typed = await this.browser.evaluate<boolean, { idx: number; text: string }>(sessionId, orgId, ({ idx, text }) => {
-      const input = document.querySelector(`[data-eva-idx="${idx}"]`) as HTMLInputElement | null;
-      if (!input) return false;
-      input.focus();
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      let current = '';
-      for (const char of text) {
-        current += char;
-        if (setter) setter.call(input, current);
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
-      }
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+    try {
+      await this.browser.typeNow(sessionId, orgId, `[data-eva-idx="${idx}"]`, text);
       return true;
-    }, { idx, text });
-    return typed;
+    } catch (error) {
+      this.logger.warn(`Native type failed on index ${idx}, falling back to JS type: ${(error as Error).message}`);
+      return this.browser.evaluate<boolean, { idx: number; text: string }>(sessionId, orgId, ({ idx, text }) => {
+        const input = document.querySelector(`[data-eva-idx="${idx}"]`) as HTMLInputElement | null;
+        if (!input) return false;
+        input.focus();
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        let current = '';
+        for (const char of text) {
+          current += char;
+          if (setter) setter.call(input, current);
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
+        }
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }, { idx, text });
+    }
+  }
+
+  private async waitForPageStability(sessionId: string, orgId: string, maxWaitMs = 5000): Promise<void> {
+    const startTime = Date.now();
+    
+    // 1. First ensure document.readyState === 'complete'
+    await this.browser.evaluate(sessionId, orgId, () => {
+      return new Promise<void>((resolve) => {
+        if (document.readyState === 'complete') {
+          resolve();
+        } else {
+          window.addEventListener('load', () => resolve(), { once: true });
+          setTimeout(resolve, 2000);
+        }
+      });
+    }).catch(() => {});
+
+    // 2. Wait for loading spinners/busy indicators to disappear (max 3 seconds of additional wait)
+    let spinnerVisible = true;
+    while (spinnerVisible && (Date.now() - startTime) < maxWaitMs) {
+      spinnerVisible = await this.browser.evaluate(sessionId, orgId, () => {
+        const spinnerSelectors = [
+          '[class*="spinner" i]',
+          '[class*="loading" i]',
+          '[id*="loading" i]',
+          '[id*="spinner" i]',
+          '.loader',
+          '.loading',
+          '[aria-busy="true"]'
+        ];
+        for (const selector of spinnerSelectors) {
+          const elements = document.querySelectorAll(selector);
+          for (const el of Array.from(elements)) {
+            const he = el as HTMLElement;
+            const style = window.getComputedStyle(he);
+            const isVisible = he.offsetWidth > 0 && he.offsetHeight > 0 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+            if (isVisible) {
+              return true;
+            }
+          }
+        }
+        return false;
+      }).catch(() => false);
+
+      if (spinnerVisible) {
+        await this.browser.wait(sessionId, orgId, 500);
+      }
+    }
   }
 }
