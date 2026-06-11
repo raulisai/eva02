@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { AgentLoopService } from './agent-loop.service';
 import { BehaviorPatternService } from './behavior-pattern.service';
 import { CapabilityGateService } from '../capability-gate/capability-gate.service';
 import { SetupRequiredPayload } from '../capability-gate/capability-gate.types';
@@ -235,6 +236,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly approvals: ApprovalsService,
     private readonly scheduledJobs: ScheduledJobsService,
     private readonly comms: CommunicationService,
+    private readonly agentLoop: AgentLoopService,
   ) {}
 
   onApplicationBootstrap() {
@@ -433,7 +435,13 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           if (handled) return;
         }
         const t0 = Date.now();
-        const reply = await this.modelRouter.generate(contextualInput, {
+        // Contexto slim: el bloque completo (agenda, patrones, metas) cuesta
+        // ~1.3k tokens por mensaje y un saludo no lo necesita.
+        const chatInput = this.buildChatContextualInput(
+          input, conversationContext, soulContext,
+          proactiveTriggers.map(t => t.message), recallResult.context,
+        );
+        const reply = await this.modelRouter.generate(chatInput, {
           orgId, budget: 'cheap', maxTokens: 300, systemPrompt: CHAT_PROMPT,
         });
         await this.deliver(orgId, taskId, reply.text, reply.model, Date.now() - t0);
@@ -519,6 +527,16 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         await this.maybeAttachMedia(orgId, taskId, input, summary);
         await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
         return;
+      }
+
+      // ── Long sin script → bucle agéntico (estilo agent-zero) ─────────────
+      // El modelo itera herramientas (web/gmail/calendar/drive/memoria/forge,
+      // delegación a sub-agente) hasta resolver. Si el bucle no puede
+      // (sin keys, sin decisiones válidas), cae al pipeline clásico.
+      if (tier.tier === 'long') {
+        const handled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt);
+        if (handled) return;
+        await this.log(orgId, taskId, 'agent-loop no resolvió — usando pipeline clásico', 'loop');
       }
 
       // ── Email fast-path — use Gmail API when configured ───────────────────
@@ -660,6 +678,9 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       if (this.isUselessAnswer(result.text) || staleReason) {
         const reason = staleReason ?? 'non-actionable';
         await this.log(orgId, taskId, `model answer rejected as ${reason}; trying project tools`, 'model');
+        // El bucle agéntico tiene más herramientas e itera; es la primera opción.
+        const loopHandled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt);
+        if (loopHandled) return;
         const recovered = await this.recoverWithTools(orgId, taskId, contextualInput, startedAt, input);
         if (recovered) return;
       }
@@ -1144,6 +1165,48 @@ export class AgentRunnerService implements OnApplicationBootstrap {
   }
 
   /**
+   * Contexto compacto para tier chat (la ruta de mayor volumen): identidad
+   * esencial + estilo + memorias recordadas + sugerencias proactivas + últimos
+   * 4 turnos. Sin agenda, patrones, metas ni proyectos.
+   */
+  private buildChatContextualInput(
+    input: string,
+    conversationContext: ConversationContextTurn[],
+    soulContext: AgentSoulContext,
+    proactiveTriggerMessages: string[],
+    memoryRecallContext: string | null,
+  ): string {
+    const blocks: string[] = [input];
+
+    const p = soulContext.personal_profile;
+    const persona = soulContext.persona_context;
+    const profileBits = [
+      p.full_name ? `usuario: ${p.full_name}` : null,
+      p.preferred_address ? `llámale ${p.preferred_address}` : null,
+      (p.occupation ?? persona.occupation) ? `se dedica a ${p.occupation ?? persona.occupation}` : null,
+      p.current_location ? `está en ${p.current_location}` : null,
+      persona.communication_preferences ? `estilo preferido: ${persona.communication_preferences}` : null,
+    ].filter(Boolean);
+    if (profileBits.length > 0) blocks.push('', `(Contexto: ${profileBits.join(' · ')})`);
+
+    if (proactiveTriggerMessages.length > 0) {
+      blocks.push('', 'Sugerencias proactivas (menciónalas solo si fluye):', ...proactiveTriggerMessages.map(m => `- ${m}`));
+    }
+
+    if (memoryRecallContext) blocks.push('', memoryRecallContext);
+
+    if (conversationContext.length > 0) {
+      blocks.push(
+        '',
+        'Conversación reciente:',
+        ...conversationContext.slice(-4).map(t => `${t.role === 'user' ? 'Usuario' : 'EVA'}: ${t.text.slice(0, 400)}`),
+      );
+    }
+
+    return blocks.length === 1 ? input : blocks.join('\n');
+  }
+
+  /**
    * Assembles the full contextual prompt injected into every non-trivial agent call.
    * Includes: personal profile, identity, active goals, local schedule (+ optional Google Calendar),
    * behavior patterns, proactive triggers, and optionally: recalled memories.
@@ -1477,6 +1540,50 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         })),
       },
     );
+  }
+
+  /**
+   * Ejecuta el bucle agéntico genérico y entrega el resultado si resolvió.
+   * Devuelve false (sin efectos) cuando el loop no pudo, para que el caller
+   * caiga al pipeline clásico. MissingInformationError sube como formulario.
+   */
+  private async runAgentLoop(
+    orgId: string,
+    taskId: string,
+    input: string,
+    conversationContext: ConversationContextTurn[],
+    startedAt: number,
+  ): Promise<boolean> {
+    try {
+      const context = conversationContext.length > 0
+        ? conversationContext
+          .slice(-4)
+          .map((turn) => `${turn.role === 'user' ? 'Usuario' : 'EVA'}: ${turn.text.slice(0, 300)}`)
+          .join('\n')
+        : undefined;
+      const outcome = await this.agentLoop.run(orgId, taskId, input, {
+        context,
+        log: (message, scope) => this.log(orgId, taskId, message, scope),
+      });
+      if (!outcome.ok || !outcome.text) return false;
+      await this.log(
+        orgId, taskId,
+        `agent-loop resolvió en ${outcome.steps.length} pasos — herramientas [${outcome.toolsUsed.join(', ') || 'ninguna'}], ${outcome.tokensUsed} tokens de razonamiento`,
+        'loop',
+      );
+      await this.deliver(orgId, taskId, outcome.text, 'agent-loop', Date.now() - startedAt);
+      await this.maybeAttachMedia(orgId, taskId, input, outcome.text);
+      await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+      this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: outcome.text, conversationContext });
+      return true;
+    } catch (error) {
+      if (error instanceof MissingInformationError) {
+        await this.requestMissingInformation(orgId, taskId, error);
+        return true;
+      }
+      await this.log(orgId, taskId, `agent-loop falló: ${(error as Error).message}`, 'loop');
+      return false;
+    }
   }
 
   // rawInput = current user message; input here may be the full contextualInput

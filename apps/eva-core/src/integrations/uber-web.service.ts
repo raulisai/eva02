@@ -428,13 +428,12 @@ export class UberWebService {
           return { state: 'quote_ready', googleLoginAvailable, quoteCandidates, textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
         }
 
-        const codeRequired = /verifica|verification code|c[oó]digo de verificaci[oó]n|enter.*code|ingresa.*c[oó]digo|check your email|revisa tu correo|one-time|otp/i.test(text)
-          && !loginRequired;
+        const codeRequired = /verifica|verification code|c[oó]digo de verificaci[oó]n|enter.*code|ingresa.*c[oó]digo|check your email|revisa tu correo|one-time|otp|almost there|casi listo/i.test(text);
         if (codeRequired) {
           return { state: 'code_required', googleLoginAvailable, quoteCandidates: [], textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
         }
 
-        if (loginRequired || googleLoginAvailable || location.href.includes('/login')) {
+        if (loginRequired || googleLoginAvailable || location.href.includes('/login') || location.href.includes('/auth')) {
           return { state: 'login_required', googleLoginAvailable, quoteCandidates: [], textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
         }
 

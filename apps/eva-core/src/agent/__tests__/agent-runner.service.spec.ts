@@ -9,6 +9,7 @@ import { ModelRouterService } from '../../model-router/model-router.service';
 import { ApprovalsService } from '../../approvals/approvals.service';
 import { TasksService } from '../../tasks/tasks.service';
 import { ToolRouterService } from '../../tool-router/tool-router.service';
+import { AgentLoopService } from '../agent-loop.service';
 import { AgentRunnerService } from '../agent-runner.service';
 import { ConversationDigesterService } from '../conversation-digester.service';
 import { GoogleCalendarService } from '../google-calendar.service';
@@ -91,6 +92,7 @@ describe('AgentRunnerService', () => {
   let modelRouter: jest.Mocked<ModelRouterService>;
   let media: jest.Mocked<MediaService>;
   let research: jest.Mocked<ResearchToolsService>;
+  let agentLoop: jest.Mocked<AgentLoopService>;
   let forge: jest.Mocked<ScriptForgeService>;
   let soul: jest.Mocked<SoulContextService>;
 
@@ -207,6 +209,13 @@ describe('AgentRunnerService', () => {
         {
           provide: ConversationDigesterService,
           useValue: { digestAsync: jest.fn().mockResolvedValue(undefined) },
+        },
+        {
+          provide: AgentLoopService,
+          // Default ok:false → callers fall through to the classic pipeline.
+          useValue: {
+            run: jest.fn().mockResolvedValue({ ok: false, text: '', steps: [], tokensUsed: 0, toolsUsed: [] }),
+          },
         },
         {
           provide: ScheduleService,
@@ -418,6 +427,7 @@ describe('AgentRunnerService', () => {
     }).compile();
 
     service = module.get(AgentRunnerService);
+    agentLoop = module.get(AgentLoopService);
     events = module.get(EventBusService);
     tasks = module.get(TasksService);
     intentRouter = module.get(IntentRouterService);
@@ -452,7 +462,7 @@ describe('AgentRunnerService', () => {
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
   });
 
-  it('adds Soul cowork context to model prompts without changing greeting routing', async () => {
+  it('adds slim Soul identity to greeting prompts without heavy cowork blocks', async () => {
     tasks.getTask.mockResolvedValue(makeTask({ description: 'hola' }));
     soul.getAgentContext.mockResolvedValue({
       personal_profile: { full_name: 'Diego' },
@@ -467,13 +477,15 @@ describe('AgentRunnerService', () => {
     await service.run(ORG, TASK);
 
     expect(intentRouter.classify).not.toHaveBeenCalled();
+    // Identity travels with the prompt…
     expect(modelRouter.generate).toHaveBeenCalledWith(
-      expect.stringContaining('Contexto personal de tu usuario'),
+      expect.stringContaining('Diego'),
       expect.objectContaining({ budget: 'cheap' }),
     );
-    expect(modelRouter.generate).toHaveBeenCalledWith(
+    // …but heavy blocks (pending tasks, schedules) stay out of the chat path.
+    expect(modelRouter.generate).not.toHaveBeenCalledWith(
       expect.stringContaining('Preparar reporte semanal'),
-      expect.objectContaining({ budget: 'cheap' }),
+      expect.anything(),
     );
   });
 
@@ -724,6 +736,100 @@ describe('AgentRunnerService', () => {
     const firstSay = events.publish.mock.calls.map(([event]) => event).find((event) => event.type === 'task.say');
     expect((firstSay!.payload as { text: string }).text).toContain('segundo plano');
     expect(publishedLogs().some((message) => message.includes('tier=long'))).toBe(true);
+  });
+
+  it('uses a slim context for chat tier — no agenda/patterns, keeps identity and recent turns', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'hola, ¿cómo vas?',
+      metadata: {
+        conversation_context: [
+          { role: 'user', text: 'ayer te pregunté del clima' },
+          { role: 'assistant', text: 'sí, 22°C' },
+        ],
+      },
+    }));
+    soul.getAgentContext.mockResolvedValue({
+      personal_profile: { full_name: 'Raúl', current_location: 'CDMX' },
+      cowork_context: { pending_tasks: 'terminar el deck' },
+      goals: [{ id: 'g1', title: 'Correr 5k', status: 'active', created_at: '2026-01-01' }],
+      persona_context: { communication_preferences: 'directo y breve' },
+    } as never);
+    const schedule = module.get(ScheduleService) as jest.Mocked<ScheduleService>;
+    schedule.formatUpcomingForSoul.mockResolvedValue('- Junta 10am');
+
+    await service.run(ORG, TASK);
+
+    const prompt = modelRouter.generate.mock.calls[0][0] as string;
+    expect(prompt).toContain('Raúl');
+    expect(prompt).toContain('directo y breve');
+    expect(prompt).toContain('ayer te pregunté del clima');
+    // Heavy blocks stay out of the chat path
+    expect(prompt).not.toContain('Junta 10am');
+    expect(prompt).not.toContain('Correr 5k');
+    expect(prompt).not.toContain('terminar el deck');
+  });
+
+  it('resolves long non-script tasks with the agent loop when it succeeds', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'automatiza un reporte diario de ventas con gráficos y envíalo',
+    }));
+    agentLoop.run.mockResolvedValue({
+      ok: true,
+      text: 'Reporte armado: ventas estables, gráfico generado.',
+      steps: [{ tool: 'web_search', args: { query: 'ventas' }, thought: 'buscar', observation: 'datos' }],
+      tokensUsed: 320,
+      toolsUsed: ['web_search'],
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(agentLoop.run).toHaveBeenCalledWith(ORG, TASK,
+      'automatiza un reporte diario de ventas con gráficos y envíalo',
+      expect.objectContaining({ log: expect.any(Function) }));
+    const resultEvent = events.publish.mock.calls.map(([event]) => event).find((event) => event.type === 'task.result');
+    expect((resultEvent!.payload as { text: string; model: string }).model).toBe('agent-loop');
+    expect((resultEvent!.payload as { text: string }).text).toContain('Reporte armado');
+    expect(publishedLogs().some((m) => m.includes('agent-loop resolvió en 1 pasos'))).toBe(true);
+    // The classic single-shot model call never runs
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the classic pipeline when the agent loop cannot resolve', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'automatiza un reporte diario de ventas con gráficos y envíalo',
+    }));
+    // default agentLoop mock returns ok:false
+
+    await service.run(ORG, TASK);
+
+    expect(agentLoop.run).toHaveBeenCalled();
+    expect(publishedLogs().some((m) => m.includes('agent-loop no resolvió'))).toBe(true);
+    expect(modelRouter.generate).toHaveBeenCalled(); // classic path took over
+    expect(publishedTypes()).toContain('task.result');
+  });
+
+  it('prefers the agent loop over single-tool recovery for useless answers', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'resume este texto sobre OpenAI' }));
+    modelRouter.generate.mockResolvedValueOnce({
+      text: 'Como modelo no tengo acceso a informacion en tiempo real.',
+      model: 'gpt-4o-mini',
+      backend: 'openai',
+      usage: { promptTokens: 20, completionTokens: 20, totalTokens: 40 },
+    });
+    agentLoop.run.mockResolvedValue({
+      ok: true,
+      text: 'OpenAI: resumen con datos frescos de la web.',
+      steps: [{ tool: 'web_search', args: { query: 'OpenAI' }, thought: 'buscar', observation: 'noticias' }],
+      tokensUsed: 150,
+      toolsUsed: ['web_search'],
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(agentLoop.run).toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled(); // old recovery skipped
+    const resultEvent = events.publish.mock.calls.map(([event]) => event).find((event) => event.type === 'task.result');
+    expect((resultEvent!.payload as { text: string }).text).toContain('datos frescos');
   });
 
   it('forges, sandboxes and registers a skill for script orders', async () => {

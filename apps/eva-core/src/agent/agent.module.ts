@@ -11,6 +11,7 @@ import { MemoryModule } from '../memory/memory.module';
 import { ModelRouterModule } from '../model-router/model-router.module';
 import { TasksModule } from '../tasks/tasks.module';
 import { ToolRouterModule } from '../tool-router/tool-router.module';
+import { AgentLoopService } from './agent-loop.service';
 import { AgentRunnerService } from './agent-runner.service';
 import { ConversationDigesterService } from './conversation-digester.service';
 import { GmailService } from './gmail.service';
@@ -32,6 +33,7 @@ import { CommunicationModule } from '../communication/communication.module';
     MemoryModule, BrowserModule, ApprovalsModule, JobsModule, CommunicationModule,
   ],
   providers: [
+    AgentLoopService,
     AgentRunnerService,
     MediaService,
     ResearchToolsService,

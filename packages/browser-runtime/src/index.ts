@@ -70,7 +70,16 @@ export class PlaywrightBrowserRuntime {
   async open(input: { sessionId: string; profileId: string; url: string }): Promise<{ url: string; title: string }> {
     const session = await this.getOrCreate(input.sessionId, input.profileId);
     await session.page.goto(input.url, { waitUntil: 'domcontentloaded' });
-    return { url: session.page.url(), title: await session.page.title() };
+    
+    // Title retrieval is fragile if a redirect happens immediately
+    let title = 'Untitled';
+    try {
+      title = await session.page.title();
+    } catch {
+      // Ignore "context destroyed" or similar errors during title retrieval
+    }
+
+    return { url: session.page.url(), title };
   }
 
   async click(sessionId: string, selector: string): Promise<void> {
@@ -164,7 +173,15 @@ export class PlaywrightBrowserRuntime {
     const page = context.pages()[0] ?? await context.newPage();
     this.sessions.set(input.sessionId, { id: input.sessionId, profileId: input.profileId, context, page });
     await page.goto(input.url, { waitUntil: 'domcontentloaded' });
-    return { url: page.url(), title: await page.title() };
+    
+    let title = 'Untitled';
+    try {
+      title = await page.title();
+    } catch {
+      // Ignore
+    }
+
+    return { url: page.url(), title };
   }
 
   private extractCookies(storageState: unknown): Array<{ name: string; value: string; domain: string; path: string; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: 'Strict' | 'Lax' | 'None' }> {

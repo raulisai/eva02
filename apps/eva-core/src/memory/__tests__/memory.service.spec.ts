@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
 import { MemoryService } from '../memory.service';
 import { MemoriesRepository } from '../memories.repository';
-import { ModelRouterService } from '../model-router/model-router.service';
+import { ModelRouterService } from '../../model-router/model-router.service';
 import { Memory } from '../memory.types';
 
 const ORG_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -44,8 +44,11 @@ describe('MemoryService', () => {
     };
 
     const modelMock: Partial<jest.Mocked<ModelRouterService>> = {
-      embed: jest.fn().mockResolvedValue(MOCK_EMBEDDING),
-      embeddingModel: 'text-embedding-3-small',
+      embed: jest.fn().mockResolvedValue({
+        embedding: MOCK_EMBEDDING,
+        model: 'text-embedding-3-small',
+        backend: 'openai',
+      }),
     };
 
     const module: TestingModule = await Test.createTestingModule({

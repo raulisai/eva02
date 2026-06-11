@@ -216,6 +216,37 @@ describe('ModelRouterService', () => {
       const body = JSON.parse((fetch as jest.Mock).mock.calls[0][1].body);
       expect(body.system).toBe('Be brief.');
     });
+
+    it('enforces JSON-only output via system prompt when responseFormat is json', async () => {
+      (fetch as jest.Mock).mockResolvedValueOnce({
+        ok:   true,
+        json: async () => ({
+          content: [{ type: 'text', text: '{"a":1}' }],
+          model:   'claude-haiku-4-5-20251001',
+          usage:   { input_tokens: 5, output_tokens: 3 },
+        }),
+      });
+
+      await service.generate('prompt', { backend: 'claude', systemPrompt: 'Plan.', responseFormat: 'json' });
+      const body = JSON.parse((fetch as jest.Mock).mock.calls[0][1].body);
+      expect(body.system).toContain('Plan.');
+      expect(body.system).toContain('JSON');
+    });
+
+    it('strips code fences from JSON responses', async () => {
+      (fetch as jest.Mock).mockResolvedValueOnce({
+        ok:   true,
+        json: async () => ({
+          content: [{ type: 'text', text: '```json\n{"a":1}\n```' }],
+          model:   'claude-haiku-4-5-20251001',
+          usage:   { input_tokens: 5, output_tokens: 3 },
+        }),
+      });
+
+      const result = await service.generate('prompt', { backend: 'claude', responseFormat: 'json' });
+      expect(result.text).toBe('{"a":1}');
+      expect(() => JSON.parse(result.text)).not.toThrow();
+    });
   });
 
   // ── budget → model selection ──────────────────────────────────────────────

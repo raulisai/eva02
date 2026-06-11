@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { MemoriesRepository } from './memories.repository';
-import { ModelRouterService } from './model-router/model-router.service';
+import { ModelRouterService } from '../model-router/model-router.service';
 import { SaveMemoryDto } from './dto/save-memory.dto';
 import { SearchMemoryDto } from './dto/search-memory.dto';
 import { Memory, MemoryResult, MemorySearchResult } from './memory.types';
@@ -58,7 +58,7 @@ export class MemoryService {
   }
 
   async searchMemories(dto: SearchMemoryDto, orgId: string): Promise<MemorySearchResult[]> {
-    const embedding = await this.modelRouter.embed(dto.query);
+    const { embedding } = await this.modelRouter.embed(dto.query);
     const results = await this.repo.searchSimilar(
       embedding,
       orgId,
@@ -109,8 +109,8 @@ export class MemoryService {
     orgId: string,
     text: string,
   ): Promise<void> {
-    const embedding = await this.modelRouter.embed(text);
-    await this.repo.storeEmbedding(memoryId, orgId, embedding, this.modelRouter.embeddingModel);
+    const { embedding, model } = await this.modelRouter.embed(text);
+    await this.repo.storeEmbedding(memoryId, orgId, embedding, model);
     this.logger.debug(`Embedding stored for memory ${memoryId}`);
   }
 }

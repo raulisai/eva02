@@ -187,12 +187,20 @@ export class ModelRouterService {
     const key = apiKey ?? this.anthropicKey;
     const model = opts.model ?? MODEL_CATALOGUE[budget as keyof typeof MODEL_CATALOGUE]?.claude ?? 'claude-haiku-4-5-20251001';
 
+    // Claude has no native JSON mode — enforce it via the system prompt so the
+    // JSON consumers (intent router, planner, forge, navigator) keep working.
+    let system = opts.systemPrompt;
+    if (opts.responseFormat === 'json') {
+      const jsonRule = 'Responde ÚNICAMENTE con un objeto JSON válido. Sin markdown, sin code fences, sin texto antes o después.';
+      system = system ? `${system}\n\n${jsonRule}` : jsonRule;
+    }
+
     const body: Record<string, unknown> = {
       model,
       max_tokens: opts.maxTokens ?? 1024,
       messages:   [{ role: 'user', content: prompt }],
     };
-    if (opts.systemPrompt) body['system'] = opts.systemPrompt;
+    if (system) body['system'] = system;
     if (opts.temperature !== undefined) body['temperature'] = opts.temperature;
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -216,7 +224,8 @@ export class ModelRouterService {
       usage: { input_tokens: number; output_tokens: number };
     };
 
-    const text = data.content.find(b => b.type === 'text')?.text ?? '';
+    let text = data.content.find(b => b.type === 'text')?.text ?? '';
+    if (opts.responseFormat === 'json') text = this.stripCodeFences(text);
 
     return {
       text,
@@ -319,6 +328,13 @@ export class ModelRouterService {
       backend: 'openai',
       usage:   { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
     };
+  }
+
+  /** Removes ```json fences some models wrap around JSON despite instructions. */
+  private stripCodeFences(text: string): string {
+    const trimmed = text.trim();
+    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    return fenced ? fenced[1].trim() : trimmed;
   }
 
   private resolveBackend(requested?: ModelBackend, keys?: ResolvedKeys, budget: ModelBudget = 'cheap'): ModelBackend {
