@@ -179,17 +179,14 @@ export class RappiWebService {
           && !/ingresa|inicia sesi[oó]n|registr|login/i.test(text.slice(0, 300));
         if (loggedIn) return { state: 'logged_in', textSample: sample, currentUrl };
 
+        const loginRequired = /ingresa|inicia sesi[oó]n|registr|login|sign in/i.test(text);
+        if (loginRequired) return { state: 'login_required', textSample: sample, currentUrl };
+
         const codeRequired = /c[oó]digo de verificaci[oó]n|verification code|ingresa el c[oó]digo|revisa tu correo|check your email|one.time|otp/i.test(text);
         if (codeRequired) return { state: 'code_required', textSample: sample, currentUrl };
 
         const emailRequired = /correo electr[oó]nico|email|ingresa.*correo|tu correo/i.test(text);
         if (emailRequired) return { state: 'email_required', textSample: sample, currentUrl };
-
-        const loading = /cargando|loading|espera/i.test(text) || lines.length < 3;
-        if (loading) return { state: 'loading', textSample: sample, currentUrl };
-
-        const loginRequired = /ingresa|inicia sesi[oó]n|registr|login|sign in/i.test(text);
-        if (loginRequired) return { state: 'login_required', textSample: sample, currentUrl };
 
         return { state: 'unknown', textSample: sample, currentUrl };
       });
@@ -283,7 +280,10 @@ export class RappiWebService {
 
       if (submitBtn) {
         submitBtn.click();
-      } else if (input) {
+      }
+      
+      if (input) {
+        // Force Enter key as well
         input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
         input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
         input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));

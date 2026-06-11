@@ -131,6 +131,11 @@ export class PlaywrightBrowserRuntime {
     await session.page.waitForTimeout(ms);
   }
 
+  async typeCharacters(sessionId: string, text: string, delay = 80): Promise<void> {
+    const session = this.requireSession(sessionId);
+    await session.page.keyboard.type(text, { delay });
+  }
+
   async close(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -277,6 +282,7 @@ export type BrowserRuntime = Pick<
   'open'
   | 'click'
   | 'type'
+  | 'typeCharacters'
   | 'screenshot'
   | 'extractText'
   | 'extractTable'

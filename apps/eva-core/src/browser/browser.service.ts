@@ -147,6 +147,12 @@ export class BrowserService {
     return { sessionId, waited_ms: ms };
   }
 
+  async typeCharacters(sessionId: string, orgId: string, text: string, delay?: number) {
+    await this.repo.findSessionOrThrow(sessionId, orgId);
+    await this.runtime.typeCharacters(sessionId, text, delay);
+    return { sessionId };
+  }
+
   async clickNow(sessionId: string, orgId: string, selector: string) {
     await this.repo.findSessionOrThrow(sessionId, orgId);
     await this.runtime.click(sessionId, selector);

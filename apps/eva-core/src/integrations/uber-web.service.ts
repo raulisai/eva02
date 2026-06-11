@@ -306,7 +306,25 @@ export class UberWebService {
       return { ok: false, reason: 'no_email_field', session_id: opened.id, text: 'No encontré el campo de email en Uber. Te envié screenshot para resolverlo manualmente.', screenshot };
     }
 
-    await this.browser.wait(opened.id, orgId, 3000);
+    // Increased wait time for Uber to redirect to the challenge screen
+    await this.browser.wait(opened.id, orgId, 5000);
+    
+    // Check for "Send code via SMS" or similar intermediate challenge screens
+    // Use native Playwright click — much more reliable than JS injection
+    let clicked = await this.handleIntermediateChallenges(opened.id, orgId);
+    if (clicked) {
+      await this.browser.wait(opened.id, orgId, 2500);
+    } else {
+      // Retry once more in case the page was still loading
+      await this.browser.wait(opened.id, orgId, 2000);
+      clicked = await this.handleIntermediateChallenges(opened.id, orgId);
+      if (clicked) {
+        await this.browser.wait(opened.id, orgId, 2500);
+      }
+    }
+
+    await this.browser.wait(opened.id, orgId, 2000);
+    
     const afterSignals = await this.inspectPage(opened.id, orgId);
     const screenshot = await this.browser.screenshot(opened.id, orgId);
 
@@ -424,11 +442,11 @@ export class UberWebService {
             };
           });
 
-        if (quoteCandidates.length > 0) {
-          return { state: 'quote_ready', googleLoginAvailable, quoteCandidates, textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
-        }
+        const codeRequired = (/verifica|verification code|c[oó]digo de verificaci[oó]n|enter.*code|ingresa.*c[oó]digo|check your email|revisa tu correo|one-time|otp|almost there|casi listo|digit.*code|sent via sms/i.test(text))
+          && !googleLoginAvailable
+          && !/continue with google|continuar con google/i.test(text);
 
-        const codeRequired = /verifica|verification code|c[oó]digo de verificaci[oó]n|enter.*code|ingresa.*c[oó]digo|check your email|revisa tu correo|one-time|otp|almost there|casi listo/i.test(text);
+        // Check code/OTP screen BEFORE login_required — Uber's OTP URL contains /auth which would match
         if (codeRequired) {
           return { state: 'code_required', googleLoginAvailable, quoteCandidates: [], textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
         }
@@ -603,18 +621,23 @@ export class UberWebService {
       ];
       const input = selectors.map((s) => document.querySelector(s) as HTMLInputElement).find((el) => isVisible(el));
 
-      // Try submit button first (it should now be enabled after React saw the input events)
-      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('button[type="submit"], button'));
-      const submitBtn = buttons.find((el) => {
-        if (!isVisible(el) || (el as HTMLButtonElement).disabled) return false;
+      // Try specific Uber button IDs first
+      const specificBtn = document.querySelector('#forward-button') as HTMLButtonElement
+        ?? document.querySelector('button[data-testid="forward-button"]') as HTMLButtonElement;
+      
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('button[type="submit"], button, div[role="button"]'));
+      const submitBtn = specificBtn ?? buttons.find((el) => {
+        if (!isVisible(el as HTMLElement) || (el as HTMLButtonElement).disabled) return false;
         const txt = el.textContent?.toLowerCase() ?? '';
         return /continuar|continue|next|siguiente|enviar|send|submit/i.test(txt);
-      }) ?? buttons.find((el) => isVisible(el) && !(el as HTMLButtonElement).disabled);
+      }) ?? buttons.find((el) => isVisible(el as HTMLElement) && !(el as HTMLButtonElement).disabled);
 
       if (submitBtn) {
         submitBtn.click();
-      } else if (input) {
-        // Fallback: simulate pressing Enter on the input
+      }
+      
+      if (input) {
+        // Always simulate Enter key as well, as it's often more reliable in React/Uber
         input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
         input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
         input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
@@ -626,41 +649,76 @@ export class UberWebService {
     return true;
   }
 
-  private async typeCodeAndSubmit(sessionId: string, orgId: string, code: string): Promise<boolean> {
-    return this.browser.evaluate<boolean, { code: string }>(sessionId, orgId, ({ code }) => {
-      const isVisible = (el: HTMLElement | null) => {
-        if (!el) return false;
-        const style = window.getComputedStyle(el);
-        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0;
-      };
-      // Try individual digit inputs first (OTP widget pattern)
-      const digitInputs = Array.from(document.querySelectorAll('input[type="tel"], input[type="number"], input[maxlength="1"], input[data-testid*="otp"]'))
-        .filter(el => isVisible(el as HTMLElement)) as HTMLInputElement[];
-      if (digitInputs.length >= 4) {
-        digitInputs.slice(0, code.length).forEach((inp, i) => {
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-          if (setter) { setter.call(inp, code[i]); inp.dispatchEvent(new Event('input', { bubbles: true })); }
-          else inp.value = code[i];
-        });
-        const btn = document.querySelector('button[type="submit"]') as HTMLElement;
-        if (btn && isVisible(btn)) btn.click();
+  private async handleIntermediateChallenges(sessionId: string, orgId: string): Promise<boolean> {
+    // Use Playwright's native click with text selectors — much more reliable than JS injection
+    const smsSelectors = [
+      'text=Send code via SMS',
+      'text=Enviar código por SMS',
+      'text=Send code via email',
+      'text=Enviar código por correo',
+      ':text("Send code")',
+    ];
+
+    for (const selector of smsSelectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, selector);
+        this.logger.log(`Clicked intermediate challenge button: ${selector}`);
         return true;
+      } catch {
+        // Selector not found, try next
       }
-      // Single code input
-      const selectors = ['input[autocomplete="one-time-code"]', 'input[name*="code"]', 'input[placeholder*="código"]', 'input[placeholder*="code"]', 'input[type="tel"]'];
-      const input = selectors.map(s => document.querySelector(s) as HTMLInputElement).find(el => isVisible(el));
-      if (!input) return false;
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      if (setter) { setter.call(input, code); input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); }
-      else input.value = code;
-      const buttons = Array.from(document.querySelectorAll('button[type="submit"], button'));
-      const btn = buttons.find(el => {
-        const txt = el.textContent?.toLowerCase() ?? '';
-        return (/confirmar|confirm|verif|enviar|send|continue|continuar|submit/i.test(txt)) && isVisible(el as HTMLElement);
-      }) ?? buttons.find(el => isVisible(el as HTMLElement));
-      if (btn) (btn as HTMLElement).click();
-      return true;
-    }, { code });
+    }
+
+    return false;
+  }
+
+  private async typeCodeAndSubmit(sessionId: string, orgId: string, code: string): Promise<boolean> {
+    // Find the first visible input on the OTP screen and click it
+    const otpSelectors = [
+      'input[autocomplete="one-time-code"]',
+      'input[maxlength="1"]',
+      'input[type="tel"]',
+      'input[type="number"]',
+      'input[name*="code"]',
+      'input[name*="otp"]',
+    ];
+
+    let clicked = false;
+    for (const sel of otpSelectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, sel);
+        clicked = true;
+        break;
+      } catch {
+        // try next
+      }
+    }
+
+    if (!clicked) return false;
+
+    // Use native Playwright keyboard.type — works with all OTP widgets (single or multi-box)
+    await this.browser.typeCharacters(sessionId, orgId, code, 120);
+    await this.browser.wait(sessionId, orgId, 800);
+
+    // Click Next/Submit button
+    const submitSelectors = [
+      'text=Next',
+      'text=Siguiente',
+      'text=Verify',
+      'text=Verificar',
+      'text=Confirmar',
+      'button[type="submit"]',
+    ];
+    for (const sel of submitSelectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, sel);
+        break;
+      } catch {
+        // try next
+      }
+    }
+
+    return true;
   }
 
   private async clickContinueWithGoogle(sessionId: string, orgId: string): Promise<boolean> {
