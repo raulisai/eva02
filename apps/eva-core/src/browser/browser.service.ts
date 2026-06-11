@@ -215,7 +215,7 @@ export class BrowserService {
     return { ...session, ...result };
   }
 
-  async close(sessionId: string, orgId: string) {
+  async saveProfileState(sessionId: string, orgId: string) {
     const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     const state = await this.runtime.storageState(sessionId);
     await this.repo.saveEncryptedProfileState(
@@ -223,6 +223,10 @@ export class BrowserService {
       orgId,
       this.profileCrypto.encryptJson(state),
     );
+  }
+
+  async close(sessionId: string, orgId: string) {
+    await this.saveProfileState(sessionId, orgId);
     await this.runtime.close(sessionId);
     return this.repo.updateSession(sessionId, orgId, { status: 'closed' });
   }

@@ -269,6 +269,9 @@ export class UberWebService {
 
     let signals = await this.inspectPage(opened.id, orgId);
     if (signals.state === 'logged_in' || signals.state === 'quote_ready') {
+      await this.browser.saveProfileState(opened.id, orgId).catch((err) => {
+        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
+      });
       const screenshot = await this.browser.screenshot(opened.id, orgId);
       return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Uber Web ya tiene sesión activa.', screenshot };
     }
@@ -426,6 +429,9 @@ export class UberWebService {
     }
 
     if (signals.state === 'logged_in' || signals.state === 'quote_ready') {
+      await this.browser.saveProfileState(session.id, orgId).catch((err) => {
+        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
+      });
       return { ok: true, reason: 'logged_in', session_id: session.id, text: '✅ Uber Web quedó autenticado. Ya puedes pedir cotizaciones.', screenshot };
     }
 

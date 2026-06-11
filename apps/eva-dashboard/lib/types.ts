@@ -202,3 +202,17 @@ export interface ScheduledJob {
   created_at: string;
   updated_at: string;
 }
+
+export interface TokenLog {
+  id: number;
+  org_id: string;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+  request_type: 'reasoning' | 'tools' | 'code' | 'response';
+  task_id: string | null;
+  created_at: string;
+}
+
