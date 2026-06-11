@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { BehaviorPatternService } from './behavior-pattern.service';
+import { ApprovalsModule } from '../approvals/approvals.module';
 import { BrowserModule } from '../browser/browser.module';
 import { CapabilityGateModule } from '../capability-gate/capability-gate.module';
 import { DatabaseModule } from '../database/database.module';
@@ -21,12 +22,14 @@ import { ResearchToolsService } from './research-tools.service';
 import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
 import { SoulContextService } from './soul-context.service';
+import { JobsModule } from '../jobs/jobs.module';
+import { CommunicationModule } from '../communication/communication.module';
 
 @Module({
   imports: [
     DatabaseModule, EventsModule, IntegrationsModule, CapabilityGateModule,
     TasksModule, IntentRouterModule, ModelRouterModule, ToolRouterModule,
-    MemoryModule, BrowserModule,
+    MemoryModule, BrowserModule, ApprovalsModule, JobsModule, CommunicationModule,
   ],
   providers: [
     AgentRunnerService,

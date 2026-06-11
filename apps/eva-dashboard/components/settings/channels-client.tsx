@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import {
   Send, MessageCircle, Slack, Phone, Mail, MessageSquareText, Watch,
-  CheckCircle2, XCircle, Loader2, Webhook,
+  CheckCircle2, XCircle, Loader2, Webhook, Car, Camera, KeyRound,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -20,6 +20,7 @@ const CHANNELS = [
   { provider: 'discord',  label: 'Discord',  icon: MessageCircle,     ready: false, blurb: 'Discord bot integration.' },
   { provider: 'slack',    label: 'Slack',    icon: Slack,             ready: false, blurb: 'Slack app integration.' },
   { provider: 'whatsapp', label: 'WhatsApp', icon: Phone,             ready: true,  blurb: 'WhatsApp Web profile with QR login.' },
+  { provider: 'uber_web', label: 'Uber Web', icon: Car,               ready: true,  blurb: 'Browser profile for Uber price estimates and screenshots.' },
   { provider: 'email',    label: 'Email',    icon: Mail,              ready: false, blurb: 'Inbound + outbound email.' },
   { provider: 'sms',      label: 'SMS (Twilio)', icon: MessageSquareText, ready: false, blurb: 'SMS via Twilio.' },
 ];
@@ -30,7 +31,22 @@ interface ChannelsClientProps {
 
 interface WhatsAppSessionStatus {
   state: 'logged_in' | 'qr_required' | 'loading' | 'unknown';
+  current_url?: string | null;
+  title?: string;
   screenshot?: { image_base64: string; mime_type: string };
+}
+
+interface UberSessionStatus {
+  state: 'logged_in' | 'login_required' | 'quote_ready' | 'loading' | 'unknown';
+  google_login_available: boolean;
+  screenshot?: { image_base64: string; mime_type: string };
+}
+
+interface UberGoogleLoginStatus {
+  ok: boolean;
+  reason: string;
+  text: string;
+  session: UberSessionStatus;
 }
 
 export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
@@ -41,7 +57,8 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
   const [allowedIds, setAllowedIds] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
-  const [whatsAppQr, setWhatsAppQr] = useState<string | null>(null);
+  const [whatsAppImage, setWhatsAppImage] = useState<{ src: string; alt: string; light: boolean } | null>(null);
+  const [uberShot, setUberShot] = useState<string | null>(null);
 
   const current = useMemo(
     () => integrations.find((integration) => integration.provider === selected),
@@ -58,6 +75,16 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
         ? prev.map((integration) => integration.provider === updated.provider ? updated : integration)
         : [...prev, updated];
     });
+  }
+
+  function setWhatsAppScreenshot(result: WhatsAppSessionStatus, alt: string, light = false) {
+    if (!result.screenshot?.image_base64) return false;
+    setWhatsAppImage({
+      src: `data:${result.screenshot.mime_type};base64,${result.screenshot.image_base64}`,
+      alt,
+      light,
+    });
+    return true;
   }
 
   async function save(status?: 'active' | 'disabled') {
@@ -125,7 +152,7 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
   async function startWhatsAppSession() {
     setBusy('whatsapp');
     setFeedback(null);
-    setWhatsAppQr(null);
+    setWhatsAppImage(null);
     try {
       const result = await coreFetch<WhatsAppSessionStatus>('/integrations/whatsapp/start-session', {
         method: 'POST',
@@ -138,15 +165,122 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
         toast('WhatsApp Web ready', 'success');
         return;
       }
-      if (result.screenshot?.image_base64) {
-        setWhatsAppQr(`data:${result.screenshot.mime_type};base64,${result.screenshot.image_base64}`);
-      }
+      setWhatsAppScreenshot(result, 'WhatsApp Web QR', true);
       setFeedback({
         ok: result.state === 'qr_required',
         text: result.state === 'qr_required'
           ? 'Scan this QR with WhatsApp on your phone.'
           : 'WhatsApp Web is still loading. Try again in a few seconds.',
       });
+    } catch (error) {
+      setFeedback({ ok: false, text: (error as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function validateWhatsAppSession() {
+    setBusy('whatsapp_validate');
+    setFeedback(null);
+    try {
+      const result = await coreFetch<WhatsAppSessionStatus>('/integrations/whatsapp/validate', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (result.state === 'logged_in') {
+        const refreshed = await coreFetch<Integration[]>('/integrations?kind=channel');
+        setIntegrations(refreshed);
+        setWhatsAppImage(null);
+        setFeedback({ ok: true, text: 'WhatsApp Web validado y conectado.' });
+        toast('WhatsApp Web validado', 'success');
+        return;
+      }
+      setWhatsAppScreenshot(result, 'WhatsApp Web QR', true);
+      setFeedback({
+        ok: false,
+        text: result.state === 'qr_required'
+          ? 'Todavía falta escanear el QR o WhatsApp no terminó de iniciar sesión.'
+          : 'WhatsApp Web todavía está cargando. Espera unos segundos y valida otra vez.',
+      });
+    } catch (error) {
+      setFeedback({ ok: false, text: (error as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function testWhatsAppScreenshot() {
+    setBusy('whatsapp_test');
+    setFeedback(null);
+    try {
+      const result = await coreFetch<WhatsAppSessionStatus>('/integrations/whatsapp/test-screenshot', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      const hasImage = setWhatsAppScreenshot(
+        result,
+        result.state === 'qr_required' ? 'WhatsApp Web QR' : 'WhatsApp Web session screenshot',
+        result.state === 'qr_required',
+      );
+      setFeedback({
+        ok: result.state === 'logged_in' && hasImage,
+        text: result.state === 'logged_in'
+          ? 'Captura de WhatsApp Web generada.'
+          : 'No pude capturar WhatsApp conectado todavía; si ves QR, escanéalo y pulsa Validar.',
+      });
+    } catch (error) {
+      setFeedback({ ok: false, text: (error as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function startUberSession() {
+    setBusy('uber_web');
+    setFeedback(null);
+    setUberShot(null);
+    try {
+      const result = await coreFetch<UberSessionStatus>('/integrations/uber/start-session', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (result.screenshot?.image_base64) {
+        setUberShot(`data:${result.screenshot.mime_type};base64,${result.screenshot.image_base64}`);
+      }
+      if (result.state === 'logged_in' || result.state === 'quote_ready') {
+        setFeedback({ ok: true, text: 'Uber Web session is already logged in and ready for price estimates.' });
+        toast('Uber Web ready', 'success');
+        return;
+      }
+      setFeedback({
+        ok: result.state === 'login_required',
+        text: result.state === 'login_required'
+          ? result.google_login_available
+            ? 'Uber Web needs login. Use the opened browser window and choose Continue with Google; this local profile will keep the session.'
+            : 'Uber Web needs login. Use the opened browser window to sign in; this local profile will keep the session.'
+          : 'Uber Web is still loading. Try again in a few seconds.',
+      });
+    } catch (error) {
+      setFeedback({ ok: false, text: (error as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function startUberGoogleLogin() {
+    setBusy('uber_google');
+    setFeedback(null);
+    setUberShot(null);
+    try {
+      const result = await coreFetch<UberGoogleLoginStatus>('/integrations/uber/start-google-login', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      if (result.session.screenshot?.image_base64) {
+        setUberShot(`data:${result.session.screenshot.mime_type};base64,${result.session.screenshot.image_base64}`);
+      }
+      setFeedback({ ok: result.ok, text: result.text });
+      toast(result.text, result.ok ? 'success' : 'info');
     } catch (error) {
       setFeedback({ ok: false, text: (error as Error).message });
     } finally {
@@ -296,10 +430,13 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
                 </div>
               )}
 
-              {whatsAppQr && (
-                <div className="inline-block border border-zinc-800 rounded-sm bg-white p-3">
+              {whatsAppImage && (
+                <div className={cn(
+                  'inline-block border border-zinc-800 rounded-sm p-3',
+                  whatsAppImage.light ? 'bg-white' : 'bg-zinc-950',
+                )}>
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={whatsAppQr} alt="WhatsApp Web QR" className="w-72 h-auto" />
+                  <img src={whatsAppImage.src} alt={whatsAppImage.alt} className="w-[28rem] max-w-full h-auto" />
                 </div>
               )}
 
@@ -307,6 +444,64 @@ export function ChannelsClient({ initialIntegrations }: ChannelsClientProps) {
                 <Button size="sm" onClick={startWhatsAppSession} disabled={busy !== null}>
                   {busy === 'whatsapp' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                   Connect WhatsApp Web
+                </Button>
+                <Button size="sm" variant="outline" onClick={validateWhatsAppSession} disabled={busy !== null}>
+                  {busy === 'whatsapp_validate'
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <CheckCircle2 className="w-3.5 h-3.5" />}
+                  Validar
+                </Button>
+                <Button size="sm" variant="ghost" onClick={testWhatsAppScreenshot} disabled={busy !== null}>
+                  {busy === 'whatsapp_test'
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <Camera className="w-3.5 h-3.5" />}
+                  Test captura
+                </Button>
+              </div>
+            </>
+          )}
+
+          {selected === 'uber_web' && (
+            <>
+              <section className="space-y-2">
+                <h3 className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">Uber Web</h3>
+                <p className="text-xs text-zinc-500 leading-relaxed">
+                  EVA opens Chromium with a local Uber profile. Sign in once in the opened browser window; future price estimates reuse that profile and only return visible quotes plus a screenshot.
+                </p>
+                <p className="text-[11px] font-mono text-amber-400/80 leading-relaxed">
+                  Local setup: run eva-core with BROWSER_HEADLESS=false so you can complete Google login interactively.
+                </p>
+              </section>
+
+              {feedback && (
+                <div className={cn(
+                  'flex items-center gap-2 text-xs font-mono rounded-sm border px-3 py-2',
+                  feedback.ok ? 'border-emerald-500/30 text-emerald-400' : 'border-red-500/30 text-red-400',
+                )}>
+                  {feedback.ok ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                  <span className="break-all">{feedback.text}</span>
+                </div>
+              )}
+
+              {uberShot && (
+                <div className="inline-block border border-zinc-800 rounded-sm bg-zinc-950 p-3">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={uberShot} alt="Uber Web session screenshot" className="w-[28rem] max-w-full h-auto" />
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 pt-2 border-t border-zinc-800">
+                <Button size="sm" onClick={startUberSession} disabled={busy !== null}>
+                  {busy === 'uber_web'
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <Car className="w-3.5 h-3.5" />}
+                  Open Uber Web login
+                </Button>
+                <Button size="sm" variant="outline" onClick={startUberGoogleLogin} disabled={busy !== null}>
+                  {busy === 'uber_google'
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <KeyRound className="w-3.5 h-3.5" />}
+                  Login with Google credential
                 </Button>
               </div>
             </>

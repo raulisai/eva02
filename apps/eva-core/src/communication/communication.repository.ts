@@ -59,6 +59,25 @@ export class CommunicationRepository {
     return data as CommunicationAccount | null;
   }
 
+  /** Find the active account for a given internal userId + channel (used for cross-channel delivery). */
+  async findAccountByUserId(
+    orgId: string,
+    userId: string,
+    channel: CommunicationChannel,
+  ): Promise<CommunicationAccount | null> {
+    const { data, error } = await this.db.admin
+      .from('communication_accounts')
+      .select('*')
+      .eq('org_id', orgId)
+      .eq('user_id', userId)
+      .eq('channel', channel)
+      .eq('status', 'active')
+      .maybeSingle();
+
+    if (error) this.fail('communication_accounts.findByUserId', error);
+    return data as CommunicationAccount | null;
+  }
+
   async getOrCreateConversation(input: {
     orgId: string;
     channel: CommunicationChannel;

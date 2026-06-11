@@ -85,3 +85,9 @@ export interface GoogleCredential {
   client_secret: string;
   refresh_token: string;
 }
+
+/** Google web-login credential used only to establish a local browser profile. */
+export interface GoogleWebCredential {
+  email: string;
+  password: string;
+}

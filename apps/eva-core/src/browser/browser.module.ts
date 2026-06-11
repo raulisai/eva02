@@ -8,16 +8,22 @@ import { BrowserController } from './browser.controller';
 import { BrowserRepository } from './browser.repository';
 import { BrowserService } from './browser.service';
 import { BROWSER_RUNTIME } from './browser.types';
+import { GoogleWebController } from './google-web.controller';
 import { WhatsAppWebController } from './whatsapp-web.controller';
+import { UberWebController } from './uber-web.controller';
+import { GoogleWebLoginService } from '../integrations/google-web-login.service';
+import { UberWebService } from '../integrations/uber-web.service';
 import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
 
 @Module({
   imports: [DatabaseModule, EventsModule, ApprovalsModule, IntegrationsModule],
-  controllers: [BrowserController, WhatsAppWebController],
+  controllers: [BrowserController, WhatsAppWebController, UberWebController, GoogleWebController],
   providers: [
     BrowserRepository,
     BrowserService,
     WhatsAppWebService,
+    GoogleWebLoginService,
+    UberWebService,
     {
       provide: BROWSER_RUNTIME,
       useFactory: () => new PlaywrightBrowserRuntime({
@@ -26,6 +32,6 @@ import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
       }),
     },
   ],
-  exports: [BrowserService, WhatsAppWebService],
+  exports: [BrowserService, WhatsAppWebService, UberWebService, GoogleWebLoginService],
 })
 export class BrowserModule {}

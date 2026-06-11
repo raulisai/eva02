@@ -27,13 +27,25 @@ export class CommunicationService implements OnApplicationBootstrap {
   onApplicationBootstrap() {
     if (typeof this.events.on !== 'function') return;
 
-    // Forward completed task results back to Telegram when the task originated there.
+    // Forward completed task results back to the originating channel (Telegram) and to any
+    // explicitly requested cross-channel target (e.g. user asked from Playground: "mándalo por telegram").
     this.events.on('task.result', async (event: EvaEvent) => {
       const { orgId, taskId, payload } = event;
       if (!taskId) return;
-      // Pure image tasks are delivered via the task.media handler (sendPhoto) — skip text here.
-      if ((payload as Record<string, unknown>)['model'] === 'media:image') return;
-      await this.deliverToTelegram(orgId, taskId, String((payload as Record<string, unknown>)['text'] ?? ''));
+      const p = payload as Record<string, unknown>;
+      // Pure image tasks are delivered via task.media (sendPhoto) — skip text here.
+      if (p['model'] === 'media:image') return;
+      const text = String(p['text'] ?? '');
+
+      // 1. Same-channel reply (task originated from Telegram).
+      await this.deliverToTelegram(orgId, taskId, text);
+
+      // 2. Cross-channel delivery requested from Playground / wearOS.
+      const crossTarget = p['cross_channel_target'] as string | undefined;
+      const crossUserId = p['cross_channel_user_id'] as string | undefined;
+      if (crossTarget && crossUserId && text) {
+        await this.deliverCrossChannel(orgId, crossUserId, crossTarget as CommunicationChannel, text);
+      }
     });
 
     // Forward generated images to Telegram as photos.
@@ -238,6 +250,57 @@ export class CommunicationService implements OnApplicationBootstrap {
     return this.repo.findRecentNotifications(orgId, Math.min(limit, 100));
   }
 
+  /**
+   * Returns which channels have an active integration for the org.
+   * Used by the agent to tell the user which cross-channel targets are available.
+   */
+  async listActiveChannels(orgId: string): Promise<CommunicationChannel[]> {
+    const active: CommunicationChannel[] = ['dashboard'];
+    const telegram = await this.integrations.getChannelSettings(orgId, 'telegram');
+    if (telegram?.status === 'active') active.push('telegram');
+    return active;
+  }
+
+  /**
+   * Deliver a message to a channel other than the one the task originated from.
+   * Looks up the user's linked account on the target channel.
+   * Returns ok=false with a human-readable reason if delivery can't proceed.
+   */
+  async deliverCrossChannel(
+    orgId: string,
+    userId: string,
+    channel: CommunicationChannel,
+    text: string,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    try {
+      if (channel === 'telegram') {
+        const settings = await this.integrations.getChannelSettings(orgId, 'telegram');
+        if (!settings || settings.status !== 'active') {
+          return { ok: false, reason: 'telegram_channel_inactive' };
+        }
+        // Try the user's own linked account first, then the org-wide fallback.
+        let chatId: string | null = null;
+        const userAccount = await this.repo.findAccountByUserId(orgId, userId, 'telegram');
+        if (userAccount?.external_chat_id) {
+          chatId = userAccount.external_chat_id;
+        } else {
+          // Fallback: env-var default account (for single-user orgs).
+          const fallbackAccount = await this.findPreferredTelegramAccount(orgId, userId);
+          chatId = fallbackAccount?.external_chat_id ?? null;
+        }
+        if (!chatId) {
+          return { ok: false, reason: 'no_telegram_account_linked' };
+        }
+        const result = await this.telegram.sendMessage({ chat_id: chatId }, text, settings.secret);
+        return result.ok ? { ok: true } : { ok: false, reason: result.error };
+      }
+      return { ok: false, reason: `channel_not_implemented:${channel}` };
+    } catch (err) {
+      this.logger.warn(`deliverCrossChannel(${channel}) failed: ${(err as Error).message}`);
+      return { ok: false, reason: (err as Error).message };
+    }
+  }
+
   private async deliverToTelegram(orgId: string, taskId: string, text: string): Promise<void> {
     if (!text) return;
     try {
@@ -250,7 +313,10 @@ export class CommunicationService implements OnApplicationBootstrap {
       const settings = await this.integrations.getChannelSettings(orgId, 'telegram');
       if (settings && settings.status !== 'active') return;
 
-      await this.telegram.sendMessage({ chat_id: chatId }, text, settings?.secret);
+      const result = await this.telegram.sendMessage({ chat_id: chatId }, text, settings?.secret);
+      if (!result.ok) {
+        this.logger.warn(`deliverToTelegram failed for task ${taskId}: ${result.error ?? 'unknown Telegram error'}`);
+      }
     } catch (err) {
       this.logger.warn(`deliverToTelegram failed for task ${taskId}: ${(err as Error).message}`);
     }
@@ -267,7 +333,10 @@ export class CommunicationService implements OnApplicationBootstrap {
       const settings = await this.integrations.getChannelSettings(orgId, 'telegram');
       if (settings && settings.status !== 'active') return;
 
-      await this.telegram.sendPhoto({ chat_id: chatId }, photoUrl, '🖼️ Imagen generada', settings?.secret);
+      const result = await this.telegram.sendPhoto({ chat_id: chatId }, photoUrl, 'Imagen generada', settings?.secret);
+      if (!result.ok) {
+        this.logger.warn(`deliverPhotoToTelegram failed for task ${taskId}: ${result.error ?? 'unknown Telegram error'}`);
+      }
     } catch (err) {
       this.logger.warn(`deliverPhotoToTelegram failed for task ${taskId}: ${(err as Error).message}`);
     }

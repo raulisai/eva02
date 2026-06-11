@@ -117,7 +117,7 @@ export const CAPABILITY_CATALOG: Array<{
 
   // ── Uber / ride hailing ───────────────────────────────────────────────────
   {
-    pattern: /\b(uber|pedir.*uber|pedir.*taxi|mis viajes de uber|historial de uber)\b/i,
+    pattern: /\b((pedir|pide|solicita|solicitar|ordena|ordenar|manda|mandar|confirmar|confirma).*(uber|taxi)|(uber|taxi).*(pedir|pide|solicita|solicitar|ordena|ordenar|confirmar|confirma)|mis viajes de uber|historial de uber)\b/i,
     requirement: {
       capability: 'uber',
       ack_message: 'Para acceder a Uber necesito conectar tu cuenta primero 🚗',

@@ -5,6 +5,7 @@ import { IntegrationsRepository } from './integrations.repository';
 import {
   ChannelSettings,
   GoogleCredential,
+  GoogleWebCredential,
   IntegrationKind,
   IntegrationView,
   McpConnection,
@@ -15,7 +16,7 @@ import { WEAR_COMMANDS, WEAR_DEFAULT_ENABLED } from './wear-catalog';
 
 const KNOWN_MODEL_PROVIDERS = ['anthropic', 'openai', 'google', 'groq', 'openrouter'];
 const KNOWN_CHANNEL_PROVIDERS = ['wear', 'telegram', 'discord', 'slack', 'whatsapp', 'email', 'sms'];
-const KNOWN_CREDENTIAL_PROVIDERS = ['google', 'uber', 'github', 'amazon', 'brave_search', 'tavily', 'serpapi', 'custom'];
+const KNOWN_CREDENTIAL_PROVIDERS = ['google', 'google_web', 'uber', 'github', 'amazon', 'brave_search', 'tavily', 'serpapi', 'custom'];
 
 @Injectable()
 export class IntegrationsService {
@@ -45,7 +46,7 @@ export class IntegrationsService {
 
     if (input.secret) {
       secretCiphertext = SecretCipher.encrypt(input.secret);
-      secretHint = SecretCipher.hint(input.secret);
+      secretHint = this.secretHintFor(input.kind, input.provider, input.secret);
       // Channels that receive webhooks get a per-org webhook secret rotated
       // together with the credential.
       if (input.kind === 'channel' && input.provider === 'telegram') {
@@ -489,6 +490,25 @@ export class IntegrationsService {
     if (!known.includes(provider)) {
       throw new BadRequestException(`Unknown ${kind} provider: ${provider}`);
     }
+  }
+
+  private secretHintFor(kind: IntegrationKind, provider: string, secret: string): string {
+    if (kind === 'credential' && provider === 'google_web') {
+      try {
+        const credential = JSON.parse(secret) as Partial<GoogleWebCredential>;
+        if (credential.email) return this.maskEmail(credential.email);
+      } catch {
+        return 'configured';
+      }
+    }
+    return SecretCipher.hint(secret);
+  }
+
+  private maskEmail(email: string): string {
+    const [name, domain] = email.split('@');
+    if (!name || !domain) return 'configured';
+    const visible = name.slice(0, 2);
+    return `${visible}${'•'.repeat(Math.max(2, Math.min(6, name.length - visible.length)))}@${domain}`;
   }
 
   private toView(row: OrgIntegration): IntegrationView {

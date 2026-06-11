@@ -19,6 +19,7 @@ import { WearFastPathModule } from './wear-fast-path/wear-fast-path.module';
 import { CommunicationModule } from './communication/communication.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { AgentModule } from './agent/agent.module';
+import { JobsModule } from './jobs/jobs.module';
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { AgentModule } from './agent/agent.module';
     AgentModule,
     ApprovalsModule,
     WearFastPathModule,
+    JobsModule,
   ],
   providers: [
     {

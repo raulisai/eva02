@@ -19,6 +19,10 @@ const LEVEL_2 = [
   /\bexternal_api\b/i,
   /\bdelete\b/i,
   /\bwrite_data\b/i,
+  // Gmail destructive: move to trash or archive
+  /^gmail\.(trash|archive)$/i,
+  // Calendar: delete single event
+  /^calendar\.delete$/i,
 ];
 
 const LEVEL_1 = [
@@ -27,6 +31,10 @@ const LEVEL_1 = [
   /\bpost\b/i,
   /\bmessage\b/i,
   /\bbrowser\.(click|type)\b/i,
+  // Gmail composition: send, reply, mark read/unread
+  /^gmail\.(send|reply|mark_read|mark_unread)$/i,
+  // Calendar: create or update event
+  /^calendar\.(create|update)$/i,
 ];
 
 @Injectable()

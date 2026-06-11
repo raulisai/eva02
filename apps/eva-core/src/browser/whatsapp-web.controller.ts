@@ -15,6 +15,24 @@ export class WhatsAppWebController {
     return this.whatsapp.startSession(req.user.orgId, body?.task_id);
   }
 
+  @Post('validate')
+  @HttpCode(HttpStatus.OK)
+  validate(
+    @Body() body: { task_id?: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.whatsapp.validateSession(req.user.orgId, body?.task_id);
+  }
+
+  @Post('test-screenshot')
+  @HttpCode(HttpStatus.OK)
+  testScreenshot(
+    @Body() body: { task_id?: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.whatsapp.captureSessionScreenshot(req.user.orgId, body?.task_id);
+  }
+
   @Post('latest-message')
   @HttpCode(HttpStatus.OK)
   latestMessage(
@@ -22,5 +40,23 @@ export class WhatsAppWebController {
     @Req() req: AuthenticatedRequest,
   ) {
     return this.whatsapp.fetchLatestMessage(req.user.orgId, body?.task_id);
+  }
+
+  @Post('unread-messages')
+  @HttpCode(HttpStatus.OK)
+  unreadMessages(
+    @Body() body: { task_id?: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.whatsapp.fetchUnreadMessages(req.user.orgId, body?.task_id);
+  }
+
+  @Post('unanswered-messages')
+  @HttpCode(HttpStatus.OK)
+  unansweredMessages(
+    @Body() body: { task_id?: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.whatsapp.fetchUnansweredMessages(req.user.orgId, body?.task_id);
   }
 }

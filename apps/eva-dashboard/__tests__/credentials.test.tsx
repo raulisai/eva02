@@ -26,6 +26,17 @@ const googleIntegration: Integration = {
   updated_at: new Date().toISOString(),
 };
 
+const googleWebIntegration: Integration = {
+  id: 'int-gw',
+  kind: 'credential',
+  provider: 'google_web',
+  label: null,
+  status: 'active',
+  config: { purpose: 'browser_login' },
+  secret_hint: 'ra••••@gmail.com',
+  updated_at: new Date().toISOString(),
+};
+
 const fullOkResponse = {
   ok: true,
   email: 'raulisai97@gmail.com',
@@ -68,10 +79,12 @@ describe('CredentialsClient', () => {
     expect(screen.getByText('FULL INTEGRATION')).toBeInTheDocument();
     expect(screen.getByText('Leer correos (Gmail)')).toBeInTheDocument();
     expect(screen.getByText('Calendario')).toBeInTheDocument();
+    expect(screen.getByText('Google Web Login')).toBeInTheDocument();
     expect(screen.getByText('Uber')).toBeInTheDocument();
     expect(screen.getByText('Pedir viajes (con aprobación)')).toBeInTheDocument();
     expect(screen.getByLabelText('Google client secret')).toHaveAttribute('type', 'password');
     expect(screen.getByLabelText('Google refresh token')).toHaveAttribute('type', 'password');
+    expect(screen.getByLabelText('Google Web password')).toHaveAttribute('type', 'password');
   });
 
   it('calls /test/full and shows per-service status when all services pass', async () => {
@@ -147,5 +160,48 @@ describe('CredentialsClient', () => {
       client_secret: 'GOCSPX-abc',
       refresh_token: '1//refresh',
     });
+  });
+
+  it('saves Google Web email/password separately for browser login', async () => {
+    renderWithToast(<CredentialsClient initialIntegrations={[]} />);
+
+    fireEvent.change(screen.getByLabelText('Google Web email'), { target: { value: 'operator@example.com' } });
+    fireEvent.change(screen.getByLabelText('Google Web password'), { target: { value: 'secret-password' } });
+    fireEvent.click(screen.getByText('Save web login'));
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
+    const [url, init] = (global.fetch as jest.Mock).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(String(url)).toContain('/integrations/credential/google_web');
+    expect(JSON.parse(body.secret)).toEqual({
+      email: 'operator@example.com',
+      password: 'secret-password',
+    });
+  });
+
+  it('starts the Google Web login test and renders the 2FA screenshot', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: false,
+        state: 'mfa_required',
+        text: 'Google pidió verificación en dos pasos para raulisai97@gmail.com.',
+        screenshot: { image_base64: 'Z29vZ2xl', mime_type: 'image/png' },
+      }),
+      text: async () => '',
+    }) as jest.Mock;
+
+    renderWithToast(<CredentialsClient initialIntegrations={[googleWebIntegration]} />);
+
+    fireEvent.click(screen.getByText('Test browser login'));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/integrations/google-web/start-session'),
+        expect.objectContaining({ method: 'POST' }),
+      );
+    });
+    expect((await screen.findAllByText(/verificación en dos pasos/)).length).toBeGreaterThan(0);
+    expect(screen.getByAltText('Google Web login screenshot')).toHaveAttribute('src', 'data:image/png;base64,Z29vZ2xl');
   });
 });

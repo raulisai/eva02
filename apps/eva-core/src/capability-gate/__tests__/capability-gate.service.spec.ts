@@ -122,6 +122,21 @@ describe('CapabilityGateService', () => {
       const req = await gate.firstMissingRequirement('crea un script en Python para leer CSV', 'org-1');
       expect(req).toBeNull();
     });
+
+    it('returns null for Uber price estimates handled through browser quote flow', async () => {
+      await buildGate([]);
+      const req = await gate.firstMissingRequirement('cuanto cuesta un Uber de Roma Norte a Aeropuerto?', 'org-1');
+      expect(req).toBeNull();
+    });
+  });
+
+  describe('uber capability', () => {
+    it('blocks ride-ordering requests when Uber OAuth is missing', async () => {
+      await buildGate([]);
+      const req = await gate.firstMissingRequirement('pide un Uber a mi casa', 'org-1');
+      expect(req?.capability).toBe('uber');
+      expect(req?.setup_type).toBe('oauth');
+    });
   });
 
   describe('error resilience', () => {

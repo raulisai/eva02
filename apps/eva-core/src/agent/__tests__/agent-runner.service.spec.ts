@@ -6,6 +6,7 @@ import { CapabilityGateService } from '../../capability-gate/capability-gate.ser
 import { EventBusService } from '../../events/event-bus.service';
 import { IntentRouterService } from '../../intent-router/intent-router.service';
 import { ModelRouterService } from '../../model-router/model-router.service';
+import { ApprovalsService } from '../../approvals/approvals.service';
 import { TasksService } from '../../tasks/tasks.service';
 import { ToolRouterService } from '../../tool-router/tool-router.service';
 import { AgentRunnerService } from '../agent-runner.service';
@@ -17,9 +18,12 @@ import { MissingInformationError, ResearchToolsService } from '../research-tools
 import { ScheduleService } from '../schedule.service';
 import { ScriptForgeService } from '../script-forge.service';
 import { SoulContextService } from '../soul-context.service';
+import { UberWebService } from '../../integrations/uber-web.service';
 import { WhatsAppWebService } from '../../integrations/whatsapp-web.service';
 import { classifyTier } from '../tier';
 import { Task } from '../../tasks/task.types';
+import { ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
+import { CommunicationService } from '../../communication/communication.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -140,6 +144,7 @@ describe('AgentRunnerService', () => {
             wantsAudio: jest.fn().mockReturnValue(false),
             sendImage: jest.fn().mockResolvedValue('https://bucket/eva-media/img.svg'),
             sendAudio: jest.fn().mockResolvedValue('https://bucket/eva-media/audio.mp3'),
+            upload: jest.fn().mockResolvedValue('https://bucket/eva-media/screenshot.png'),
           },
         },
         {
@@ -184,7 +189,14 @@ describe('AgentRunnerService', () => {
         },
         {
           provide: GoogleCalendarService,
-          useValue: { formatUpcomingForSoul: jest.fn().mockResolvedValue(null), isConnected: jest.fn().mockResolvedValue(false) },
+          useValue: {
+            formatUpcomingForSoul: jest.fn().mockResolvedValue(null),
+            isConnected: jest.fn().mockResolvedValue(false),
+            getUpcomingEvents: jest.fn().mockResolvedValue([]),
+            createEvent: jest.fn().mockResolvedValue(null),
+            deleteEvent: jest.fn().mockResolvedValue({ ok: true }),
+            updateEvent: jest.fn().mockResolvedValue(null),
+          },
         },
         {
           provide: MemoryRecallService,
@@ -213,12 +225,62 @@ describe('AgentRunnerService', () => {
             fetchSearchWithFallback: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
             formatLatestForResponse: jest.fn().mockResolvedValue(null),
             isConnected: jest.fn().mockResolvedValue(false),
+            findMessages: jest.fn().mockResolvedValue([]),
+            sendEmail: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
+            replyToEmail: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
+            trashEmail: jest.fn().mockResolvedValue({ ok: true, messageId: 'msg-1', threadId: 'thread-1' }),
+            archiveEmail: jest.fn().mockResolvedValue({ ok: true, messageId: 'msg-1', threadId: 'thread-1' }),
+            markRead: jest.fn().mockResolvedValue({ ok: true, messageId: 'msg-1', threadId: 'thread-1' }),
+            markUnread: jest.fn().mockResolvedValue({ ok: true, messageId: 'msg-1', threadId: 'thread-1' }),
           },
         },
         {
           provide: GoogleDriveService,
           useValue: {
             fetchForQuery: jest.fn().mockResolvedValue({ ok: false, reason: 'no_credential' }),
+          },
+        },
+        {
+          provide: UberWebService,
+          useValue: {
+            startSession: jest.fn().mockResolvedValue({
+              session_id: 'uber-session-1',
+              state: 'logged_in',
+              current_url: 'https://m.uber.com/go/home',
+              google_login_available: false,
+              screenshot: {
+                id: 'uber-shot-1',
+                org_id: ORG,
+                session_id: 'uber-session-1',
+                task_id: TASK,
+                image_base64: 'dWJlcg==',
+                mime_type: 'image/png',
+                created_at: new Date().toISOString(),
+              },
+            }),
+            estimateRide: jest.fn().mockResolvedValue({
+              ok: true,
+              reason: 'quote_ready',
+              session: {
+                session_id: 'uber-session-1',
+                state: 'quote_ready',
+                current_url: 'https://m.uber.com/go/product-selection',
+                google_login_available: false,
+                screenshot: {
+                  id: 'uber-shot-1',
+                  org_id: ORG,
+                  session_id: 'uber-session-1',
+                  task_id: TASK,
+                  image_base64: 'dWJlcg==',
+                  mime_type: 'image/png',
+                  created_at: new Date().toISOString(),
+                },
+              },
+              origin: 'Roma Norte',
+              destination: 'Aeropuerto',
+              candidates: [{ label: 'UberX', price: '$180', raw_lines: ['UberX', '$180'] }],
+              text: 'Cotización visible de Uber para Roma Norte → Aeropuerto:\n\n- UberX: $180\n\nTe envié screenshot para confirmar. No pedí ni confirmé ningún viaje.',
+            }),
           },
         },
         {
@@ -244,6 +306,78 @@ describe('AgentRunnerService', () => {
               },
               text: 'Tu último chat visible en WhatsApp es **Ana** (17:38):\n\nVoy en camino',
             }),
+            fetchUnreadMessages: jest.fn().mockResolvedValue({
+              ok: true,
+              session: {
+                session_id: 'browser-session-1',
+                state: 'logged_in',
+                current_url: 'https://web.whatsapp.com/',
+              },
+              unread: [{
+                chat_name: 'Ana',
+                preview: 'Voy en camino',
+                time: '17:38',
+                unread_count: 2,
+                raw_lines: ['Ana', '17:38', 'Voy en camino', '2'],
+              }],
+              text: 'Chats visibles con mensajes sin leer en WhatsApp:\n\n- **Ana** (17:38): Voy en camino — 2 sin leer',
+            }),
+            fetchUnansweredMessages: jest.fn().mockResolvedValue({
+              ok: true,
+              session: {
+                session_id: 'browser-session-1',
+                state: 'logged_in',
+                current_url: 'https://web.whatsapp.com/',
+              },
+              pending: [{
+                chat_name: 'Ana',
+                preview: 'Me avisas cuando llegues',
+                time: '17:38',
+                latest_from_me: false,
+                raw_lines: ['Ana', '17:38', 'Me avisas cuando llegues'],
+              }],
+              answered: [{
+                chat_name: 'Luis',
+                preview: 'Ya quedó',
+                time: '17:20',
+                latest_from_me: true,
+                raw_lines: ['Luis', '17:20', '(You)', 'Ya quedó'],
+              }],
+              text: 'Chats visibles sin responder en WhatsApp:\n\n- **Ana** (17:38): Me avisas cuando llegues\n\nYa contestados visibles:\n- **Luis** (17:20): Ya quedó',
+            }),
+          },
+        },
+        {
+          provide: ApprovalsService,
+          useValue: {
+            requestForPreparedAction: jest.fn().mockResolvedValue({
+              id: 'approval-1',
+              action_hash: 'a'.repeat(64),
+            }),
+            consumeApproved: jest.fn().mockRejectedValue(new Error('Not approved')),
+          },
+        },
+        {
+          provide: ScheduledJobsService,
+          useValue: {
+            list: jest.fn().mockResolvedValue([]),
+            create: jest.fn().mockResolvedValue({ id: 'job-1', name: 'Test' }),
+            createFromNl: jest.fn().mockResolvedValue({
+              job: { id: 'job-1', name: 'Test', cron_expr: '0 7 * * *', schedule_type: 'cron', timezone: 'America/Mexico_City' },
+              summary: '"Test" programado a las **7:00** (todos los días, zona America/Mexico_City).',
+            }),
+            activateManero: jest.fn().mockResolvedValue({
+              id: 'job-1', name: 'Mañanero 🌅', cron_expr: '0 7 * * *', schedule_type: 'cron', timezone: 'America/Mexico_City',
+            }),
+            pause: jest.fn().mockResolvedValue({ id: 'job-1', name: 'Test', status: 'paused' }),
+            ensureDefaultJobs: jest.fn().mockResolvedValue(undefined),
+            describeSchedule: jest.fn().mockReturnValue('"Mañanero 🌅" programado a las **7:00** (todos los días, zona America/Mexico_City).'),
+          },
+        },
+        {
+          provide: CommunicationService,
+          useValue: {
+            listActiveChannels: jest.fn().mockResolvedValue(['dashboard']),
           },
         },
       ],
@@ -910,6 +1044,35 @@ describe('AgentRunnerService', () => {
     expect(research.answer).not.toHaveBeenCalled();
   });
 
+  it('routes Uber price estimates through Uber Web with screenshot, never model or research', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'cuanto cuesta un Uber de Roma Norte a Aeropuerto?',
+    }));
+    const uber = module.get(UberWebService) as jest.Mocked<UberWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(uber.estimateRide).toHaveBeenCalledWith(ORG, {
+      origin: 'Roma Norte',
+      destination: 'Aeropuerto',
+      taskId: TASK,
+    });
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
+
+    const media = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.media');
+    expect(media?.payload).toEqual(expect.objectContaining({
+      kind: 'image',
+      url: 'https://bucket/eva-media/screenshot.png',
+      label: 'Uber Web',
+    }));
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({
+      model: 'uber-web',
+      text: expect.stringContaining('UberX'),
+    }));
+  });
+
   it('routes watsap latest-message requests to WhatsApp Web, never the model fallback', async () => {
     tasks.getTask.mockResolvedValue(makeTask({ description: 'cual es el ultimo mensaje que tengo de watsap?' }));
     const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
@@ -924,6 +1087,42 @@ describe('AgentRunnerService', () => {
     expect(result?.payload).toEqual(expect.objectContaining({
       model: 'whatsapp-web',
       text: expect.stringContaining('Ana'),
+    }));
+  });
+
+  it('routes WhatsApp unread-message requests to the unread extractor', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'que mensajes tengo sin leer en WhatsApp?' }));
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(whatsapp.fetchUnreadMessages).toHaveBeenCalledWith(ORG, TASK);
+    expect(whatsapp.fetchLatestMessage).not.toHaveBeenCalled();
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({
+      model: 'whatsapp-web',
+      text: expect.stringContaining('sin leer'),
+    }));
+  });
+
+  it('routes WhatsApp unanswered-message requests to response-status instead of send approval', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'que mensajes tengo sin responder en WhatsApp?' }));
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+
+    await service.run(ORG, TASK);
+
+    expect(whatsapp.fetchUnansweredMessages).toHaveBeenCalledWith(ORG, TASK);
+    expect(whatsapp.startSession).not.toHaveBeenCalled();
+    expect(approvals.requestForPreparedAction).not.toHaveBeenCalled();
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({
+      model: 'whatsapp-web',
+      text: expect.stringContaining('sin responder'),
     }));
   });
 
@@ -955,9 +1154,172 @@ describe('AgentRunnerService', () => {
     const media = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.media');
     expect(media?.payload).toEqual(expect.objectContaining({
       kind: 'image',
-      url: 'data:image/png;base64,iVBORw0KGgo=',
+      url: 'https://bucket/eva-media/screenshot.png',
       label: 'WhatsApp Web QR',
     }));
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
+  });
+
+  it('prepares WhatsApp replies through Approval Engine instead of sending directly', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      created_by: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      description: 'responde por watsap a Ana que voy en camino',
+    }));
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(whatsapp.startSession).toHaveBeenCalledWith(ORG, TASK);
+    expect(approvals.requestForPreparedAction).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG,
+      userId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      taskId: TASK,
+      actionType: 'whatsapp.message.send',
+      source: 'browser',
+      payload: expect.objectContaining({
+        contact: 'Ana',
+        text: 'voy en camino',
+      }),
+    }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval', expect.anything());
+  });
+
+  // ── Gmail write operations ────────────────────────────────────────────────
+
+  it('rejects bulk email operations immediately without creating approvals', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'borra todos mis correos de spam' }));
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+
+    await service.run(ORG, TASK);
+
+    expect(approvals.requestForPreparedAction).not.toHaveBeenCalled();
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('masivas') }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
+  });
+
+  it('creates a gmail.send approval and parks task when asked to send an email', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      created_by: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      description: 'envía un correo a test@example.com diciendo que la reunión es el jueves',
+    }));
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+
+    await service.run(ORG, TASK);
+
+    expect(approvals.requestForPreparedAction).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG,
+      userId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      taskId: TASK,
+      actionType: 'gmail.send',
+      payload: expect.objectContaining({ to: 'test@example.com' }),
+    }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval', expect.anything());
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
+  });
+
+  it('creates a gmail.trash approval after finding the message and parks task', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      created_by: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      description: 'borra el correo de santander',
+    }));
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+    gmail.findMessages.mockResolvedValue([{
+      id: 'msg-abc',
+      threadId: 'thread-abc',
+      from: 'Santander <no-reply@santander.com>',
+      subject: 'Tu estado de cuenta',
+      date: new Date().toISOString(),
+      snippet: 'Tu estado de cuenta está listo',
+    }]);
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+
+    await service.run(ORG, TASK);
+
+    expect(gmail.findMessages).toHaveBeenCalledWith(ORG, 'from:santander', 1);
+    expect(approvals.requestForPreparedAction).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG,
+      actionType: 'gmail.trash',
+      payload: expect.objectContaining({ message_id: 'msg-abc' }),
+    }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval', expect.anything());
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+  });
+
+  it('delivers "not found" when trash target message does not exist in Gmail', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'borra el correo de bancomer' }));
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+    gmail.findMessages.mockResolvedValue([]);
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+
+    await service.run(ORG, TASK);
+
+    expect(approvals.requestForPreparedAction).not.toHaveBeenCalled();
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('No encontré') }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
+  });
+
+  it('creates a calendar.create approval and parks task when asked to create an event', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      created_by: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      description: 'agenda una reunión con Ana mañana a las 10am',
+    }));
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+
+    await service.run(ORG, TASK);
+
+    expect(approvals.requestForPreparedAction).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG,
+      actionType: 'calendar.create',
+      payload: expect.objectContaining({ summary: expect.stringContaining('Ana') }),
+    }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval', expect.anything());
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
+  });
+
+  it('executes gmail.send after approval.resolved and delivers result', async () => {
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+
+    approvals.consumeApproved.mockResolvedValue({
+      id: 'approval-1',
+      org_id: ORG,
+      task_id: TASK,
+      action_type: 'gmail.send',
+      action_hash: 'a'.repeat(64),
+      nonce: 'n1',
+      status: 'approved',
+      level: 1,
+      payload: { to: 'test@example.com', subject: 'Hola', body: 'La reunión es el jueves.' },
+      summary: null,
+      screenshot_ref: null,
+      source: 'core_path',
+      requested_by: 'user-1',
+      reviewed_by: 'user-1',
+      reviewed_by_2: null,
+      reviewed_at: new Date().toISOString(),
+      nonce_used_at: null,
+      expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    } as never);
+    gmail.sendEmail.mockResolvedValue({ ok: true, messageId: 'sent-1', threadId: 'thread-1' });
+
+    tasks.getTask.mockResolvedValue(makeTask({ status: 'waiting_for_approval' }));
+
+    // Simulate approval.resolved event by finding and calling the registered handler
+    service.onApplicationBootstrap();
+    const onCalls = (events.on as jest.Mock).mock.calls as [string, (event: unknown) => Promise<void>][];
+    const resolvedHandler = onCalls.find(([type]) => type === 'approval.resolved')![1];
+    await resolvedHandler({ type: 'approval.resolved', orgId: ORG, taskId: TASK, payload: { approvalId: 'approval-1', status: 'approved' }, ts: Date.now() });
+
+    expect(approvals.consumeApproved).toHaveBeenCalledWith('approval-1', ORG);
+    expect(gmail.sendEmail).toHaveBeenCalledWith(ORG, 'test@example.com', 'Hola', 'La reunión es el jueves.');
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('Correo enviado') }));
   });
 });

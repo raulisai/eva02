@@ -34,7 +34,6 @@ export class TelegramAdapter {
       body: JSON.stringify({
         chat_id: chatId,
         text,
-        parse_mode: 'Markdown',
         disable_web_page_preview: true,
       }),
     });
@@ -66,7 +65,6 @@ export class TelegramAdapter {
         chat_id: chatId,
         photo: photoUrl,
         caption: caption.slice(0, 1024),
-        parse_mode: 'Markdown',
       }),
     });
 

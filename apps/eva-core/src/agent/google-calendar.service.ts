@@ -116,6 +116,68 @@ export class GoogleCalendarService {
   }
 
   /**
+   * Updates an existing calendar event. Only the fields present in `patch` are changed.
+   * Returns the updated event or null on failure.
+   */
+  async updateEvent(orgId: string, eventId: string, patch: Partial<CreateEventInput>): Promise<CalendarEvent | null> {
+    const token = await this.getAccessToken(orgId);
+    if (!token) return null;
+
+    const tz = patch.timeZone ?? 'America/Mexico_City';
+    const body: Record<string, unknown> = {};
+    if (patch.summary) body.summary = patch.summary;
+    if (patch.description !== undefined) body.description = patch.description;
+    if (patch.location !== undefined) body.location = patch.location;
+    if (patch.startDateTime) body.start = { dateTime: patch.startDateTime, timeZone: tz };
+    if (patch.endDateTime) body.end = { dateTime: patch.endDateTime, timeZone: tz };
+    if (patch.attendees) body.attendees = patch.attendees.map(email => ({ email }));
+
+    try {
+      const res = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`,
+        {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
+      if (!res.ok) {
+        this.logger.warn(`Google Calendar update failed (${res.status})`);
+        return null;
+      }
+      const updated = (await res.json()) as GoogleCalendarApiEvent;
+      return this.toCalendarEvent(updated);
+    } catch (err) {
+      this.logger.warn('Google Calendar update error', err);
+      return null;
+    }
+  }
+
+  /**
+   * Deletes a single calendar event by ID.
+   * Returns { ok: true } on success or { ok: false, error } on failure.
+   * MUST be protected by Approval Engine before calling.
+   */
+  async deleteEvent(orgId: string, eventId: string): Promise<{ ok: boolean; error?: string }> {
+    const token = await this.getAccessToken(orgId);
+    if (!token) return { ok: false, error: 'No hay credencial de Google configurada' };
+
+    try {
+      const res = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${eventId}`,
+        { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (res.status === 204 || res.ok) return { ok: true };
+      const body = await res.text();
+      this.logger.warn(`Google Calendar delete failed (${res.status}): ${body.slice(0, 200)}`);
+      return { ok: false, error: `HTTP ${res.status}` };
+    } catch (err) {
+      this.logger.warn('Google Calendar delete error', err);
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  /**
    * Returns true if this org has an active Google credential configured.
    */
   async isConnected(orgId: string): Promise<boolean> {

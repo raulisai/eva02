@@ -130,6 +130,19 @@ export class ApprovalsService {
     return { ok: true, approvalId: updated.id, action_hash: updated.action_hash };
   }
 
+  /**
+   * Atomically validates and consumes an approved action for internal execution.
+   * Marks nonce_used_at so the action cannot run twice.
+   * Throws ForbiddenException / ConflictException on invalid state.
+   */
+  async consumeApproved(approvalId: string, orgId: string): Promise<Approval> {
+    const approval = await this.repo.findByIdOrThrow(approvalId, orgId);
+    if (approval.status !== 'approved') throw new Error(`Approval ${approvalId} is ${approval.status}`);
+    if (approval.nonce_used_at) throw new Error(`Approval ${approvalId} has already been executed`);
+    if (this.isExpired(approval)) throw new Error(`Approval ${approvalId} has expired`);
+    return this.repo.update(approvalId, orgId, { nonce_used_at: new Date().toISOString() });
+  }
+
   async requestForPreparedAction(input: {
     orgId: string;
     userId: string;

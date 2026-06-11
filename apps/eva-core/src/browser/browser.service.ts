@@ -99,6 +99,18 @@ export class BrowserService {
     return { sessionId, waited_ms: ms };
   }
 
+  async clickNow(sessionId: string, orgId: string, selector: string) {
+    await this.repo.findSessionOrThrow(sessionId, orgId);
+    await this.runtime.click(sessionId, selector);
+    return { sessionId, selector };
+  }
+
+  async typeNow(sessionId: string, orgId: string, selector: string, text: string) {
+    await this.repo.findSessionOrThrow(sessionId, orgId);
+    await this.runtime.type(sessionId, selector, text);
+    return { sessionId, selector };
+  }
+
   async close(sessionId: string, orgId: string) {
     const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     const state = await this.runtime.storageState(sessionId);

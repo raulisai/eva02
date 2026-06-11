@@ -138,6 +138,21 @@ describe('IntegrationsService', () => {
     expect(SecretCipher.decrypt(call.webhookSecretCiphertext!)).toHaveLength(48);
   });
 
+  it('stores Google Web credentials with an email hint that does not leak the password', async () => {
+    await service.upsert({
+      orgId: ORG,
+      kind: 'credential',
+      provider: 'google_web',
+      secret: JSON.stringify({ email: 'operator@example.com', password: 'secret-password-1234' }),
+    });
+
+    const call = repo.upsertIntegration.mock.calls[0][0];
+    expect(call.secretCiphertext).toBeDefined();
+    expect(call.secretHint).toBe('op••••••@example.com');
+    expect(call.secretHint).not.toContain('1234');
+    expect(call.secretHint).not.toContain('password');
+  });
+
   it('rejects unknown providers', async () => {
     await expect(service.upsert({ orgId: ORG, kind: 'model', provider: 'skynet', secret: 'x'.repeat(10) }))
       .rejects.toThrow(BadRequestException);

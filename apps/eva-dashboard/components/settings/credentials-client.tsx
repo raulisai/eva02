@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import {
   Fingerprint, Mail, Calendar, HardDrive, Contact, Car, Github, ShoppingCart,
-  Loader2, Trash2, PlugZap, ShieldCheck, Search,
+  Loader2, Trash2, PlugZap, ShieldCheck, Search, KeyRound,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -64,11 +64,22 @@ interface CredentialsClientProps {
   initialIntegrations: Integration[];
 }
 
+interface GoogleWebLoginResult {
+  ok: boolean;
+  state: 'logged_in' | 'email_required' | 'account_picker' | 'password_required' | 'consent_required' | 'mfa_required' | 'challenge_required' | 'blocked' | 'loading' | 'unknown' | 'no_credential';
+  email?: string;
+  screenshot?: { image_base64: string; mime_type: string };
+  text: string;
+}
+
 export function CredentialsClient({ initialIntegrations }: CredentialsClientProps) {
   const { toast } = useToast();
   const [integrations, setIntegrations] = useState(initialIntegrations);
   const [busy, setBusy] = useState<string | null>(null);
   const [google, setGoogle] = useState({ client_id: '', client_secret: '', refresh_token: '' });
+  const [googleWeb, setGoogleWeb] = useState({ email: '', password: '' });
+  const [googleWebResult, setGoogleWebResult] = useState<GoogleWebLoginResult | null>(null);
+  const [googleWebShot, setGoogleWebShot] = useState<string | null>(null);
   const [googleAccount, setGoogleAccount] = useState<{
     email: string;
     scopes: string[];
@@ -77,6 +88,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
   const googleIntegration = integrations.find((integration) => integration.provider === 'google');
+  const googleWebIntegration = integrations.find((integration) => integration.provider === 'google_web');
 
   function patchLocal(updated: Integration) {
     setIntegrations((prev) => {
@@ -161,6 +173,50 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     }
   }
 
+  async function saveGoogleWeb() {
+    setBusy('google-web');
+    setGoogleWebResult(null);
+    setGoogleWebShot(null);
+    try {
+      const updated = await coreFetch<Integration>('/integrations/credential/google_web', {
+        method: 'PUT',
+        body: JSON.stringify({
+          secret: JSON.stringify(googleWeb),
+          status: 'active',
+          config: { purpose: 'browser_login', mfa: 'manual_user_required' },
+        }),
+      });
+      patchLocal(updated);
+      setGoogleWeb((prev) => ({ email: prev.email, password: '' }));
+      toast('Google Web credential saved (encrypted)', 'success');
+    } catch (error) {
+      toast((error as Error).message, 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function testGoogleWebLogin() {
+    setBusy('google-web-test');
+    setGoogleWebResult(null);
+    setGoogleWebShot(null);
+    try {
+      const result = await coreFetch<GoogleWebLoginResult>('/integrations/google-web/start-session', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      setGoogleWebResult(result);
+      if (result.screenshot?.image_base64) {
+        setGoogleWebShot(`data:${result.screenshot.mime_type};base64,${result.screenshot.image_base64}`);
+      }
+      toast(result.text, result.ok ? 'success' : 'info');
+    } catch (error) {
+      toast((error as Error).message, 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function saveSimple(provider: string) {
     const secret = drafts[provider]?.trim();
     if (!secret) return;
@@ -186,6 +242,10 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
       await coreFetch(`/integrations/credential/${provider}`, { method: 'DELETE' });
       setIntegrations((prev) => prev.filter((integration) => integration.provider !== provider));
       if (provider === 'google') setGoogleAccount(null);
+      if (provider === 'google_web') {
+        setGoogleWebResult(null);
+        setGoogleWebShot(null);
+      }
       toast(`${provider} credential removed`, 'info');
     } catch (error) {
       toast((error as Error).message, 'error');
@@ -308,6 +368,83 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
             </Button>
             {googleIntegration && (
               <Button size="sm" variant="destructive" onClick={() => remove('google')} disabled={busy !== null}>
+                <Trash2 className="w-3.5 h-3.5" />
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* ── Google Web Login — browser profile bootstrap ── */}
+        <div className="border border-zinc-800 rounded-sm p-4 space-y-4 animate-fade-in">
+          <div className="flex items-center gap-2">
+            <KeyRound className="w-4 h-4 text-zinc-400" />
+            <span className="text-sm text-zinc-100 font-medium">Google Web Login</span>
+            <Badge variant="running">BROWSER</Badge>
+            {googleWebIntegration?.secret_hint
+              ? <Badge variant="completed">configured {googleWebIntegration.secret_hint}</Badge>
+              : <Badge variant="cancelled">not connected</Badge>}
+          </div>
+
+          <p className="text-[11px] text-zinc-600 leading-relaxed">
+            Used only to establish a local browser session for “Continue with Google” flows. If Google asks for 2FA, EVA stops and sends a screenshot.
+          </p>
+          <p className="text-[11px] font-mono text-amber-400/80 leading-relaxed">
+            Local setup: use BROWSER_HEADLESS=false in eva-core to complete 2FA interactively.
+          </p>
+
+          <div className="space-y-2">
+            <input
+              aria-label="Google Web email"
+              type="email"
+              autoComplete="username"
+              value={googleWeb.email}
+              onChange={(event) => setGoogleWeb((prev) => ({ ...prev, email: event.target.value }))}
+              placeholder={googleWebIntegration?.secret_hint ? `Saved (${googleWebIntegration.secret_hint}) — paste email to replace` : 'Google email'}
+              className={inputClass}
+            />
+            <input
+              aria-label="Google Web password"
+              type="password"
+              autoComplete="current-password"
+              value={googleWeb.password}
+              onChange={(event) => setGoogleWeb((prev) => ({ ...prev, password: event.target.value }))}
+              placeholder="Google password"
+              className={inputClass}
+            />
+          </div>
+
+          {googleWebResult && (
+            <div className={cn(
+              'flex items-start gap-2 text-xs font-mono rounded-sm border px-3 py-2',
+              googleWebResult.ok ? 'border-emerald-500/30 text-emerald-400' : 'border-amber-500/30 text-amber-300',
+            )}>
+              <ShieldCheck className="w-3.5 h-3.5 mt-0.5" />
+              <span className="break-words">{googleWebResult.text}</span>
+            </div>
+          )}
+
+          {googleWebShot && (
+            <div className="inline-block border border-zinc-800 rounded-sm bg-zinc-950 p-3">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={googleWebShot} alt="Google Web login screenshot" className="w-[28rem] max-w-full h-auto" />
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 pt-1 border-t border-zinc-800">
+            <Button
+              size="sm"
+              onClick={saveGoogleWeb}
+              disabled={busy !== null || !googleWeb.email || !googleWeb.password}
+            >
+              {busy === 'google-web' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <KeyRound className="w-3.5 h-3.5" />}
+              Save web login
+            </Button>
+            <Button size="sm" variant="outline" onClick={testGoogleWebLogin} disabled={busy !== null || !googleWebIntegration}>
+              {busy === 'google-web-test' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PlugZap className="w-3.5 h-3.5" />}
+              Test browser login
+            </Button>
+            {googleWebIntegration && (
+              <Button size="sm" variant="destructive" onClick={() => remove('google_web')} disabled={busy !== null}>
                 <Trash2 className="w-3.5 h-3.5" />
               </Button>
             )}

@@ -5,13 +5,16 @@ import { SetupRequiredPayload } from '../capability-gate/capability-gate.types';
 import { EventBusService } from '../events/event-bus.service';
 import { IntentRouterService } from '../intent-router/intent-router.service';
 import { ModelRouterService } from '../model-router/model-router.service';
+import { ApprovalsService } from '../approvals/approvals.service';
 import { ToolRouterService } from '../tool-router/tool-router.service';
 import { TasksService } from '../tasks/tasks.service';
 import { Task } from '../tasks/task.types';
 import { ConversationDigesterService } from './conversation-digester.service';
 import { DriveFetchResult, GoogleDriveService } from './google-drive.service';
+import { CreateEventInput } from './google-calendar.service';
 import { GmailFetchResult, GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
+import { UberWebService } from '../integrations/uber-web.service';
 import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
 import { MediaService } from './media.service';
 import { MemoryRecallService } from './memory-recall.service';
@@ -20,6 +23,9 @@ import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
 import { AgentSoulContext, Goal, PersonalProfile, SoulContextService } from './soul-context.service';
 import { TierDecision, classifyTier } from './tier';
+import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
+import { CommunicationService } from '../communication/communication.service';
+import type { CommunicationChannel } from '../communication/communication.types';
 
 /**
  * Immediate spoken acknowledgments — EVA answers in <100ms with one of these
@@ -116,9 +122,48 @@ const PUBLIC_API_DIRECT_SIGNALS = /\b(clima|weather|temperatura|pron[oó]stico|l
 const EMAIL_SIGNALS = /\b(correo|email|mail|mensajes|bandeja|inbox|gmail|outlook|mis mails|mis correos)\b/i;
 const CALENDAR_SIGNALS_PERSONAL = /\b(mi(s)? (citas?|eventos?|agenda|calendario)|qu[eé] tengo|tengo algo|tengo una cita)\b/i;
 const DRIVE_SIGNALS = /\b(drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|mis hojas|mis sheets|archivos? (grandes?|pesados?|de google)|carpeta(s)? (de google|en drive)|qu[eé] (archivos?|carpetas?|docs?) tengo)\b/i;
+const UBER_SIGNALS = /\b(uber|taxi|viaje)\b/i;
+const UBER_ESTIMATE_SIGNALS = /\b(cu[aá]nto|cuanto|costo|costar|cuesta|sale|precio|tarifa|cotiza|cotizar|estimaci[oó]n|estimate|quote)\b/i;
+const UBER_ORDER_SIGNALS = /\b(pedir|pide|solicita|solicitar|ordena|ordenar|manda|mandar|confirma|confirmar|reserva|reservar)\b/i;
 const WHATSAPP_SIGNALS = /\b(whatsapp|whatsap|watsapp|watsap|whats app|guasap|guasapp|wa\b|mensajes? de whats|mis mensajes? de wa)\b/i;
 const WHATSAPP_READ_SIGNALS = /\b([uú]ltim[oa]s?|mensajes?|chats?|revisa|revisar|consulta|consultar|leer|lee|qu[eé] tengo)\b/i;
+const WHATSAPP_UNREAD_SIGNALS = /\b(sin leer|no le[ií]dos?|unread)\b/i;
+const WHATSAPP_UNANSWERED_SIGNALS = /\b(sin responder|sin contestar|por responder|por contestar|pendientes? de (?:responder|contestar)|no (?:he|has|han|est[aá]n)?\s*(?:respondid[oa]s?|contestad[oa]s?))\b/i;
 const WHATSAPP_SEND_SIGNALS = /\b(responde|responder|contesta|contestar|env[ií]a|enviar|manda|mandar|escribe|escribir)\b/i;
+
+// ── Gmail / Calendar write-intent signals ────────────────────────────────────
+// These must be checked BEFORE the read-only email fast-path.
+const GMAIL_SEND_SIGNALS = /\b(env[ií]a[r]?|manda[r]?|escrib[ei][r]?|redacta[r]?|componer?|compose)\b.{0,30}\b(correos?|emails?|mails?)\b/i;
+const GMAIL_REPLY_SIGNALS = /\b(resp[oó]nde(le)?[r]?|contesta[r]?)\b.{0,30}\b(correos?|emails?|mails?)\b/i;
+const GMAIL_TRASH_SIGNALS = /\b(borra[r]?|elimina[r]?|bota[r]?|desecha[r]?|manda a la basura|trash|papelera)\b.{0,30}\b(correos?|emails?|mails?)\b/i;
+const GMAIL_ARCHIVE_SIGNALS = /\b(archiva[r]?|archive)\b.{0,30}\b(correos?|emails?|mails?)\b/i;
+const GMAIL_MARK_READ_SIGNALS = /\bmarca[r]?.{0,30}\b(le[ií]do|como le[ií]do)\b/i;
+const GMAIL_MARK_UNREAD_SIGNALS = /\bmarca[r]?.{0,30}\b(no le[ií]do|sin leer|unread)\b/i;
+// Calendar signals require BOTH a write verb AND a calendar-specific noun to avoid
+// false positives on "crea un script" / "crea una imagen" etc.
+const CALENDAR_CREATE_SIGNALS =
+  /\b(agenda[r]?|programa[r]?|a[nñ]ade[r]?|agrega[r]?)\b.{0,50}\b(cita[s]?|evento[s]?|reuni[oó]n(es)?|meeting)\b|\bnueva?\s+(cita|reuni[oó]n|evento)\b|\bcrea[r]?\s+(?:una?\s+)?(cita|reuni[oó]n|evento|meeting)\b/i;
+const CALENDAR_DELETE_SIGNALS = /\b(cancela[r]?|elimina[r]?|borra[r]?|quita[r]?)\b.{0,40}\b(cita[s]?|evento[s]?|reuni[oó]n(es)?|meeting|compromiso)\b/i;
+const CALENDAR_UPDATE_SIGNALS = /\b(cambia[r]?|mueve[r]?|modifica[r]?|actualiza[r]?|reagenda[r]?|posponer?|adelantar?)\b.{0,40}\b(cita|evento|reuni[oó]n)\b/i;
+// Bulk/mass operation guard — reject any write that targets multiple items at once.
+const BULK_GUARD_SIGNALS = /\b(todos(?: mis)?|todas(?: mis)?|masiv[oa]|bulk|en masa|toda la bandeja|todos los correos|todas las citas|todos los eventos)\b/i;
+
+// ── Scheduled job intent signals ─────────────────────────────────────────────
+// Detects requests to create / list / manage recurring or one-time scheduled jobs.
+const SCHEDULE_CREATE_SIGNALS =
+  /\b(recuér[d]?ame|avísame|notifícame|programa[r]?\s+(?:un\s+)?job|crea[r]?\s+(?:un\s+)?job|crea[r]?\s+(?:una?\s+)?tarea\s+programada|a\s+partir\s+de\s+hoy|cada\s+(día|hora|lunes|martes|miércoles|jueves|viernes|sábado|domingo|\d+\s*(?:hora[s]?|minuto[s]?))|todos\s+los\s+(días|lunes|martes|miércoles|jueves|viernes|sábados?|domingos?))\b/i;
+const MANERO_SIGNALS =
+  /\b(mañaner[oa]|briefing\s+(?:matutino|diario)?|resumen\s+(?:matutino|diario)|buenos\s+días\s+briefing|activa[r]?\s+(?:el\s+)?mañaner[oa]|configura[r]?\s+(?:el\s+)?mañaner[oa]|pon\s+(?:el\s+)?mañaner[oa]|mi\s+rutina\s+(?:de\s+)?mañana)\b/i;
+const SCHEDULE_LIST_SIGNALS =
+  /\b(qué\s+jobs?|mis\s+jobs?|qué\s+(?:tareas?\s+)?programadas?|lista[r]?\s+(?:mis\s+)?jobs?|ver\s+(?:mis\s+)?tareas\s+programadas?|mis\s+recordatorios\s+programados?|mis\s+automatizaciones?)\b/i;
+const SCHEDULE_PAUSE_SIGNALS =
+  /\b(pausa[r]?|desactiva[r]?|detén|detener)\b.{0,30}\b(job|tarea\s+programada|mañaner[oa]|recordatorio|automatizac)\b/i;
+
+// ── Cross-channel delivery signals ───────────────────────────────────────────
+// Detects "mándame la respuesta por telegram", "envíalo a telegram", etc.
+// Supported targets: telegram (only one implemented; wired for future expansion).
+const CROSS_CHANNEL_SIGNALS =
+  /\b(mánda(me|lo|la|sela|selo)?|envía(me|lo|la)?|pása(me|lo|la)?|comparte(lo|la)?|por|v[ií]a|usando|a\s+trav[eé]s\s+de)\b.{0,25}\b(telegram)\b/i;
 
 const FRESHNESS_REQUIRED_SIGNALS = [
   /\b(qui[eé]n\s+es|quien\s+es)\s+(el|la)?\s*(presidente|presidenta|gobernador|gobernadora|alcalde|alcaldesa|ceo|director|directora|titular|jefe|jefa)\b/i,
@@ -149,6 +194,9 @@ interface ConversationContextTurn {
 @Injectable()
 export class AgentRunnerService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AgentRunnerService.name);
+  // Per-task cross-channel routing context: populated when user requests delivery to another channel.
+  // Map key = taskId. Cleared after task completes or fails.
+  private readonly crossChannelCtx = new Map<string, { channel: CommunicationChannel; userId: string }>();
 
   constructor(
     private readonly events: EventBusService,
@@ -168,17 +216,26 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly digester: ConversationDigesterService,
     private readonly gmail: GmailService,
     private readonly drive: GoogleDriveService,
+    private readonly uber: UberWebService,
     private readonly whatsapp: WhatsAppWebService,
+    private readonly approvals: ApprovalsService,
+    private readonly scheduledJobs: ScheduledJobsService,
+    private readonly comms: CommunicationService,
   ) {}
 
   onApplicationBootstrap() {
     if (typeof this.events.on !== 'function') return; // test stub without consumer
-    // Decoupled trigger: any task.created on the bus gets processed here.
     this.events.on('task.created', async (event) => {
       if (!event.taskId) return;
       await this.run(event.orgId, event.taskId);
     });
-    this.logger.log('Agent runner subscribed to task.created');
+    // Close the approval → execute loop for Gmail / Calendar write operations.
+    this.events.on('approval.resolved', async (event) => {
+      const payload = event.payload as { approvalId?: string; status?: string } | undefined;
+      if (payload?.status !== 'approved' || !payload.approvalId || !event.taskId) return;
+      await this.executeApprovedAction(event.orgId, event.taskId, payload.approvalId);
+    });
+    this.logger.log('Agent runner subscribed to task.created + approval.resolved');
   }
 
   /** Picks the instant acknowledgment phrase for an order. */
@@ -195,7 +252,29 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     }
     if (task.status !== 'pending') return;
 
-    const input = task.description ?? task.title;
+    // Detect cross-channel routing intent before any other processing.
+    // "dame el clima y mándamelo por telegram" → strips the routing clause,
+    // runs normally, and the task.result payload carries the cross-channel target
+    // so CommunicationService can deliver a copy there.
+    const rawInput = task.description ?? task.title;
+    const crossChannel = this.extractCrossChannelTarget(rawInput);
+    const input = crossChannel ? this.stripCrossChannelClause(rawInput) : rawInput;
+    if (crossChannel) {
+      // Pre-flight: verify the target channel is actually configured before we commit.
+      const activeChannels = await this.comms.listActiveChannels(orgId).catch(() => ['dashboard'] as CommunicationChannel[]);
+      if (activeChannels.includes(crossChannel)) {
+        this.crossChannelCtx.set(taskId, { channel: crossChannel, userId: task.created_by });
+      } else {
+        // Channel not configured — inform the user via the originating channel and continue normally.
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        const availableList = activeChannels.filter((c) => c !== 'dashboard').join(', ') || 'ninguno configurado aún';
+        await this.deliver(orgId, taskId,
+          `⚠️ El canal **${crossChannel}** no está activo o no tienes una cuenta vinculada.\n\nCanales disponibles: ${availableList}.`,
+          'channel-check', 0);
+        return;
+      }
+    }
     const conversationContext = this.getConversationContext(task);
 
     // Fetch soul, schedule, patterns, and memory recall in parallel — none blocks response
@@ -245,6 +324,16 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         throw new Error('No pude generar la imagen con los proveedores configurados. Revisa las credenciales/modelos de imagen o intenta de nuevo si el proveedor esta saturado.');
       }
 
+      // ── Uber Web quote fast-path — browser profile, screenshot, no ride order ──
+      if (this.isUberBrowserQuoteRequest(input)) {
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        await this.say(orgId, taskId, 'Abro Uber Web solo para cotizar y te mando screenshot antes de cualquier acción.');
+        await this.log(orgId, taskId, 'uber quote request — opening Uber Web profile (quote-only)', 'tools');
+        await this.handleUberQuoteRequest(orgId, taskId, input, startedAt, conversationContext);
+        return;
+      }
+
       // ── WhatsApp Web fast-path — browser profile + QR handoff ─────────────
       // Runs before chat triage so short prompts like "abre watsap" never fall
       // into a generic model answer.
@@ -253,7 +342,36 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         await this.tasks.transition(taskId, orgId, 'running');
         await this.say(orgId, taskId, 'Abro WhatsApp Web con tu perfil local. Si falta login, te paso el QR.');
         await this.log(orgId, taskId, 'whatsapp request — opening WhatsApp Web profile', 'tools');
-        await this.handleWhatsAppRequest(orgId, taskId, input, startedAt, conversationContext);
+        await this.handleWhatsAppRequest(orgId, taskId, task, input, startedAt, conversationContext);
+        return;
+      }
+
+      // ── Scheduled jobs — create / list / manage recurring tasks ───────────
+      if (this.isScheduleIntent(input)) {
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        await this.handleScheduleIntent(orgId, taskId, task, input, startedAt);
+        return;
+      }
+
+      // ── Gmail / Calendar write operations — require human approval ─────────
+      // Must run BEFORE the email read fast-path to avoid treating writes as reads.
+      if (this.isGmailWriteIntent(input) || this.isCalendarWriteIntent(input)) {
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        if (BULK_GUARD_SIGNALS.test(input)) {
+          await this.deliver(orgId, taskId,
+            '🚫 No ejecuto operaciones masivas sobre correos ni eventos. Indícame exactamente el correo o evento específico y te pido confirmación antes de cualquier cambio.',
+            'safety', Date.now() - startedAt);
+          return;
+        }
+        if (this.isGmailWriteIntent(input)) {
+          await this.say(orgId, taskId, 'Preparo la operación y te pido confirmación antes de ejecutarla 🛡️');
+          await this.handleGmailWriteIntent(orgId, taskId, task, input, startedAt);
+        } else {
+          await this.say(orgId, taskId, 'Preparo el cambio en tu agenda y te pido confirmación 🗓️');
+          await this.handleCalendarWriteIntent(orgId, taskId, task, input, startedAt);
+        }
         return;
       }
 
@@ -516,12 +634,14 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
   /** Final answer event + completed transition with the result persisted. */
   private async deliver(orgId: string, taskId: string, text: string, model: string, latencyMs: number) {
-    await this.events.publish({
-      type: 'task.result',
-      orgId,
-      taskId,
-      payload: { text, model, latency_ms: latencyMs },
-    });
+    const cross = this.crossChannelCtx.get(taskId);
+    this.crossChannelCtx.delete(taskId); // clean up regardless of outcome
+    const payload: Record<string, unknown> = { text, model, latency_ms: latencyMs };
+    if (cross) {
+      payload['cross_channel_target'] = cross.channel;
+      payload['cross_channel_user_id'] = cross.userId;
+    }
+    await this.events.publish({ type: 'task.result', orgId, taskId, payload });
     await this.tasks.transition(taskId, orgId, 'completed', {
       result: { text, model, latency_ms: latencyMs },
     });
@@ -554,21 +674,55 @@ export class AgentRunnerService implements OnApplicationBootstrap {
   private async handleWhatsAppRequest(
     orgId: string,
     taskId: string,
+    task: Task,
     input: string,
     startedAt: number,
     conversationContext: ConversationContextTurn[],
   ): Promise<void> {
-    if (WHATSAPP_SEND_SIGNALS.test(input)) {
+    const wantsUnansweredStatus = WHATSAPP_UNANSWERED_SIGNALS.test(input);
+    if (WHATSAPP_SEND_SIGNALS.test(input) && !wantsUnansweredStatus) {
       const session = await this.whatsapp.startSession(orgId, taskId);
       await this.maybePublishWhatsAppQr(orgId, taskId, session.screenshot);
-      const text = session.state === 'qr_required'
-        ? 'Primero escanea el QR para vincular WhatsApp Web. Después podré preparar una respuesta, pero enviarla siempre pasará por Approval Engine.'
-        : 'WhatsApp Web está listo. Para responder necesito que me digas el contacto y el texto exacto; antes de enviarlo lo pasaré por Approval Engine.';
-      await this.deliver(orgId, taskId, text, 'whatsapp-web', Date.now() - startedAt);
+      if (session.state === 'qr_required') {
+        const text = 'Primero escanea el QR para vincular WhatsApp Web. Después podré preparar una respuesta; cualquier envío real tendrá que pasar por Approval Engine.';
+        await this.deliver(orgId, taskId, text, 'whatsapp-web', Date.now() - startedAt);
+        return;
+      }
+
+      const draft = this.extractWhatsAppDraft(input);
+      if (!draft) {
+        const text = 'WhatsApp Web está listo. Para responder necesito que me digas el contacto y el texto exacto; cualquier envío real tendrá que pasar por Approval Engine.';
+        await this.deliver(orgId, taskId, text, 'whatsapp-web', Date.now() - startedAt);
+        return;
+      }
+
+      const approval = await this.approvals.requestForPreparedAction({
+        orgId,
+        userId: task.created_by,
+        taskId,
+        actionType: 'whatsapp.message.send',
+        source: 'browser',
+        payload: {
+          session_id: session.session_id,
+          contact: draft.contact,
+          text: draft.text,
+        },
+        summary: `Enviar WhatsApp a ${draft.contact}: ${draft.text.slice(0, 160)}`,
+      });
+      const text = `Preparé el WhatsApp para **${draft.contact}** y lo dejé en Approvals. No se envía automáticamente. Hash: \`${approval.action_hash}\``;
+      await this.events.publish({
+        type: 'task.result',
+        orgId,
+        taskId,
+        payload: { text, model: 'whatsapp-web', latency_ms: Date.now() - startedAt },
+      });
+      await this.tasks.transition(taskId, orgId, 'waiting_for_approval', {
+        result: { text, model: 'whatsapp-web', approval_id: approval.id },
+      });
       return;
     }
 
-    const shouldRead = WHATSAPP_READ_SIGNALS.test(input);
+    const shouldRead = WHATSAPP_READ_SIGNALS.test(input) || wantsUnansweredStatus;
     if (!shouldRead) {
       const session = await this.whatsapp.startSession(orgId, taskId);
       await this.maybePublishWhatsAppQr(orgId, taskId, session.screenshot);
@@ -579,7 +733,11 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       return;
     }
 
-    const result = await this.whatsapp.fetchLatestMessage(orgId, taskId);
+    const result = wantsUnansweredStatus
+      ? await this.whatsapp.fetchUnansweredMessages(orgId, taskId)
+      : WHATSAPP_UNREAD_SIGNALS.test(input)
+        ? await this.whatsapp.fetchUnreadMessages(orgId, taskId)
+        : await this.whatsapp.fetchLatestMessage(orgId, taskId);
     await this.maybePublishWhatsAppQr(orgId, taskId, result.session.screenshot);
     await this.deliver(orgId, taskId, result.text, 'whatsapp-web', Date.now() - startedAt);
     await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
@@ -588,19 +746,160 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     }
   }
 
+  private async handleUberQuoteRequest(
+    orgId: string,
+    taskId: string,
+    input: string,
+    startedAt: number,
+    conversationContext: ConversationContextTurn[],
+  ): Promise<void> {
+    const route = await this.extractUberRoute(input, orgId);
+    const result = await this.uber.estimateRide(orgId, {
+      origin: route.origin,
+      destination: route.destination,
+      taskId,
+    });
+    await this.maybePublishBrowserScreenshot(orgId, taskId, result.session.screenshot, 'Uber Web');
+    await this.deliver(orgId, taskId, result.text, 'uber-web', Date.now() - startedAt);
+    await this.log(orgId, taskId, `Uber Web quote finished: ${result.reason}`, 'tools');
+    if (result.ok) {
+      this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: result.text, conversationContext });
+    }
+  }
+
+  private isUberBrowserQuoteRequest(input: string): boolean {
+    return UBER_SIGNALS.test(input)
+      && UBER_ESTIMATE_SIGNALS.test(input)
+      && !UBER_ORDER_SIGNALS.test(input);
+  }
+
+  private async extractUberRoute(input: string, orgId: string): Promise<{ origin: string; destination: string }> {
+    const patterns = [
+      /\b(?:de|desde)\s+(.+?)\s+(?:a|hasta|para)\s+(.+?)(?:\?|$|[.,])/i,
+      /\borigen[:\s]+(.+?)\s+destino[:\s]+(.+?)(?:\?|$|[.,])/i,
+      /\b(?:a|hasta|para)\s+(.+?)(?:\?|$|[.,])/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = input.match(pattern);
+      if (!match) continue;
+      const origin = match.length > 2 ? await this.normalizeUberPlace(match[1], orgId) : await this.defaultUberOrigin(orgId);
+      const destination = this.cleanUberPlace(match.length > 2 ? match[2] : match[1]);
+      if (origin && destination) return { origin, destination };
+    }
+
+    throw new MissingInformationError(
+      'Para cotizar Uber necesito origen y destino.',
+      {
+        form_key: 'uber.estimate_route',
+        title: 'Ruta para cotizar Uber',
+        description: 'Solo consultaré tarifas visibles y mandaré screenshot; no pediré ni confirmaré el viaje.',
+        fields: [
+          {
+            id: 'origin',
+            type: 'text',
+            label: 'Origen',
+            placeholder: 'Ej. Roma Norte, Ciudad de Mexico',
+            required: true,
+          },
+          {
+            id: 'destination',
+            type: 'text',
+            label: 'Destino',
+            placeholder: 'Ej. Aeropuerto Internacional de la Ciudad de Mexico',
+            required: true,
+          },
+        ],
+      },
+    );
+  }
+
+  private async normalizeUberPlace(value: string, orgId: string): Promise<string> {
+    const cleaned = this.cleanUberPlace(value);
+    if (!/\b(mi ubicaci[oó]n|ubicaci[oó]n actual|aqu[ií]|aqui|donde estoy|mi casa|casa)\b/i.test(cleaned)) return cleaned;
+    const profile = await this.soul.getPersonalProfile(orgId).catch(() => ({} as PersonalProfile));
+    const fallback = String(profile.current_location ?? profile.address ?? '').trim();
+    if (fallback) return fallback;
+    return cleaned;
+  }
+
+  private async defaultUberOrigin(orgId: string): Promise<string> {
+    const profile = await this.soul.getPersonalProfile(orgId).catch(() => ({} as PersonalProfile));
+    const origin = String(profile.current_location ?? profile.address ?? '').trim();
+    if (origin) return origin;
+    throw new MissingInformationError(
+      'Para cotizar Uber necesito tu origen.',
+      {
+        form_key: 'uber.estimate_origin',
+        title: 'Origen para cotizar Uber',
+        description: 'Guarda o escribe el origen para consultar tarifa visible.',
+        fields: [
+          {
+            id: 'origin',
+            type: 'text',
+            label: 'Origen',
+            placeholder: 'Ej. mi ubicacion actual o una direccion',
+            required: true,
+            profile_path: 'personal_profile.current_location',
+          },
+        ],
+      },
+    );
+  }
+
+  private cleanUberPlace(value: string): string {
+    return value
+      .replace(/\b(en|por)\s+uber\b/ig, '')
+      .replace(/\b(cu[aá]nto|cuanto|costo|costar|cuesta|sale|precio|tarifa|cotiza|cotizar|estimaci[oó]n|uber|taxi|viaje)\b/ig, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   private async maybePublishWhatsAppQr(orgId: string, taskId: string, screenshot?: { image_base64: string; mime_type: string }) {
+    await this.maybePublishBrowserScreenshot(orgId, taskId, screenshot, 'WhatsApp Web QR');
+  }
+
+  private async maybePublishBrowserScreenshot(orgId: string, taskId: string, screenshot: { image_base64: string; mime_type: string } | undefined, label: string) {
     if (!screenshot?.image_base64) return;
+    const contentType = screenshot.mime_type || 'image/png';
+    const url = await this.media.upload(
+      orgId,
+      taskId,
+      `${label.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'browser'}-screenshot.png`,
+      Buffer.from(screenshot.image_base64, 'base64'),
+      contentType,
+    );
+    if (!url) {
+      await this.log(orgId, taskId, `${label} screenshot upload failed`, 'tools');
+      return;
+    }
     await this.events.publish({
       type: 'task.media',
       orgId,
       taskId,
       payload: {
         kind: 'image',
-        url: `data:${screenshot.mime_type};base64,${screenshot.image_base64}`,
-        label: 'WhatsApp Web QR',
+        url,
+        label,
+        content_type: contentType,
       },
     });
-    await this.log(orgId, taskId, 'WhatsApp Web QR screenshot sent to the conversation', 'tools');
+    await this.log(orgId, taskId, `${label} screenshot uploaded and sent to the conversation`, 'tools');
+  }
+
+  private extractWhatsAppDraft(input: string): { contact: string; text: string } | null {
+    const patterns = [
+      /\b(?:responde|responder|contesta|contestar)\s+(?:por\s+)?(?:whatsapp|whatsap|watsapp|watsap|guasap|wa)?\s*(?:a\s+)?(.+?)\s+(?:que|:)\s+(.+)$/i,
+      /\b(?:env[ií]a|enviar|manda|mandar|escribe|escribir)\s+(?:un\s+)?(?:whatsapp|whatsap|watsapp|watsap|guasap|wa)?\s*(?:a\s+)?(.+?)\s+(?:que|:)\s+(.+)$/i,
+    ];
+    for (const pattern of patterns) {
+      const match = input.match(pattern);
+      if (!match) continue;
+      const contact = match[1].replace(/\b(por\s+)?(whatsapp|whatsap|watsapp|watsap|guasap|wa)\b/ig, '').trim();
+      const text = match[2].trim();
+      if (contact && text) return { contact, text };
+    }
+    return null;
   }
 
   private isPureImageRequest(input: string): boolean {
@@ -1125,6 +1424,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
   }
 
   private async failSafely(orgId: string, taskId: string, message: string) {
+    this.crossChannelCtx.delete(taskId); // prevent Map leaks on failure
     try {
       const current = await this.tasks.getTask(taskId, orgId);
       if (current.status === 'pending') await this.tasks.transition(taskId, orgId, 'planning');
@@ -1147,5 +1447,597 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     const m = input.match(/[uú]ltimos\s+(\d+)\s+(correos?|emails?|mails?)/i);
     if (m) return Math.min(parseInt(m[1], 10), 10);
     return 3;
+  }
+
+  // ── Gmail / Calendar write-intent detection ───────────────────────────────
+
+  private isGmailWriteIntent(input: string): boolean {
+    return (
+      GMAIL_SEND_SIGNALS.test(input)
+      || GMAIL_REPLY_SIGNALS.test(input)
+      || GMAIL_TRASH_SIGNALS.test(input)
+      || GMAIL_ARCHIVE_SIGNALS.test(input)
+      || GMAIL_MARK_READ_SIGNALS.test(input)
+      || GMAIL_MARK_UNREAD_SIGNALS.test(input)
+    );
+  }
+
+  private isCalendarWriteIntent(input: string): boolean {
+    return (
+      CALENDAR_CREATE_SIGNALS.test(input)
+      || CALENDAR_DELETE_SIGNALS.test(input)
+      || CALENDAR_UPDATE_SIGNALS.test(input)
+    );
+  }
+
+  // ── Cross-channel routing ─────────────────────────────────────────────────
+
+  private extractCrossChannelTarget(input: string): CommunicationChannel | null {
+    if (!CROSS_CHANNEL_SIGNALS.test(input)) return null;
+    if (/\btelegram\b/i.test(input)) return 'telegram';
+    return null;
+  }
+
+  /**
+   * Removes the cross-channel routing clause from the input so the model
+   * sees only the actual request ("dame el clima" not "dame el clima y mándamelo por telegram").
+   */
+  private stripCrossChannelClause(input: string): string {
+    return input
+      .replace(/[,;]?\s*\b(y\s+)?(mánda(me|lo|la|sela|selo)?|envía(me|lo|la)?|pása(me|lo|la)?|comparte(lo|la)?|por|v[ií]a|usando|a\s+trav[eé]s\s+de)\b.{0,30}\b(telegram)\b[^\n]*/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+      || input; // fallback: keep original if strip wiped everything
+  }
+
+  // ── Scheduled job intent detection ───────────────────────────────────────
+
+  private isScheduleIntent(input: string): boolean {
+    return (
+      MANERO_SIGNALS.test(input)
+      || SCHEDULE_LIST_SIGNALS.test(input)
+      || SCHEDULE_PAUSE_SIGNALS.test(input)
+      || SCHEDULE_CREATE_SIGNALS.test(input)
+    );
+  }
+
+  private async handleScheduleIntent(
+    orgId: string,
+    taskId: string,
+    task: Task,
+    input: string,
+    startedAt: number,
+  ): Promise<void> {
+    // Activate / reconfigure the mañanero
+    if (MANERO_SIGNALS.test(input)) {
+      const hourMatch = input.match(/\ba\s+las?\s+(\d{1,2})\b|\b(\d{1,2})[:\s]*(am|pm)?\b/i);
+      let hour: number | undefined;
+      if (hourMatch) {
+        const raw = parseInt(hourMatch[1] ?? hourMatch[2], 10);
+        const period = (hourMatch[3] ?? '').toLowerCase();
+        if (!Number.isNaN(raw)) {
+          hour = period === 'pm' && raw < 12 ? raw + 12 : raw;
+        }
+      }
+      const job = await this.scheduledJobs.activateManero(orgId, task.created_by, hour);
+      const summary = this.scheduledJobs.describeSchedule(job);
+      await this.deliver(orgId, taskId,
+        `✅ Mañanero activado. ${summary}\n\nCada mañana te daré: clima del día, correos importantes y tu agenda.`,
+        'jobs', Date.now() - startedAt);
+      return;
+    }
+
+    // List scheduled jobs
+    if (SCHEDULE_LIST_SIGNALS.test(input)) {
+      const jobs = await this.scheduledJobs.list(orgId);
+      if (jobs.length === 0) {
+        await this.deliver(orgId, taskId,
+          '📋 No tienes tareas programadas aún. Puedes activar el **mañanero** diciendo "activa el mañanero" o pedirme que programe algo.',
+          'jobs', Date.now() - startedAt);
+        return;
+      }
+      const lines = jobs.map(j => {
+        const status = j.status === 'active' ? '🟢' : j.status === 'paused' ? '⏸️' : '✅';
+        const schedule = this.scheduledJobs.describeSchedule(j);
+        return `${status} **${j.name}** — ${schedule}`;
+      });
+      await this.deliver(orgId, taskId,
+        `📋 Tus tareas programadas (${jobs.length}):\n\n${lines.join('\n')}`,
+        'jobs', Date.now() - startedAt);
+      return;
+    }
+
+    // Pause a job
+    if (SCHEDULE_PAUSE_SIGNALS.test(input)) {
+      const jobs = await this.scheduledJobs.list(orgId);
+      const activeJobs = jobs.filter(j => j.status === 'active');
+      if (activeJobs.length === 0) {
+        await this.deliver(orgId, taskId, '⏸️ No tienes tareas activas para pausar.', 'jobs', Date.now() - startedAt);
+        return;
+      }
+      // If only one active job, pause it directly
+      if (activeJobs.length === 1) {
+        await this.scheduledJobs.pause(activeJobs[0].id, orgId);
+        await this.deliver(orgId, taskId,
+          `⏸️ Tarea **"${activeJobs[0].name}"** pausada. Di "reactiva mis jobs" para reanudarla.`,
+          'jobs', Date.now() - startedAt);
+        return;
+      }
+      // Multiple jobs — pause mañanero/briefing first, otherwise ask
+      const briefing = activeJobs.find(j => j.job_type === 'briefing');
+      if (briefing) {
+        await this.scheduledJobs.pause(briefing.id, orgId);
+        await this.deliver(orgId, taskId,
+          `⏸️ Tarea **"${briefing.name}"** pausada. Tienes ${activeJobs.length - 1} tarea(s) activa(s) más.`,
+          'jobs', Date.now() - startedAt);
+        return;
+      }
+      const list = activeJobs.map((j, i) => `${i + 1}. **${j.name}**`).join('\n');
+      await this.deliver(orgId, taskId,
+        `⏸️ ¿Cuál tarea quieres pausar?\n\n${list}\n\nDime el nombre o número.`,
+        'jobs', Date.now() - startedAt);
+      return;
+    }
+
+    // Generic schedule creation
+    if (SCHEDULE_CREATE_SIGNALS.test(input)) {
+      const { job, summary } = await this.scheduledJobs.createFromNl(input, orgId, task.created_by);
+      await this.deliver(orgId, taskId,
+        `✅ Tarea programada creada. ${summary}\n\n_ID: \`${job.id.slice(0, 8)}…\`_`,
+        'jobs', Date.now() - startedAt);
+      return;
+    }
+
+    // Fallback — should not reach here
+    await this.deliver(orgId, taskId, 'No entendí qué quieres programar. ¿Puedes darme más detalles?', 'jobs', Date.now() - startedAt);
+  }
+
+  // ── Gmail write handlers ──────────────────────────────────────────────────
+
+  private async handleGmailWriteIntent(
+    orgId: string,
+    taskId: string,
+    task: Task,
+    input: string,
+    startedAt: number,
+  ): Promise<void> {
+    if (GMAIL_TRASH_SIGNALS.test(input)) {
+      await this.handleGmailSingleMessageOp(orgId, taskId, task, input, startedAt, 'gmail.trash', '🗑️ Listo para mover a la papelera');
+    } else if (GMAIL_ARCHIVE_SIGNALS.test(input)) {
+      await this.handleGmailSingleMessageOp(orgId, taskId, task, input, startedAt, 'gmail.archive', '📦 Listo para archivar');
+    } else if (GMAIL_REPLY_SIGNALS.test(input)) {
+      await this.handleGmailReplyRequest(orgId, taskId, task, input, startedAt);
+    } else if (GMAIL_MARK_READ_SIGNALS.test(input)) {
+      await this.handleGmailSingleMessageOp(orgId, taskId, task, input, startedAt, 'gmail.mark_read', '✅ Listo para marcar como leído');
+    } else if (GMAIL_MARK_UNREAD_SIGNALS.test(input)) {
+      await this.handleGmailSingleMessageOp(orgId, taskId, task, input, startedAt, 'gmail.mark_unread', '✅ Listo para marcar como no leído');
+    } else {
+      await this.handleGmailSendRequest(orgId, taskId, task, input, startedAt);
+    }
+  }
+
+  private async handleGmailSendRequest(
+    orgId: string,
+    taskId: string,
+    task: Task,
+    input: string,
+    startedAt: number,
+  ): Promise<void> {
+    const params = this.extractEmailSendParams(input);
+    if (!params.to || !params.body) {
+      throw new MissingInformationError(
+        'Para enviar el correo necesito el destinatario y el mensaje.',
+        {
+          form_key: 'gmail.send',
+          title: 'Enviar correo',
+          description: 'Revisa los datos antes de que te pida confirmación.',
+          fields: [
+            ...(!params.to ? [{ id: 'to', type: 'text' as const, label: 'Destinatario (email)', required: true }] : []),
+            ...(!params.body ? [{ id: 'body', type: 'text' as const, label: 'Mensaje', required: true }] : []),
+          ],
+        },
+      );
+    }
+    const subject = params.subject ?? 'Mensaje de EVA';
+    const preview = `**Para:** ${params.to}\n**Asunto:** ${subject}\n\n${params.body}`;
+    const approval = await this.approvals.requestForPreparedAction({
+      orgId,
+      userId: task.created_by,
+      taskId,
+      actionType: 'gmail.send',
+      payload: { to: params.to, subject, body: params.body },
+      summary: `Enviar correo a ${params.to}: ${subject}`,
+    });
+    const text = `📧 Borrador listo. Revísalo y aprueba en el dashboard o escribe "aprobar":\n\n${preview}\n\n_Hash: \`${approval.action_hash.slice(0, 12)}…\`_`;
+    await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'gmail-write', latency_ms: Date.now() - startedAt } });
+    await this.tasks.transition(taskId, orgId, 'waiting_for_approval', { result: { text, model: 'gmail-write', approval_id: approval.id } });
+  }
+
+  private async handleGmailReplyRequest(
+    orgId: string,
+    taskId: string,
+    task: Task,
+    input: string,
+    startedAt: number,
+  ): Promise<void> {
+    const searchQuery = this.extractEmailSearch(input);
+    const body = this.extractReplyBody(input);
+    if (!searchQuery || !body) {
+      throw new MissingInformationError(
+        'Para responder necesito identificar el correo y el texto de la respuesta.',
+        {
+          form_key: 'gmail.reply',
+          title: 'Responder correo',
+          description: 'Indica el remitente/asunto y el texto de tu respuesta.',
+          fields: [
+            { id: 'search_query', type: 'text' as const, label: 'Remitente o asunto del correo original', required: true },
+            { id: 'body', type: 'text' as const, label: 'Tu respuesta', required: true },
+          ],
+        },
+      );
+    }
+    const messages = await this.gmail.findMessages(orgId, searchQuery, 1);
+    if (messages.length === 0) {
+      await this.deliver(orgId, taskId, `📬 No encontré el correo al que quieres responder. Intenta ser más específico.`, 'gmail-write', Date.now() - startedAt);
+      return;
+    }
+    const msg = messages[0];
+    const preview = `**Respondiendo a:** ${msg.from}\n**Asunto:** ${msg.subject}\n\n**Tu respuesta:** ${body}`;
+    const approval = await this.approvals.requestForPreparedAction({
+      orgId,
+      userId: task.created_by,
+      taskId,
+      actionType: 'gmail.reply',
+      payload: { message_id: msg.id, body },
+      summary: `Responder a ${msg.from}: ${msg.subject}`,
+    });
+    const text = `📧 Respuesta lista para aprobar:\n\n${preview}\n\n_Hash: \`${approval.action_hash.slice(0, 12)}…\`_`;
+    await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'gmail-write', latency_ms: Date.now() - startedAt } });
+    await this.tasks.transition(taskId, orgId, 'waiting_for_approval', { result: { text, model: 'gmail-write', approval_id: approval.id } });
+  }
+
+  private async handleGmailSingleMessageOp(
+    orgId: string,
+    taskId: string,
+    task: Task,
+    input: string,
+    startedAt: number,
+    actionType: string,
+    opLabel: string,
+  ): Promise<void> {
+    const searchQuery = this.extractEmailSearch(input) ?? this.extractTrashTarget(input);
+    if (!searchQuery) {
+      await this.deliver(orgId, taskId, '¿Cuál correo? Descríbelo por remitente o asunto para que pueda identificarlo.', 'gmail-write', Date.now() - startedAt);
+      return;
+    }
+    const messages = await this.gmail.findMessages(orgId, searchQuery, 1);
+    if (messages.length === 0) {
+      await this.deliver(orgId, taskId, `📬 No encontré ese correo. Intenta describirlo de otra forma.`, 'gmail-write', Date.now() - startedAt);
+      return;
+    }
+    const msg = messages[0];
+    const date = msg.date ? ` (${this.relativeEmailDate(msg.date)})` : '';
+    const preview = `**De:** ${msg.from}\n**Asunto:** ${msg.subject || '(sin asunto)'}${date}\n${msg.snippet ? `_${msg.snippet.slice(0, 100)}_` : ''}`;
+    const approval = await this.approvals.requestForPreparedAction({
+      orgId,
+      userId: task.created_by,
+      taskId,
+      actionType,
+      payload: { message_id: msg.id, summary: `${msg.subject} — ${msg.from}` },
+      summary: `${opLabel}: ${msg.subject} — ${msg.from}`,
+    });
+    const text = `${opLabel}:\n\n${preview}\n\nAprueba en el dashboard para confirmar. _Hash: \`${approval.action_hash.slice(0, 12)}…\`_`;
+    await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'gmail-write', latency_ms: Date.now() - startedAt } });
+    await this.tasks.transition(taskId, orgId, 'waiting_for_approval', { result: { text, model: 'gmail-write', approval_id: approval.id } });
+  }
+
+  // ── Calendar write handlers ───────────────────────────────────────────────
+
+  private async handleCalendarWriteIntent(
+    orgId: string,
+    taskId: string,
+    task: Task,
+    input: string,
+    startedAt: number,
+  ): Promise<void> {
+    if (CALENDAR_DELETE_SIGNALS.test(input)) {
+      await this.handleCalendarDeleteRequest(orgId, taskId, task, input, startedAt);
+    } else if (CALENDAR_UPDATE_SIGNALS.test(input)) {
+      await this.handleCalendarUpdateRequest(orgId, taskId, task, input, startedAt);
+    } else {
+      await this.handleCalendarCreateRequest(orgId, taskId, task, input, startedAt);
+    }
+  }
+
+  private async handleCalendarCreateRequest(
+    orgId: string,
+    taskId: string,
+    task: Task,
+    input: string,
+    startedAt: number,
+  ): Promise<void> {
+    const eventInput = this.extractCalendarCreateParams(input);
+    if (!eventInput) {
+      throw new MissingInformationError(
+        'Para crear el evento necesito el título, fecha y hora.',
+        {
+          form_key: 'calendar.create',
+          title: 'Nuevo evento de calendario',
+          description: 'Completa los datos del evento antes de que te pida confirmación.',
+          fields: [
+            { id: 'summary', type: 'text' as const, label: 'Título del evento', required: true },
+            { id: 'start', type: 'text' as const, label: 'Fecha y hora de inicio (ej. 2026-06-15T10:00:00)', required: true },
+            { id: 'end', type: 'text' as const, label: 'Fecha y hora de fin', required: true },
+          ],
+        },
+      );
+    }
+    const preview = [
+      `**Evento:** ${eventInput.summary}`,
+      `**Inicio:** ${eventInput.startDateTime}`,
+      `**Fin:** ${eventInput.endDateTime}`,
+      eventInput.description ? `**Descripción:** ${eventInput.description}` : '',
+      eventInput.attendees?.length ? `**Invitados:** ${eventInput.attendees.join(', ')}` : '',
+    ].filter(Boolean).join('\n');
+    const approval = await this.approvals.requestForPreparedAction({
+      orgId,
+      userId: task.created_by,
+      taskId,
+      actionType: 'calendar.create',
+      payload: eventInput as unknown as Record<string, unknown>,
+      summary: `Crear evento: ${eventInput.summary} el ${eventInput.startDateTime}`,
+    });
+    const text = `🗓️ Evento listo para crear. Aprueba para confirmarlo:\n\n${preview}\n\n_Hash: \`${approval.action_hash.slice(0, 12)}…\`_`;
+    await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'calendar-write', latency_ms: Date.now() - startedAt } });
+    await this.tasks.transition(taskId, orgId, 'waiting_for_approval', { result: { text, model: 'calendar-write', approval_id: approval.id } });
+  }
+
+  private async handleCalendarDeleteRequest(
+    orgId: string,
+    taskId: string,
+    task: Task,
+    input: string,
+    startedAt: number,
+  ): Promise<void> {
+    const title = this.extractCalendarEventTitle(input);
+    if (!title) {
+      await this.deliver(orgId, taskId, '¿Qué evento quieres cancelar? Dime el nombre exacto o la fecha para identificarlo.', 'calendar-write', Date.now() - startedAt);
+      return;
+    }
+    const events = await this.calendar.getUpcomingEvents(orgId, 30);
+    const target = events.find(e =>
+      e.summary.toLowerCase().includes(title.toLowerCase())
+      || title.toLowerCase().includes(e.summary.toLowerCase()),
+    );
+    if (!target) {
+      await this.deliver(orgId, taskId, `🗓️ No encontré ningún evento próximo llamado _${title}_. Verifica el nombre o la fecha.`, 'calendar-write', Date.now() - startedAt);
+      return;
+    }
+    const dt = new Date(target.start);
+    const dateLabel = dt.toLocaleString('es-MX', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const preview = `**${target.summary}** — ${dateLabel}${target.location ? ` @ ${target.location}` : ''}`;
+    const approval = await this.approvals.requestForPreparedAction({
+      orgId,
+      userId: task.created_by,
+      taskId,
+      actionType: 'calendar.delete',
+      payload: { event_id: target.id, summary: target.summary },
+      summary: `Eliminar evento: ${target.summary}`,
+    });
+    const text = `🗓️ Listo para eliminar este evento:\n\n${preview}\n\nAprueba en el dashboard. _Hash: \`${approval.action_hash.slice(0, 12)}…\`_`;
+    await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'calendar-write', latency_ms: Date.now() - startedAt } });
+    await this.tasks.transition(taskId, orgId, 'waiting_for_approval', { result: { text, model: 'calendar-write', approval_id: approval.id } });
+  }
+
+  private async handleCalendarUpdateRequest(
+    orgId: string,
+    taskId: string,
+    task: Task,
+    input: string,
+    startedAt: number,
+  ): Promise<void> {
+    // Calendar update requires finding the event and a new time — use form for now.
+    throw new MissingInformationError(
+      'Para modificar el evento necesito saber cuál evento y cuál es el nuevo horario.',
+      {
+        form_key: 'calendar.update',
+        title: 'Modificar evento de calendario',
+        description: 'Indica el evento y los nuevos datos.',
+        fields: [
+          { id: 'event_title', type: 'text' as const, label: 'Nombre del evento a modificar', required: true },
+          { id: 'new_start', type: 'text' as const, label: 'Nueva fecha y hora de inicio', required: true },
+          { id: 'new_end', type: 'text' as const, label: 'Nueva fecha y hora de fin', required: true },
+        ],
+      },
+    );
+  }
+
+  // ── executeApprovedAction — closes the approval → execute loop ────────────
+
+  private async executeApprovedAction(orgId: string, taskId: string, approvalId: string): Promise<void> {
+    const startedAt = Date.now();
+    let approval;
+    try {
+      approval = await this.approvals.consumeApproved(approvalId, orgId);
+    } catch (err) {
+      await this.log(orgId, taskId, `executeApprovedAction: could not consume approval ${approvalId}: ${(err as Error).message}`, 'approval');
+      return;
+    }
+
+    const { action_type: actionType, payload } = approval;
+    await this.log(orgId, taskId, `executing approved action: ${actionType}`, 'approval');
+
+    let resultText: string;
+
+    try {
+      switch (actionType) {
+        case 'gmail.send': {
+          const r = await this.gmail.sendEmail(orgId, String(payload.to), String(payload.subject), String(payload.body));
+          resultText = r.ok
+            ? `✅ Correo enviado a **${payload.to}**.`
+            : `❌ No pude enviar el correo: ${r.error ?? r.reason}`;
+          break;
+        }
+        case 'gmail.reply': {
+          const r = await this.gmail.replyToEmail(orgId, String(payload.message_id), String(payload.body));
+          resultText = r.ok
+            ? '✅ Respuesta enviada.'
+            : `❌ No pude enviar la respuesta: ${r.error ?? r.reason}`;
+          break;
+        }
+        case 'gmail.trash': {
+          const r = await this.gmail.trashEmail(orgId, String(payload.message_id));
+          resultText = r.ok
+            ? `✅ Correo movido a la papelera.`
+            : `❌ No pude mover el correo a la papelera: ${r.error ?? r.reason}`;
+          break;
+        }
+        case 'gmail.archive': {
+          const r = await this.gmail.archiveEmail(orgId, String(payload.message_id));
+          resultText = r.ok
+            ? '✅ Correo archivado (removido del inbox).'
+            : `❌ No pude archivar el correo: ${r.error ?? r.reason}`;
+          break;
+        }
+        case 'gmail.mark_read': {
+          const r = await this.gmail.markRead(orgId, String(payload.message_id));
+          resultText = r.ok ? '✅ Correo marcado como leído.' : `❌ ${r.error ?? r.reason}`;
+          break;
+        }
+        case 'gmail.mark_unread': {
+          const r = await this.gmail.markUnread(orgId, String(payload.message_id));
+          resultText = r.ok ? '✅ Correo marcado como no leído.' : `❌ ${r.error ?? r.reason}`;
+          break;
+        }
+        case 'calendar.create': {
+          const eventInput = payload as unknown as Parameters<typeof this.calendar.createEvent>[1];
+          const created = await this.calendar.createEvent(orgId, eventInput);
+          resultText = created
+            ? `✅ Evento **${created.summary}** creado en tu calendario.`
+            : '❌ No pude crear el evento. Verifica que tu integración de Google Calendar tenga el scope de escritura.';
+          break;
+        }
+        case 'calendar.delete': {
+          const r = await this.calendar.deleteEvent(orgId, String(payload.event_id));
+          resultText = r.ok
+            ? `✅ Evento eliminado de tu calendario.`
+            : `❌ No pude eliminar el evento: ${r.error}`;
+          break;
+        }
+        default:
+          await this.log(orgId, taskId, `executeApprovedAction: unknown action_type "${actionType}"`, 'approval');
+          return;
+      }
+    } catch (err) {
+      resultText = `❌ Error ejecutando la acción aprobada: ${(err as Error).message}`;
+      await this.log(orgId, taskId, `executeApprovedAction error: ${(err as Error).message}`, 'approval');
+    }
+
+    await this.deliver(orgId, taskId, resultText, 'approved-action', Date.now() - startedAt);
+    await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+  }
+
+  // ── NL extraction helpers for write operations ────────────────────────────
+
+  private extractEmailSendParams(input: string): { to: string | null; subject: string | null; body: string | null } {
+    const toMatch = input.match(/\b(?:a|para)\s+([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})/i);
+    const to = toMatch ? toMatch[1] : null;
+    const subjectMatch = input.match(/\bcon\s+asunto\s+["']?([^"'\n.,?]{2,60})["']?/i);
+    const subject = subjectMatch ? subjectMatch[1].trim() : null;
+    const bodyPatterns: RegExp[] = [
+      /\b(?:diciendo(le)?|que\s+diga|el\s+texto|el\s+mensaje|mensaje\s*:)\s+["']?(.{10,500})["']?$/is,
+      /\bque\s+["'](.{10,500})["']$/is,
+    ];
+    let body: string | null = null;
+    for (const pattern of bodyPatterns) {
+      const m = input.match(pattern);
+      if (m) { body = (m[2] ?? m[1]).trim(); break; }
+    }
+    return { to, subject, body };
+  }
+
+  private extractReplyBody(input: string): string | null {
+    const patterns: RegExp[] = [
+      /\b(?:diciendo(le)?|que\s+diga|respondiendo?|contestando?)\s+(?:que\s+)?["']?(.{5,500})["']?$/is,
+      /\bque\s+["'](.{5,500})["']$/is,
+    ];
+    for (const pattern of patterns) {
+      const m = input.match(pattern);
+      if (m) return (m[2] ?? m[1]).trim();
+    }
+    return null;
+  }
+
+  private extractTrashTarget(input: string): string | null {
+    const m = input.match(/\b(?:el|la|los|las)?\s*(?:correo|email|mail)\s+(?:de|del|sobre|con asunto)\s+([^?,.\n]{2,40}?)(?:\?|$|[.,])/i);
+    return m ? m[1].trim() : null;
+  }
+
+  private extractCalendarCreateParams(input: string): CreateEventInput | null {
+    // Require a date/time signal to be present before attempting to parse
+    if (!/\b(\d{1,2}(:\d{2})?|\d{4}-\d{2}-\d{2}|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|ma[nñ]ana|hoy|pr[oó]ximo|siguiente)\b/i.test(input)) {
+      return null;
+    }
+    // Extract title — what comes after create verbs
+    const titleMatch = input.match(
+      /\b(?:crea[r]?|agenda[r]?|programa[r]?|añade[r]?|agrega[r]?)\s+(?:una?\s+)?(?:cita|reuni[oó]n|evento|meeting)?\s*(?:llamad[ao]|con nombre|titulad[ao])?\s*["']?([^"'\n.,?]{3,60})["']?/i,
+    );
+    const title = titleMatch ? titleMatch[1].trim() : null;
+    if (!title) return null;
+
+    // Extract time
+    const timeMatch = input.match(/\ba\s+las?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?/i);
+    const hour = timeMatch ? parseInt(timeMatch[1], 10) + (timeMatch[3]?.toLowerCase().startsWith('p') && parseInt(timeMatch[1], 10) < 12 ? 12 : 0) : 10;
+    const minute = timeMatch ? parseInt(timeMatch[2] ?? '0', 10) : 0;
+
+    // Extract date — try ISO first, then relative
+    let dateStr = new Date().toISOString().slice(0, 10);
+    const isoMatch = input.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+    if (isoMatch) {
+      dateStr = isoMatch[1];
+    } else if (/\bma[nñ]ana\b/i.test(input)) {
+      dateStr = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    }
+    // Weekday matching: advance to the next occurrence
+    const weekdayMap: Record<string, number> = {
+      lunes: 1, martes: 2, 'miercoles': 3, 'miércoles': 3,
+      jueves: 4, viernes: 5, sabado: 6, sábado: 6, domingo: 0,
+    };
+    const weekdayMatch = input.match(/\b(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b/i);
+    if (weekdayMatch) {
+      const targetDay = weekdayMap[weekdayMatch[1].toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')] ?? null;
+      if (targetDay !== null) {
+        const d = new Date();
+        while (d.getDay() !== targetDay) d.setDate(d.getDate() + 1);
+        dateStr = d.toISOString().slice(0, 10);
+      }
+    }
+
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const startDateTime = `${dateStr}T${pad(hour)}:${pad(minute)}:00`;
+    const endDateTime = `${dateStr}T${pad(hour + 1)}:${pad(minute)}:00`;
+
+    return { summary: title, startDateTime, endDateTime };
+  }
+
+  private extractCalendarEventTitle(input: string): string | null {
+    const m = input.match(
+      /\b(?:cancela[r]?|elimina[r]?|borra[r]?|quita[r]?)\s+(?:la?\s+|el\s+)?(?:cita|evento|reuni[oó]n|meeting|compromiso)?\s*(?:de|del|llamad[ao]|titulad[ao])?\s*["']?([^"'\n.,?]{2,60})["']?/i,
+    );
+    return m ? m[1].trim() : null;
+  }
+
+  private relativeEmailDate(dateStr: string): string {
+    if (!dateStr) return '';
+    try {
+      const dt = new Date(dateStr);
+      const diffD = Math.floor((Date.now() - dt.getTime()) / 86_400_000);
+      if (diffD === 0) return 'hoy';
+      if (diffD === 1) return 'ayer';
+      if (diffD < 7) return `hace ${diffD} días`;
+      return dt.toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
+    } catch {
+      return dateStr;
+    }
   }
 }

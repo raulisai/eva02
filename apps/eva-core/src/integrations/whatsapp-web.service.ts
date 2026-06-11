@@ -22,12 +22,129 @@ export interface WhatsAppChatPreview {
   preview: string;
   time?: string;
   unread_count?: number;
+  latest_from_me?: boolean;
   raw_lines: string[];
+}
+
+export interface WhatsAppChatRowSnapshot {
+  lines: string[];
+  titles: string[];
+  aria_labels: string[];
+  text?: string;
 }
 
 export type WhatsAppLatestResult =
   | { ok: true; session: WhatsAppSessionStatus; latest: WhatsAppChatPreview; text: string }
   | { ok: false; reason: 'qr_required' | 'loading' | 'empty' | 'unknown'; session: WhatsAppSessionStatus; text: string };
+
+export type WhatsAppUnreadResult =
+  | { ok: true; session: WhatsAppSessionStatus; unread: WhatsAppChatPreview[]; text: string }
+  | { ok: false; reason: 'qr_required' | 'loading' | 'unknown'; session: WhatsAppSessionStatus; unread: []; text: string };
+
+export type WhatsAppUnansweredResult =
+  | {
+    ok: true;
+    session: WhatsAppSessionStatus;
+    pending: WhatsAppChatPreview[];
+    answered: WhatsAppChatPreview[];
+    text: string;
+  }
+  | {
+    ok: false;
+    reason: 'qr_required' | 'loading' | 'unknown';
+    session: WhatsAppSessionStatus;
+    pending: [];
+    answered: [];
+    text: string;
+  };
+
+const normalizeWhatsAppText = (value: string) => value.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
+const uniqueWhatsAppTexts = (values: Array<string | null | undefined>) => {
+  const seen = new Set<string>();
+  return values
+    .map((value) => normalizeWhatsAppText(String(value ?? '')))
+    .filter(Boolean)
+    .filter((value) => {
+      const key = value.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+const isWhatsAppNoise = (line: string) =>
+  /^(chats?|chat list|lista de chats|archivados?|archived|comunidades|communities|estados?|status|canales|channels|nuevo chat|new chat|buscar|search)$/i.test(line);
+const isWhatsAppBadge = (line: string) => /^\d{1,3}$/.test(line);
+const isWhatsAppUnreadLabel = (line: string) =>
+  /^(?:\d{1,3}\s+)?(?:unread messages?|mensajes? sin leer)$/i.test(line);
+const isWhatsAppSenderMarker = (line: string) => /^(?:\(you\)|you|t[uú]|yo|me|usted|vos):?$/i.test(line);
+const hasWhatsAppOutgoingMarker = (line: string) =>
+  isWhatsAppSenderMarker(line) || /^(?:\(you\)|you|t[uú]|yo)\s*:?\s+\S/i.test(line);
+const isWhatsAppTimeLine = (line: string) =>
+  /^(?:\d{1,2}:\d{2}(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?|am|pm))?|ayer|yesterday|hoy|today|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)$/i.test(line);
+
+function isLikelyWhatsAppChatName(line: string): boolean {
+  if (!line || line.length > 90) return false;
+  if (isWhatsAppNoise(line) || isWhatsAppBadge(line) || isWhatsAppTimeLine(line)) return false;
+  if (isWhatsAppUnreadLabel(line) || isWhatsAppSenderMarker(line)) return false;
+  if (/\b(unread messages?|mensajes? sin leer|typing|escribiendo|online|en l[ií]nea)\b/i.test(line)) return false;
+  return true;
+}
+
+function parseUnreadCount(values: string[]): number | undefined {
+  for (const value of values) {
+    const match = value.match(/\b(\d{1,3})\s+(?:unread messages?|mensajes? sin leer)\b/i);
+    if (match) return Number(match[1]);
+  }
+  const badge = values.find((value) => isWhatsAppBadge(value));
+  return badge ? Number(badge) : undefined;
+}
+
+function cleanPreviewCandidate(value: string): string {
+  return normalizeWhatsAppText(value)
+    .replace(/^(?:\(you\)|you|t[uú]|yo|me)\s*:?\s*/i, '')
+    .trim();
+}
+
+export function parseWhatsAppChatRows(rows: WhatsAppChatRowSnapshot[]): WhatsAppChatPreview[] {
+  return rows
+    .map((row): WhatsAppChatPreview | null => {
+      const lines = uniqueWhatsAppTexts(row.lines);
+      const titles = uniqueWhatsAppTexts(row.titles);
+      const ariaLabels = uniqueWhatsAppTexts(row.aria_labels);
+      const allSignals = uniqueWhatsAppTexts([...titles, ...lines, ...ariaLabels, row.text]);
+      const chatName = titles.find(isLikelyWhatsAppChatName) ?? lines.find(isLikelyWhatsAppChatName);
+      if (!chatName) return null;
+
+      const time = [...lines, ...titles].find(isWhatsAppTimeLine);
+      const unreadCount = parseUnreadCount(allSignals);
+      const latestFromMe = uniqueWhatsAppTexts([...lines, ...titles, ...ariaLabels])
+        .some(hasWhatsAppOutgoingMarker);
+      const chatKey = chatName.toLowerCase();
+      const timeKey = time?.toLowerCase();
+      const preview = uniqueWhatsAppTexts([...lines, ...titles])
+        .map(cleanPreviewCandidate)
+        .filter((line) => {
+          const key = line.toLowerCase();
+          if (!line || key === chatKey || key === timeKey) return false;
+          if (isWhatsAppNoise(line) || isWhatsAppBadge(line) || isWhatsAppTimeLine(line)) return false;
+          if (isWhatsAppUnreadLabel(line) || isWhatsAppSenderMarker(line)) return false;
+          return true;
+        })
+        .reverse()[0];
+
+      if (!preview && !unreadCount) return null;
+      const chat: WhatsAppChatPreview = {
+        chat_name: chatName,
+        preview: preview ?? 'Vista previa no disponible en la lista visible',
+        latest_from_me: latestFromMe,
+        raw_lines: lines.slice(0, 10),
+      };
+      if (time) chat.time = time;
+      if (unreadCount) chat.unread_count = unreadCount;
+      return chat;
+    })
+    .filter((chat): chat is WhatsAppChatPreview => chat !== null);
+}
 
 @Injectable()
 export class WhatsAppWebService {
@@ -62,13 +179,26 @@ export class WhatsAppWebService {
       };
     }
 
-    const screenshot = await this.browser.screenshot(opened.id, orgId);
+    const screenshot = await this.captureQrScreenshot(opened.id, orgId, taskId);
     return {
       session_id: opened.id,
       state,
       current_url: opened.current_url,
       title: opened.title,
       screenshot,
+    };
+  }
+
+  async validateSession(orgId: string, taskId?: string): Promise<WhatsAppSessionStatus> {
+    return this.startSession(orgId, taskId);
+  }
+
+  async captureSessionScreenshot(orgId: string, taskId?: string): Promise<WhatsAppSessionStatus> {
+    const session = await this.startSession(orgId, taskId);
+    if (session.state !== 'logged_in') return session;
+    return {
+      ...session,
+      screenshot: await this.browser.screenshot(session.session_id, orgId),
     };
   }
 
@@ -117,6 +247,86 @@ export class WhatsAppWebService {
     };
   }
 
+  async fetchUnreadMessages(orgId: string, taskId?: string): Promise<WhatsAppUnreadResult> {
+    const session = await this.startSession(orgId, taskId);
+
+    if (session.state === 'qr_required') {
+      return {
+        ok: false,
+        reason: 'qr_required',
+        session,
+        unread: [],
+        text:
+          'Abrí WhatsApp Web, pero falta vincular la sesión. Escanea el QR con tu teléfono; '
+          + 'cuando termine, vuelve a pedirme los mensajes sin leer.',
+      };
+    }
+
+    if (session.state !== 'logged_in') {
+      return {
+        ok: false,
+        reason: session.state === 'loading' ? 'loading' : 'unknown',
+        session,
+        unread: [],
+        text:
+          'WhatsApp Web abrió, pero todavía no pude confirmar que la sesión esté lista. '
+          + 'Espera unos segundos e inténtalo de nuevo.',
+      };
+    }
+
+    const unread = (await this.extractVisibleChats(session.session_id, orgId))
+      .filter((chat) => (chat.unread_count ?? 0) > 0);
+
+    return {
+      ok: true,
+      session,
+      unread,
+      text: this.formatUnread(unread),
+    };
+  }
+
+  async fetchUnansweredMessages(orgId: string, taskId?: string): Promise<WhatsAppUnansweredResult> {
+    const session = await this.startSession(orgId, taskId);
+
+    if (session.state === 'qr_required') {
+      return {
+        ok: false,
+        reason: 'qr_required',
+        session,
+        pending: [],
+        answered: [],
+        text:
+          'Abrí WhatsApp Web, pero falta vincular la sesión. Escanea el QR con tu teléfono; '
+          + 'cuando termine, vuelve a pedirme los mensajes sin responder.',
+      };
+    }
+
+    if (session.state !== 'logged_in') {
+      return {
+        ok: false,
+        reason: session.state === 'loading' ? 'loading' : 'unknown',
+        session,
+        pending: [],
+        answered: [],
+        text:
+          'WhatsApp Web abrió, pero todavía no pude confirmar que la sesión esté lista. '
+          + 'Espera unos segundos e inténtalo de nuevo.',
+      };
+    }
+
+    const chats = await this.extractVisibleChats(session.session_id, orgId);
+    const pending = chats.filter((chat) => !chat.latest_from_me);
+    const answered = chats.filter((chat) => chat.latest_from_me);
+
+    return {
+      ok: true,
+      session,
+      pending,
+      answered,
+      text: this.formatUnanswered(pending, answered),
+    };
+  }
+
   private settleMs(): number {
     const configured = Number(process.env.WHATSAPP_WEB_SETTLE_MS ?? DEFAULT_SETTLE_MS);
     if (!Number.isFinite(configured)) return DEFAULT_SETTLE_MS;
@@ -137,6 +347,37 @@ export class WhatsAppWebService {
         connected_at: new Date().toISOString(),
       },
     });
+  }
+
+  private async captureQrScreenshot(sessionId: string, orgId: string, taskId?: string): Promise<BrowserScreenshot> {
+    const qr = await this.browser.evaluate<{ image_base64: string; mime_type: string } | null>(sessionId, orgId, () => {
+      const canvases = Array.from(document.querySelectorAll('canvas'))
+        .filter((canvas) => canvas.width >= 120 && canvas.height >= 120)
+        .sort((a, b) => (b.width * b.height) - (a.width * a.height));
+      const canvas = canvases[0];
+      if (!canvas) return null;
+      const dataUrl = canvas.toDataURL('image/png');
+      const [, base64] = dataUrl.split(',');
+      if (!base64) return null;
+      return { image_base64: base64, mime_type: 'image/png' };
+    }).catch((error) => {
+      this.logger.warn(`Could not extract WhatsApp QR canvas: ${(error as Error).message}`);
+      return null;
+    });
+
+    if (qr) {
+      return {
+        id: `${sessionId}-whatsapp-qr`,
+        org_id: orgId,
+        session_id: sessionId,
+        task_id: taskId ?? null,
+        image_base64: qr.image_base64,
+        mime_type: qr.mime_type,
+        created_at: new Date().toISOString(),
+      };
+    }
+
+    return this.browser.screenshot(sessionId, orgId);
   }
 
   private async detectState(sessionId: string, orgId: string): Promise<WhatsAppSessionState> {
@@ -165,13 +406,17 @@ export class WhatsAppWebService {
   }
 
   private async extractLatestChat(sessionId: string, orgId: string): Promise<WhatsAppChatPreview | null> {
+    const chats = await this.extractVisibleChats(sessionId, orgId);
+    return chats[0] ?? null;
+  }
+
+  private async extractVisibleChats(sessionId: string, orgId: string): Promise<WhatsAppChatPreview[]> {
     try {
-      return await this.browser.evaluate<WhatsAppChatPreview | null>(sessionId, orgId, () => {
+      const rows = await this.browser.evaluate<WhatsAppChatRowSnapshot[]>(sessionId, orgId, () => {
         const normalize = (value: string) => value.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
-        const uniqueLines = (value: string) => {
+        const unique = (values: string[]) => {
           const seen = new Set<string>();
-          return normalize(value)
-            .split('\n')
+          return values
             .map((line) => normalize(line))
             .filter(Boolean)
             .filter((line) => {
@@ -181,52 +426,39 @@ export class WhatsAppWebService {
               return true;
             });
         };
-        const isNoise = (line: string) =>
-          /^(chats?|chat list|lista de chats|archivados?|archived|comunidades|communities|estados?|status|canales|channels|nuevo chat|new chat|buscar|search)$/i.test(line);
-        const timePattern =
-          /\b(\d{1,2}:\d{2}|a\.?\s*m\.?|p\.?\s*m\.?|am|pm|ayer|yesterday|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|today|hoy|\d{1,2}\/\d{1,2}(\/\d{2,4})?)\b/i;
-        const isBadge = (line: string) => /^\d{1,3}$/.test(line);
-
         const pane =
           document.querySelector('#pane-side')
           || document.querySelector('[aria-label="Chat list"]')
           || document.querySelector('[aria-label="Lista de chats"]')
           || document.body;
 
-        const elements = Array.from(
-          pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"], div[tabindex]'),
-        );
+        const elements = Array.from(pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'))
+          .filter((element) => {
+            const htmlElement = element as HTMLElement;
+            const rect = htmlElement.getBoundingClientRect();
+            const text = normalize(htmlElement.innerText ?? '');
+            return text && rect.height >= 32 && rect.width >= 160;
+          });
 
-        for (const element of elements) {
-          const lines = uniqueLines((element as HTMLElement).innerText ?? '')
-            .filter((line) => !isNoise(line));
-          if (lines.length < 2) continue;
-
-          const chatName = lines[0];
-          if (!chatName || timePattern.test(chatName) || isBadge(chatName)) continue;
-
-          const time = lines.find((line, index) => index > 0 && timePattern.test(line));
-          const unreadRaw = lines.find((line, index) => index > 0 && isBadge(line));
-          const preview = [...lines]
-            .reverse()
-            .find((line) => line !== chatName && line !== time && line !== unreadRaw && !isNoise(line));
-
-          if (!preview) continue;
-
+        return elements.slice(0, 30).map((element) => {
+          const htmlElement = element as HTMLElement;
+          const labelled = Array.from(htmlElement.querySelectorAll('[aria-label]'))
+            .map((node) => (node as HTMLElement).getAttribute('aria-label') ?? '');
+          const titled = Array.from(htmlElement.querySelectorAll('[title]'))
+            .map((node) => (node as HTMLElement).getAttribute('title') ?? '');
+          const text = normalize(htmlElement.innerText ?? '');
           return {
-            chat_name: chatName,
-            preview,
-            time,
-            unread_count: unreadRaw ? Number(unreadRaw) : undefined,
-            raw_lines: lines.slice(0, 8),
+            text,
+            lines: unique(text.split('\n')),
+            titles: unique(titled),
+            aria_labels: unique([htmlElement.getAttribute('aria-label') ?? '', ...labelled]),
           };
-        }
-
-        return null;
+        });
       });
+      return parseWhatsAppChatRows(rows);
     } catch (error) {
       this.logger.warn(`Could not extract latest WhatsApp chat: ${(error as Error).message}`);
-      return null;
+      return [];
     }
   }
 
@@ -238,5 +470,43 @@ export class WhatsAppWebService {
       latest.unread_count ? `\n\nTienes ${latest.unread_count} mensaje(s) sin leer en ese chat.` : '',
     ];
     return parts.join('');
+  }
+
+  private formatUnread(unread: WhatsAppChatPreview[]): string {
+    if (unread.length === 0) {
+      return 'WhatsApp Web está conectado. No encontré chats con mensajes sin leer en la lista visible.';
+    }
+
+    const lines = unread.slice(0, 8).map((chat) => {
+      const count = chat.unread_count ? `${chat.unread_count} sin leer` : 'sin leer';
+      const time = chat.time ? ` (${chat.time})` : '';
+      return `- **${chat.chat_name}**${time}: ${chat.preview} — ${count}`;
+    });
+    return `Chats visibles con mensajes sin leer en WhatsApp:\n\n${lines.join('\n')}`;
+  }
+
+  private formatUnanswered(pending: WhatsAppChatPreview[], answered: WhatsAppChatPreview[]): string {
+    const formatLine = (chat: WhatsAppChatPreview) => {
+      const time = chat.time ? ` (${chat.time})` : '';
+      const unread = chat.unread_count ? ` — ${chat.unread_count} sin leer` : '';
+      return `- **${chat.chat_name}**${time}: ${chat.preview}${unread}`;
+    };
+
+    if (pending.length === 0) {
+      const answeredSummary = answered.length
+        ? `\n\nYa contestados visibles:\n${answered.slice(0, 5).map(formatLine).join('\n')}`
+        : '';
+      return `WhatsApp Web está conectado. No encontré chats visibles sin responder.${answeredSummary}`;
+    }
+
+    const pendingLines = pending.slice(0, 8).map(formatLine);
+    const answeredLines = answered.slice(0, 5).map(formatLine);
+    return [
+      'Chats visibles sin responder en WhatsApp:',
+      '',
+      pendingLines.join('\n'),
+      answeredLines.length ? '\nYa contestados visibles:' : '',
+      answeredLines.length ? answeredLines.join('\n') : '',
+    ].filter(Boolean).join('\n');
   }
 }
