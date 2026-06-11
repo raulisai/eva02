@@ -130,6 +130,8 @@ const WHATSAPP_READ_SIGNALS = /\b([uú]ltim[oa]s?|mensajes?|chats?|revisa|revisa
 const WHATSAPP_UNREAD_SIGNALS = /\b(sin leer|no le[ií]dos?|unread)\b/i;
 const WHATSAPP_UNANSWERED_SIGNALS = /\b(sin responder|sin contestar|por responder|por contestar|pendientes? de (?:responder|contestar)|no (?:he|has|han|est[aá]n)?\s*(?:respondid[oa]s?|contestad[oa]s?))\b/i;
 const WHATSAPP_SEND_SIGNALS = /\b(responde|responder|contesta|contestar|env[ií]a|enviar|manda|mandar|escribe|escribir)\b/i;
+const WHATSAPP_SCREENSHOT_SIGNALS = /\b(captura(?:me)?|pantallazo|screenshot|screen\s*shot|scre+ns?h?o+t|scre+sh?o+t|screeshoot|svcreshoot|screenshoot|ss)\b/i;
+const CHAT_CONTEXT_SIGNALS = /\b(conversaciones?|chats?|mensajes?|whatsapp|whatsap|watsapp|watsap|guasap|wa\b)\b/i;
 
 // ── Gmail / Calendar write-intent signals ────────────────────────────────────
 // These must be checked BEFORE the read-only email fast-path.
@@ -337,7 +339,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       // ── WhatsApp Web fast-path — browser profile + QR handoff ─────────────
       // Runs before chat triage so short prompts like "abre watsap" never fall
       // into a generic model answer.
-      if (WHATSAPP_SIGNALS.test(input)) {
+      if (WHATSAPP_SIGNALS.test(input) || this.isImplicitWhatsAppScreenshotRequest(input, conversationContext)) {
         await this.tasks.transition(taskId, orgId, 'planning');
         await this.tasks.transition(taskId, orgId, 'running');
         await this.say(orgId, taskId, 'Abro WhatsApp Web con tu perfil local. Si falta login, te paso el QR.');
@@ -679,6 +681,26 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     startedAt: number,
     conversationContext: ConversationContextTurn[],
   ): Promise<void> {
+    const wantsScreenshot = this.wantsWhatsAppScreenshot(input, conversationContext);
+    if (wantsScreenshot) {
+      const session = await this.whatsapp.captureSessionScreenshot(orgId, taskId);
+      if (session.state === 'logged_in') {
+        await this.maybePublishBrowserScreenshot(orgId, taskId, session.screenshot, 'WhatsApp Web');
+        const text = session.screenshot?.image_base64
+          ? 'Te envié una captura de WhatsApp Web con tus conversaciones visibles.'
+          : 'WhatsApp Web está conectado, pero no pude generar la captura en este intento.';
+        await this.deliver(orgId, taskId, text, 'whatsapp-web', Date.now() - startedAt);
+        return;
+      }
+
+      await this.maybePublishWhatsAppQr(orgId, taskId, session.screenshot);
+      const text = session.state === 'qr_required'
+        ? 'Abrí WhatsApp Web, pero falta vincular la sesión. Escanea el QR y vuelve a pedir la captura.'
+        : 'WhatsApp Web todavía está cargando. Espera unos segundos y vuelve a pedir la captura.';
+      await this.deliver(orgId, taskId, text, 'whatsapp-web', Date.now() - startedAt);
+      return;
+    }
+
     const wantsUnansweredStatus = WHATSAPP_UNANSWERED_SIGNALS.test(input);
     if (WHATSAPP_SEND_SIGNALS.test(input) && !wantsUnansweredStatus) {
       const session = await this.whatsapp.startSession(orgId, taskId);
@@ -900,6 +922,19 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       if (contact && text) return { contact, text };
     }
     return null;
+  }
+
+  private wantsWhatsAppScreenshot(input: string, conversationContext: ConversationContextTurn[]): boolean {
+    if (WHATSAPP_SCREENSHOT_SIGNALS.test(input)) return true;
+    if (!WHATSAPP_SIGNALS.test(input)) return false;
+    const previousUserText = [...conversationContext].reverse().find((turn) => turn.role === 'user')?.text ?? '';
+    return WHATSAPP_SCREENSHOT_SIGNALS.test(previousUserText) && CHAT_CONTEXT_SIGNALS.test(previousUserText);
+  }
+
+  private isImplicitWhatsAppScreenshotRequest(input: string, conversationContext: ConversationContextTurn[]): boolean {
+    if (WHATSAPP_SCREENSHOT_SIGNALS.test(input) && CHAT_CONTEXT_SIGNALS.test(input)) return true;
+    if (!WHATSAPP_SCREENSHOT_SIGNALS.test(input)) return false;
+    return conversationContext.some((turn) => WHATSAPP_SIGNALS.test(turn.text));
   }
 
   private isPureImageRequest(input: string): boolean {

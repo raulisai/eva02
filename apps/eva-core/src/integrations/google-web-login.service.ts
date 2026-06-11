@@ -86,7 +86,7 @@ export class GoogleWebLoginService {
     if (!credential) return this.noCredential();
 
     let lastSignals: GooglePageSignals | null = null;
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
       const signals = await this.inspect(sessionId, orgId, credential.email);
       lastSignals = signals;
 
@@ -206,7 +206,19 @@ export class GoogleWebLoginService {
         const title = document.title;
         const host = location.hostname.toLowerCase();
         const isGoogle = host === 'google.com' || host.endsWith('.google.com');
-        const findSelector = (selectors: string[]) => selectors.find((selector) => document.querySelector(selector));
+
+        const isVisible = (el: HTMLElement | null) => {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          const hasSize = el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0;
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && hasSize;
+        };
+
+        const findSelector = (selectors: string[]) => selectors.find((selector) => {
+          const el = document.querySelector(selector) as HTMLElement;
+          return isVisible(el);
+        });
+
         const emailSelector = findSelector(['input[type="email"]', 'input[name="identifier"]', '#identifierId']);
         const passwordSelector = findSelector(['input[name="Passwd"]', 'input[type="password"]']);
         const sample = text.split('\n').map((line) => normalize(line)).filter(Boolean).slice(0, 30).join('\n');
@@ -265,8 +277,15 @@ export class GoogleWebLoginService {
     input: { selectors: string[]; labels: string[] },
   ): Promise<boolean> {
     return this.browser.evaluate<boolean, typeof input>(sessionId, orgId, ({ selectors, labels }) => {
-      const click = (element: Element | null | undefined) => {
-        if (!element) return false;
+      const isVisible = (el: HTMLElement | null) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        const hasSize = el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0;
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && hasSize;
+      };
+
+      const click = (element: Element | null) => {
+        if (!element || !isVisible(element as HTMLElement)) return false;
         (element as HTMLElement).click();
         return true;
       };
@@ -276,18 +295,25 @@ export class GoogleWebLoginService {
       const controls = Array.from(document.querySelectorAll('button, div[role="button"], a'));
       const match = controls.find((element) => {
         const text = `${element.textContent ?? ''} ${element.getAttribute('aria-label') ?? ''}`.trim().toLowerCase();
-        return labels.some((label) => text.includes(label.toLowerCase()));
+        return labels.some((label) => text.includes(label.toLowerCase())) && isVisible(element as HTMLElement);
       });
-      return click(match);
+      return click(match ?? null);
     }, input);
   }
 
   private async clickAccount(sessionId: string, orgId: string, email: string): Promise<boolean> {
     return this.browser.evaluate<boolean, { email: string }>(sessionId, orgId, ({ email }) => {
+      const isVisible = (el: HTMLElement | null) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        const hasSize = el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0;
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && hasSize;
+      };
+
       const controls = Array.from(document.querySelectorAll('button, div[role="button"], a, [data-identifier]'));
       const match = controls.find((element) => {
         const text = `${element.textContent ?? ''} ${element.getAttribute('data-identifier') ?? ''}`.toLowerCase();
-        return text.includes(email.toLowerCase());
+        return text.includes(email.toLowerCase()) && isVisible(element as HTMLElement);
       });
       if (!match) return false;
       (match as HTMLElement).click();

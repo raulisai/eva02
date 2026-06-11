@@ -62,6 +62,16 @@ export interface UberGoogleLoginResult {
   text: string;
 }
 
+export interface UberManualLoginResult {
+  ok: true;
+  service: 'uber_web';
+  url: string;
+  app: string;
+  profile_id: string;
+  closed_automated_session: boolean;
+  text: string;
+}
+
 @Injectable()
 export class UberWebService {
   private readonly logger = new Logger(UberWebService.name);
@@ -224,6 +234,23 @@ export class UberWebService {
     }
 
     return this.loginUberWithGoogleFromSession(orgId, opened.id, taskId);
+  }
+
+  async openManualLogin(orgId: string): Promise<UberManualLoginResult> {
+    const opened = await this.browser.openManualProfile({
+      service: UBER_SERVICE,
+      url: UBER_HOME_URL,
+    }, orgId);
+
+    return {
+      ...opened,
+      service: UBER_SERVICE,
+      text: [
+        `${opened.app} normal se abrió con el perfil local de Uber Web.`,
+        'Completa el login de Google/Uber ahí, cierra esa ventana y luego vuelve a validar o pide la cotización.',
+        'EVA no recibió ni guardó tu contraseña; solo reutilizará la sesión local del perfil.',
+      ].join('\n'),
+    };
   }
 
   private settleMs(): number {

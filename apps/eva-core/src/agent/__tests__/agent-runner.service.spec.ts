@@ -291,6 +291,20 @@ describe('AgentRunnerService', () => {
               state: 'logged_in',
               current_url: 'https://web.whatsapp.com/',
             }),
+            captureSessionScreenshot: jest.fn().mockResolvedValue({
+              session_id: 'browser-session-1',
+              state: 'logged_in',
+              current_url: 'https://web.whatsapp.com/',
+              screenshot: {
+                id: 'whatsapp-shot-1',
+                org_id: ORG,
+                session_id: 'browser-session-1',
+                task_id: TASK,
+                image_base64: 'd2hhdHNhcHA=',
+                mime_type: 'image/png',
+                created_at: new Date().toISOString(),
+              },
+            }),
             fetchLatestMessage: jest.fn().mockResolvedValue({
               ok: true,
               session: {
@@ -1124,6 +1138,57 @@ describe('AgentRunnerService', () => {
       model: 'whatsapp-web',
       text: expect.stringContaining('sin responder'),
     }));
+  });
+
+  it('sends a WhatsApp Web screenshot when the user asks for a captura', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'puedes darme una captura de mi whatsap' }));
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(whatsapp.captureSessionScreenshot).toHaveBeenCalledWith(ORG, TASK);
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+
+    const media = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.media');
+    expect(media?.payload).toEqual(expect.objectContaining({
+      kind: 'image',
+      url: 'https://bucket/eva-media/screenshot.png',
+      label: 'WhatsApp Web',
+    }));
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({
+      model: 'whatsapp-web',
+      text: expect.stringContaining('captura'),
+    }));
+  });
+
+  it('treats misspelled screenshot requests for conversations as WhatsApp screenshots', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'quiero que me envies una svcreshoot de mis conversaciones' }));
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(whatsapp.captureSessionScreenshot).toHaveBeenCalledWith(ORG, TASK);
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
+  });
+
+  it('uses recent screenshot context when the user follows up with "de whatsapp"', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'de whatsapp',
+      metadata: {
+        conversation_context: [
+          { role: 'user', text: 'quiero que me envies una svcreshoot de mis conversaciones' },
+          { role: 'assistant', text: '¿De qué conversaciones hablas?' },
+        ],
+      },
+    }));
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(whatsapp.captureSessionScreenshot).toHaveBeenCalledWith(ORG, TASK);
+    expect(modelRouter.generate).not.toHaveBeenCalled();
   });
 
   it('publishes the WhatsApp QR screenshot when the browser profile is not linked', async () => {

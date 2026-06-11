@@ -1,4 +1,8 @@
-import { BadRequestException, Inject, Injectable } from '@nestjs/common';
+import * as childProcess from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { BadRequestException, Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { BrowserProfileCrypto, BrowserRuntime } from '@eva/browser-runtime';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { EventBusService } from '../events/event-bus.service';
@@ -6,8 +10,24 @@ import { BrowserRepository } from './browser.repository';
 import { BROWSER_RUNTIME } from './browser.types';
 import { OpenBrowserDto, PrepareBrowserActionDto } from './dto/browser-action.dto';
 
+export interface OpenManualProfileDto {
+  service: string;
+  url: string;
+}
+
+export interface ManualProfileOpenResult {
+  ok: true;
+  service: string;
+  url: string;
+  app: string;
+  profile_id: string;
+  closed_automated_session: boolean;
+  text: string;
+}
+
 @Injectable()
 export class BrowserService {
+  private readonly logger = new Logger(BrowserService.name);
   private readonly profileCrypto = new BrowserProfileCrypto();
 
   constructor(
@@ -43,6 +63,34 @@ export class BrowserService {
       metadata: { ...session.metadata, title: result.title },
     });
     return { ...updated, title: result.title };
+  }
+
+  async openManualProfile(dto: OpenManualProfileDto, orgId: string): Promise<ManualProfileOpenResult> {
+    const target = this.parseManualUrl(dto.url);
+    const profile = await this.repo.getOrCreateProfile(orgId, dto.service);
+    const closedAutomatedSession = await this.closeLatestOpenSessionForProfile(profile.id, orgId);
+    const profileDir = this.profileDir(profile.id);
+    await mkdir(profileDir, { recursive: true });
+
+    const launch = this.manualBrowserCommand(profileDir, target.toString());
+    try {
+      await this.spawnDetached(launch.command, launch.args);
+    } catch (error) {
+      this.logger.error(`Manual browser launch failed: ${(error as Error).message}`);
+      throw new InternalServerErrorException(
+        `Could not open ${launch.app}. Set BROWSER_MANUAL_APP to an installed browser and try again.`,
+      );
+    }
+
+    return {
+      ok: true,
+      service: dto.service,
+      url: target.toString(),
+      app: launch.app,
+      profile_id: profile.id,
+      closed_automated_session: closedAutomatedSession,
+      text: `${launch.app} opened with EVA's ${dto.service} browser profile. Finish the login there, close that browser window, then retry the action in EVA.`,
+    };
   }
 
   async screenshot(sessionId: string, orgId: string) {
@@ -162,5 +210,87 @@ export class BrowserService {
     });
 
     return { preparation, approval, action_hash: approval.action_hash, nonce: approval.nonce };
+  }
+
+  private parseManualUrl(url: string): URL {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new BadRequestException('Manual browser URL must be a valid URL');
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new BadRequestException('Manual browser URL must be http or https');
+    }
+    return parsed;
+  }
+
+  private async closeLatestOpenSessionForProfile(profileId: string, orgId: string): Promise<boolean> {
+    const existing = await this.repo.findLatestOpenSessionForProfile(profileId, orgId);
+    if (!existing) return false;
+
+    try {
+      await this.close(existing.id, orgId);
+    } catch (error) {
+      this.logger.warn(`Could not close automated browser session before manual handoff: ${(error as Error).message}`);
+      await this.repo.updateSession(existing.id, orgId, {
+        status: 'closed',
+        metadata: {
+          ...existing.metadata,
+          manual_handoff_closed_stale_session: true,
+        },
+      });
+    }
+    return true;
+  }
+
+  private profileDir(profileId: string): string {
+    return join(process.env.BROWSER_PROFILES_DIR ?? join(tmpdir(), 'eva-browser-profiles'), profileId);
+  }
+
+  private manualBrowserCommand(profileDir: string, url: string): { command: string; args: string[]; app: string } {
+    const configured = process.env.BROWSER_MANUAL_APP?.trim();
+    if (process.platform === 'darwin') {
+      const app = configured || 'Google Chrome';
+      return {
+        command: 'open',
+        args: [
+          '-na',
+          app,
+          '--args',
+          `--user-data-dir=${profileDir}`,
+          '--profile-directory=Default',
+          '--new-window',
+          url,
+        ],
+        app,
+      };
+    }
+
+    const app = configured || (process.platform === 'win32' ? 'chrome.exe' : 'google-chrome');
+    return {
+      command: app,
+      args: [
+        `--user-data-dir=${profileDir}`,
+        '--profile-directory=Default',
+        '--new-window',
+        url,
+      ],
+      app,
+    };
+  }
+
+  private spawnDetached(command: string, args: string[]): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = childProcess.spawn(command, args, {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.once('error', reject);
+      child.once('spawn', () => {
+        child.unref();
+        resolve();
+      });
+    });
   }
 }
