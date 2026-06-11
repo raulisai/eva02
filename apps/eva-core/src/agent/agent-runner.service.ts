@@ -15,6 +15,8 @@ import { CreateEventInput } from './google-calendar.service';
 import { GmailFetchResult, GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
 import { UberWebService } from '../integrations/uber-web.service';
+import { RappiWebService } from '../integrations/rappi-web.service';
+import { GoogleWebLoginService } from '../integrations/google-web-login.service';
 import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
 import { MediaService } from './media.service';
 import { MemoryRecallService } from './memory-recall.service';
@@ -125,6 +127,14 @@ const DRIVE_SIGNALS = /\b(drive|google drive|mis archivos|mis documentos|mis car
 const UBER_SIGNALS = /\b(uber|taxi|viaje)\b/i;
 const UBER_ESTIMATE_SIGNALS = /\b(cu[aá]nto|cuanto|costo|costar|cuesta|sale|precio|tarifa|cotiza|cotizar|estimaci[oó]n|estimate|quote)\b/i;
 const UBER_ORDER_SIGNALS = /\b(pedir|pide|solicita|solicitar|ordena|ordenar|manda|mandar|confirma|confirmar|reserva|reservar)\b/i;
+const UBER_EMAIL_LOGIN_SIGNALS = /\b(inicia[r]?\s+(?:sesi[oó]n|sesion)|log\s*in|iniciar|conectar|vincular)\b.{0,30}\b(uber)\b|\b(uber)\b.{0,30}\b(correo|email|mail)\b/i;
+const RAPPI_SIGNALS = /\b(rappi)\b/i;
+const RAPPI_EMAIL_LOGIN_SIGNALS = /\b(inicia[r]?\s+(?:sesi[oó]n|sesion)|log\s*in|iniciar|conectar|vincular)\b.{0,30}\b(rappi)\b|\b(rappi)\b.{0,30}\b(correo|email|mail)\b/i;
+// OTP code submission: short numeric string (4-8 digits) with optional "el código es" prefix
+const OTP_SUBMIT_SIGNALS = /^\s*(?:el\s+c[oó]digo\s+(?:es\s+)?|c[oó]digo\s*[=:\s]\s*|es\s+)?(\d{4,8})\s*$/i;
+// Context marker left in EVA's prior reply when waiting for OTP
+const OTP_PENDING_CONTEXT = /dime(?:lo)?.*c[oó]digo|c[oó]digo.*dime|te enviaron.*c[oó]digo|ingres[aé].*correo.*(uber|rappi)/i;
+const GOOGLE_BLOCKED_LOGIN_SIGNALS = /\b(iniciar?|inicia|login|conectar|vincular|abrir?)\b.{0,30}\b(google|gmail)\b.{0,30}\b(manual|manualmente|browser|navegador|visible|ventana)?\b|\bgoogle\b.{0,30}\bbloqueó\b|\bgoogle.*manual/i;
 const WHATSAPP_SIGNALS = /\b(whatsapp|whatsap|watsapp|watsap|whats app|guasap|guasapp|wa\b|mensajes? de whats|mis mensajes? de wa)\b/i;
 const WHATSAPP_READ_SIGNALS = /\b([uú]ltim[oa]s?|mensajes?|chats?|revisa|revisar|consulta|consultar|leer|lee|qu[eé] tengo)\b/i;
 const WHATSAPP_UNREAD_SIGNALS = /\b(sin leer|no le[ií]dos?|unread)\b/i;
@@ -219,6 +229,8 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly gmail: GmailService,
     private readonly drive: GoogleDriveService,
     private readonly uber: UberWebService,
+    private readonly rappi: RappiWebService,
+    private readonly googleWebLogin: GoogleWebLoginService,
     private readonly whatsapp: WhatsAppWebService,
     private readonly approvals: ApprovalsService,
     private readonly scheduledJobs: ScheduledJobsService,
@@ -324,6 +336,40 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           return;
         }
         throw new Error('No pude generar la imagen con los proveedores configurados. Revisa las credenciales/modelos de imagen o intenta de nuevo si el proveedor esta saturado.');
+      }
+
+      // ── OTP code submission — user replied with a code after email login ──
+      if (this.isOtpSubmission(input, conversationContext)) {
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        await this.handleOtpSubmission(orgId, taskId, input, startedAt, conversationContext);
+        return;
+      }
+
+      // ── Rappi email login fast-path ───────────────────────────────────────
+      if (RAPPI_SIGNALS.test(input) && RAPPI_EMAIL_LOGIN_SIGNALS.test(input)) {
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        await this.say(orgId, taskId, 'Abro Rappi e ingreso tu correo para iniciar sesión.');
+        await this.handleRappiEmailLogin(orgId, taskId, input, startedAt);
+        return;
+      }
+
+      // ── Uber email login fast-path ────────────────────────────────────────
+      if (UBER_EMAIL_LOGIN_SIGNALS.test(input) && !this.isUberBrowserQuoteRequest(input)) {
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        await this.say(orgId, taskId, 'Abro Uber e ingreso tu correo para iniciar sesión.');
+        await this.handleUberEmailLogin(orgId, taskId, input, startedAt);
+        return;
+      }
+
+      // ── Google manual login fast-path (when automatic is blocked) ─────────
+      if (GOOGLE_BLOCKED_LOGIN_SIGNALS.test(input)) {
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        await this.handleGoogleManualLogin(orgId, taskId, startedAt);
+        return;
       }
 
       // ── Uber Web quote fast-path — browser profile, screenshot, no ride order ──
@@ -793,6 +839,120 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     return UBER_SIGNALS.test(input)
       && UBER_ESTIMATE_SIGNALS.test(input)
       && !UBER_ORDER_SIGNALS.test(input);
+  }
+
+  private isOtpSubmission(input: string, conversationContext: ConversationContextTurn[]): boolean {
+    if (!OTP_SUBMIT_SIGNALS.test(input)) return false;
+    const lastEvaReply = [...conversationContext].reverse().find(t => t.role === 'assistant')?.text ?? '';
+    return OTP_PENDING_CONTEXT.test(lastEvaReply);
+  }
+
+  private async handleOtpSubmission(
+    orgId: string,
+    taskId: string,
+    input: string,
+    startedAt: number,
+    conversationContext: ConversationContextTurn[],
+  ): Promise<void> {
+    const code = (OTP_SUBMIT_SIGNALS.exec(input)?.[1] ?? input.trim()).replace(/\s+/g, '');
+    const lastEvaReply = [...conversationContext].reverse().find(t => t.role === 'assistant')?.text ?? '';
+    const isRappi = /rappi/i.test(lastEvaReply);
+    const isUber = /uber/i.test(lastEvaReply);
+
+    if (isRappi) {
+      await this.log(orgId, taskId, `submitting OTP code to Rappi (${code.length} digits)`, 'tools');
+      const result = await this.rappi.submitLoginCode(orgId, code);
+      if (result.screenshot) await this.maybePublishBrowserScreenshot(orgId, taskId, result.screenshot, 'Rappi');
+      await this.deliver(orgId, taskId, result.text, 'rappi-web', Date.now() - startedAt);
+      return;
+    }
+
+    if (isUber) {
+      await this.log(orgId, taskId, `submitting OTP code to Uber (${code.length} digits)`, 'tools');
+      const result = await this.uber.submitLoginCode(orgId, code, taskId);
+      if (result.screenshot) await this.maybePublishBrowserScreenshot(orgId, taskId, result.screenshot, 'Uber Web');
+      await this.deliver(orgId, taskId, result.text, 'uber-web', Date.now() - startedAt);
+      return;
+    }
+
+    await this.deliver(orgId, taskId, 'Recibí el código pero no encontré una sesión de Uber o Rappi esperando verificación.', 'otp-handler', Date.now() - startedAt);
+  }
+
+  private async handleUberEmailLogin(
+    orgId: string,
+    taskId: string,
+    input: string,
+    startedAt: number,
+  ): Promise<void> {
+    const email = this.extractEmailFromInput(input);
+    if (!email) {
+      throw new MissingInformationError(
+        'Para iniciar sesión en Uber con correo necesito tu dirección de email.',
+        {
+          form_key: 'uber.email_login',
+          title: 'Iniciar sesión en Uber',
+          description: 'Ingresaré tu correo en Uber y te pediré el código de verificación.',
+          fields: [{ id: 'email', type: 'text', label: 'Correo electrónico', required: true }],
+        },
+      );
+    }
+    await this.log(orgId, taskId, `Uber email login for ${email}`, 'tools');
+    const result = await this.uber.startEmailLogin(orgId, email, taskId);
+    if (result.screenshot) await this.maybePublishBrowserScreenshot(orgId, taskId, result.screenshot, 'Uber Web');
+    await this.deliver(orgId, taskId, result.text, 'uber-web', Date.now() - startedAt);
+  }
+
+  private async handleRappiEmailLogin(
+    orgId: string,
+    taskId: string,
+    input: string,
+    startedAt: number,
+  ): Promise<void> {
+    const email = this.extractEmailFromInput(input);
+    if (!email) {
+      throw new MissingInformationError(
+        'Para iniciar sesión en Rappi con correo necesito tu dirección de email.',
+        {
+          form_key: 'rappi.email_login',
+          title: 'Iniciar sesión en Rappi',
+          description: 'Ingresaré tu correo en Rappi y te pediré el código de verificación.',
+          fields: [{ id: 'email', type: 'text', label: 'Correo electrónico', required: true }],
+        },
+      );
+    }
+    await this.log(orgId, taskId, `Rappi email login for ${email}`, 'tools');
+    const result = await this.rappi.startEmailLogin(orgId, email, taskId);
+    if (result.screenshot) await this.maybePublishBrowserScreenshot(orgId, taskId, result.screenshot, 'Rappi');
+    await this.deliver(orgId, taskId, result.text, 'rappi-web', Date.now() - startedAt);
+  }
+
+  private async handleGoogleManualLogin(
+    orgId: string,
+    taskId: string,
+    startedAt: number,
+  ): Promise<void> {
+    await this.log(orgId, taskId, 'google blocked — instructing user to import session cookies', 'tools');
+    const text = [
+      '⚠️ **Google bloqueó el login automático.** En un servidor sin pantalla, no es posible completar el login de Google de forma interactiva.',
+      '',
+      '**Solución: importa tu sesión de Google en 3 pasos:**',
+      '',
+      '1. En tu **navegador local** (Chrome/Firefox), instala la extensión **Cookie-Editor**.',
+      '2. Ve a `https://accounts.google.com` → abre Cookie-Editor → **Export → Export as JSON**.',
+      '3. Llama al endpoint:',
+      '   ```',
+      '   POST /integrations/google-web/import-session',
+      '   { "cookies": <pega el JSON aquí> }',
+      '   ```',
+      '',
+      'Una vez importado, EVA usará esa sesión sin necesidad de login visual. Las cookies quedan encriptadas en tu perfil.',
+    ].join('\n');
+    await this.deliver(orgId, taskId, text, 'google-web', Date.now() - startedAt);
+  }
+
+  private extractEmailFromInput(input: string): string | null {
+    const m = input.match(/\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b/i);
+    return m ? m[0] : null;
   }
 
   private async extractUberRoute(input: string, orgId: string): Promise<{ origin: string; destination: string }> {

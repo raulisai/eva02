@@ -76,6 +76,48 @@ export class GoogleWebLoginService {
     return this.loginCurrentSession(orgId, opened.id, taskId, credential);
   }
 
+  /**
+   * Imports a Google session from cookies exported by the user's local browser.
+   * Accepts Playwright StorageState format or an array of cookies (Cookie-Editor / EditThisCookie format).
+   * This is the server-safe alternative to openManualProfile — works without a display.
+   */
+  async importSession(orgId: string, cookiesPayload: unknown): Promise<{ ok: boolean; text: string }> {
+    let storageState: { cookies: unknown[]; origins?: unknown[] };
+    try {
+      if (Array.isArray(cookiesPayload)) {
+        // Cookie-Editor / EditThisCookie array format → convert to Playwright StorageState
+        storageState = { cookies: cookiesPayload, origins: [] };
+      } else if (cookiesPayload && typeof cookiesPayload === 'object' && 'cookies' in cookiesPayload) {
+        storageState = cookiesPayload as { cookies: unknown[]; origins?: unknown[] };
+      } else {
+        return { ok: false, text: 'Formato de cookies no reconocido. Exporta desde Cookie-Editor como JSON array, o usa el formato Playwright StorageState.' };
+      }
+      if (!Array.isArray(storageState.cookies) || storageState.cookies.length === 0) {
+        return { ok: false, text: 'No hay cookies en el payload. Exporta las cookies de google.com desde tu navegador local.' };
+      }
+    } catch {
+      return { ok: false, text: 'No se pudo parsear el payload de cookies.' };
+    }
+
+    const profile = await this.browser.getOrCreateProfile(orgId, GOOGLE_WEB_SERVICE);
+    const sessionId = `${profile.id}-import-${Date.now()}`;
+    await this.browser.openWithStorageState({
+      sessionId,
+      profileId: profile.id,
+      url: 'https://myaccount.google.com/',
+      storageState,
+    }, orgId);
+
+    await this.browser.wait(sessionId, orgId, 2500);
+    const signals = await this.inspect(sessionId, orgId, '');
+    await this.browser.close(sessionId, orgId);
+
+    if (signals.state === 'logged_in') {
+      return { ok: true, text: '✅ Sesión de Google importada correctamente. EVA puede ahora usar los servicios de Google sin login manual.' };
+    }
+    return { ok: false, text: 'Las cookies se importaron pero Google no quedó autenticado. Verifica que exportaste las cookies de google.com (incluyendo accounts.google.com) y que no estén expiradas.' };
+  }
+
   async loginCurrentSession(
     orgId: string,
     sessionId: string,

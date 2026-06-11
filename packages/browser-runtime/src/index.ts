@@ -134,6 +134,61 @@ export class PlaywrightBrowserRuntime {
     return session.context.storageState();
   }
 
+  /**
+   * Opens a persistent context and seeds it with the provided cookies.
+   * Accepts a Playwright StorageState object or a Cookie-Editor JSON array.
+   * This is the server-safe way to import a session from a real browser.
+   */
+  async openWithStorageState(
+    input: { sessionId: string; profileId: string; url: string; storageState: unknown },
+  ): Promise<{ url: string; title: string }> {
+    const existing = this.sessions.get(input.sessionId);
+    if (existing) {
+      await existing.context.close();
+      this.sessions.delete(input.sessionId);
+    }
+    const userDataDir = join(this.profilesRoot, input.profileId);
+    await mkdir(userDataDir, { recursive: true });
+    const context = await chromium.launchPersistentContext(userDataDir, {
+      headless: this.headless,
+      args: this.stealthArgs(),
+    });
+    await this.applyStealthToContext(context);
+
+    // Seed cookies from the provided payload
+    const cookies = this.extractCookies(input.storageState);
+    if (cookies.length > 0) {
+      await context.addCookies(cookies);
+    }
+
+    const page = context.pages()[0] ?? await context.newPage();
+    this.sessions.set(input.sessionId, { id: input.sessionId, profileId: input.profileId, context, page });
+    await page.goto(input.url, { waitUntil: 'domcontentloaded' });
+    return { url: page.url(), title: await page.title() };
+  }
+
+  private extractCookies(storageState: unknown): Array<{ name: string; value: string; domain: string; path: string; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: 'Strict' | 'Lax' | 'None' }> {
+    if (Array.isArray(storageState)) {
+      // Cookie-Editor / EditThisCookie array
+      return storageState
+        .filter((c): c is Record<string, unknown> => c && typeof c === 'object')
+        .map((c) => ({
+          name: String(c['name'] ?? ''),
+          value: String(c['value'] ?? ''),
+          domain: String(c['domain'] ?? ''),
+          path: String(c['path'] ?? '/'),
+          expires: typeof c['expirationDate'] === 'number' ? c['expirationDate'] : (typeof c['expires'] === 'number' ? c['expires'] : undefined),
+          httpOnly: Boolean(c['httpOnly']),
+          secure: Boolean(c['secure']),
+        }))
+        .filter((c) => c.name && c.domain);
+    }
+    if (storageState && typeof storageState === 'object' && 'cookies' in storageState && Array.isArray((storageState as { cookies: unknown }).cookies)) {
+      return this.extractCookies((storageState as { cookies: unknown }).cookies);
+    }
+    return [];
+  }
+
   private async getOrCreate(sessionId: string, profileId: string): Promise<BrowserRuntimeSession> {
     const existing = this.sessions.get(sessionId);
     if (existing) return existing;
@@ -147,20 +202,50 @@ export class PlaywrightBrowserRuntime {
     return session;
   }
 
+  private stealthArgs(): string[] {
+    return [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-infobars',
+      '--disable-extensions',
+      '--disable-default-apps',
+      '--no-default-browser-check',
+      '--no-first-run',
+      '--lang=es-MX',
+    ];
+  }
+
+  private async applyStealthToContext(context: BrowserContext): Promise<void> {
+    // Hide navigator.webdriver and related automation fingerprints
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['es-MX', 'es', 'en-US', 'en'] });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).chrome = { runtime: {} };
+    });
+  }
+
   private async launchContext(userDataDir: string): Promise<BrowserContext> {
+    const stealthArgs = this.stealthArgs();
     const attempts = this.channel
-      ? [{ headless: this.headless, channel: this.channel }]
+      ? [{ headless: this.headless, channel: this.channel, args: stealthArgs }]
       : [
-          { headless: this.headless },
-          { headless: this.headless, channel: 'chrome' },
+          { headless: this.headless, args: stealthArgs },
+          { headless: this.headless, channel: 'chrome', args: stealthArgs },
           ...(process.platform === 'darwin' && this.headless
-            ? [{ headless: false, channel: 'chrome' }]
+            ? [{ headless: false, channel: 'chrome', args: stealthArgs }]
             : []),
         ];
     let lastError: unknown;
     for (const attempt of attempts) {
       try {
-        return await chromium.launchPersistentContext(userDataDir, attempt);
+        const context = await chromium.launchPersistentContext(userDataDir, attempt);
+        await this.applyStealthToContext(context);
+        return context;
       } catch (error) {
         lastError = error;
       }
@@ -187,4 +272,5 @@ export type BrowserRuntime = Pick<
   | 'wait'
   | 'close'
   | 'storageState'
+  | 'openWithStorageState'
 >;

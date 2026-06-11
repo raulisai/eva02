@@ -3,7 +3,8 @@
 import { useState } from 'react';
 import {
   Fingerprint, Mail, Calendar, HardDrive, Contact, Car, Github, ShoppingCart,
-  Loader2, Trash2, PlugZap, ShieldCheck, Search, KeyRound,
+  Loader2, Trash2, PlugZap, ShieldCheck, Search, KeyRound, LogIn, Hash,
+  UtensilsCrossed, Upload, CheckCircle2, XCircle,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -22,12 +23,6 @@ const GOOGLE_CAPABILITIES = [
 ];
 
 const SIMPLE_PROVIDERS = [
-  {
-    provider: 'uber', label: 'Uber', icon: Car,
-    blurb: 'API token so EVA can request rides and check trip status — every ride request goes through the Approval Engine (L2).',
-    capabilities: ['Pedir viajes (con aprobación)', 'Estado del viaje', 'Estimar tarifas'],
-    placeholder: 'Uber API token',
-  },
   {
     provider: 'github', label: 'GitHub', icon: Github,
     blurb: 'Personal access token for the Dev Manager: repos, PRs, issues.',
@@ -72,13 +67,36 @@ interface GoogleWebLoginResult {
   text: string;
 }
 
+interface EmailLoginResult {
+  ok: boolean;
+  reason: 'code_required' | 'already_logged_in' | 'no_email_field' | 'logged_in' | 'invalid_code' | 'no_active_session' | 'unknown';
+  session_id?: string;
+  screenshot?: { image_base64: string; mime_type: string };
+  text: string;
+}
+
+type EmailLoginStep = 'idle' | 'code_required' | 'done' | 'error';
+
+interface EmailLoginState {
+  step: EmailLoginStep;
+  email: string;
+  code: string;
+  result: EmailLoginResult | null;
+  shot: string | null;
+}
+
+function initEmailLogin(): EmailLoginState {
+  return { step: 'idle', email: '', code: '', result: null, shot: null };
+}
+
 export function CredentialsClient({ initialIntegrations }: CredentialsClientProps) {
   const { toast } = useToast();
   const [integrations, setIntegrations] = useState(initialIntegrations);
   const [busy, setBusy] = useState<string | null>(null);
   const [google, setGoogle] = useState({ client_id: '', client_secret: '', refresh_token: '' });
-  const [googleWeb, setGoogleWeb] = useState({ email: '', password: '' });
+  const [googleWebCookies, setGoogleWebCookies] = useState('');
   const [googleWebResult, setGoogleWebResult] = useState<GoogleWebLoginResult | null>(null);
+  const [googleWebImportResult, setGoogleWebImportResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [googleWebShot, setGoogleWebShot] = useState<string | null>(null);
   const [googleAccount, setGoogleAccount] = useState<{
     email: string;
@@ -86,18 +104,22 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     services: { gmail: { ok: boolean; error?: string }; calendar: { ok: boolean; error?: string }; drive: { ok: boolean; error?: string } };
   } | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [uberLogin, setUberLogin] = useState<EmailLoginState>(initEmailLogin());
+  const [rappiLogin, setRappiLogin] = useState<EmailLoginState>(initEmailLogin());
 
-  const googleIntegration = integrations.find((integration) => integration.provider === 'google');
-  const googleWebIntegration = integrations.find((integration) => integration.provider === 'google_web');
+  const googleIntegration = integrations.find((i) => i.provider === 'google');
+  const googleWebIntegration = integrations.find((i) => i.provider === 'google_web');
 
   function patchLocal(updated: Integration) {
     setIntegrations((prev) => {
-      const exists = prev.some((integration) => integration.provider === updated.provider);
+      const exists = prev.some((i) => i.provider === updated.provider);
       return exists
-        ? prev.map((integration) => integration.provider === updated.provider ? updated : integration)
+        ? prev.map((i) => i.provider === updated.provider ? updated : i)
         : [...prev, updated];
     });
   }
+
+  // ── Google OAuth ──────────────────────────────────────────────────────────
 
   async function saveGoogle() {
     setBusy('google');
@@ -107,7 +129,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
         body: JSON.stringify({
           secret: JSON.stringify(google),
           status: 'active',
-          config: { scopes: GOOGLE_CAPABILITIES.map((capability) => capability.scope) },
+          config: { scopes: GOOGLE_CAPABILITIES.map((c) => c.scope) },
         }),
       });
       patchLocal(updated);
@@ -132,14 +154,12 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
       }>('/integrations/credential/google/test/full', { method: 'POST' });
 
       if (!result.ok && result.error && !result.services) {
-        // Token exchange failed entirely (expired, bad credentials)
         setGoogleAccount(null);
         toast(`Error de credencial: ${result.error}`, 'error');
         return;
       }
 
       const services = result.services ?? { gmail: { ok: false }, calendar: { ok: false }, drive: { ok: false } };
-
       if (result.email) {
         setGoogleAccount({ email: result.email, scopes: result.scopes ?? [], services });
       } else {
@@ -151,19 +171,15 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
         return;
       }
 
-      // Partial: at least one service worked — report which ones failed
-      const failing = (
-        [
-          !services.gmail.ok    && `Gmail: ${services.gmail.error ?? 'sin acceso'}`,
-          !services.calendar.ok && `Calendar: ${services.calendar.error ?? 'sin acceso'}`,
-          !services.drive.ok    && `Drive: ${services.drive.error ?? 'sin acceso'}`,
-        ] as (string | false)[]
-      ).filter(Boolean) as string[];
+      const failing = ([
+        !services.gmail.ok    && `Gmail: ${services.gmail.error ?? 'sin acceso'}`,
+        !services.calendar.ok && `Calendar: ${services.calendar.error ?? 'sin acceso'}`,
+        !services.drive.ok    && `Drive: ${services.drive.error ?? 'sin acceso'}`,
+      ] as (string | false)[]).filter(Boolean) as string[];
 
       if (failing.length > 0) {
         toast(`Acceso parcial — faltan permisos:\n${failing.join('\n')}`, 'error');
       } else {
-        // services all ok but ok=false (shouldn't happen, but be safe)
         toast(result.error ?? 'Google: respuesta inesperada', 'error');
       }
     } catch (error) {
@@ -172,6 +188,8 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
       setBusy(null);
     }
   }
+
+  // ── Google Web Login ──────────────────────────────────────────────────────
 
   async function saveGoogleWeb() {
     setBusy('google-web');
@@ -217,6 +235,72 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     }
   }
 
+  // ── Generic email-login + OTP flow ────────────────────────────────────────
+
+  async function startEmailLogin(
+    service: 'uber' | 'rappi',
+    setState: React.Dispatch<React.SetStateAction<EmailLoginState>>,
+  ) {
+    const email = service === 'uber' ? uberLogin.email : rappiLogin.email;
+    if (!email.trim()) return;
+    setBusy(`${service}-email`);
+    setState((prev) => ({ ...prev, result: null, shot: null }));
+    try {
+      const result = await coreFetch<EmailLoginResult>(
+        `/integrations/${service}/start-email-login`,
+        { method: 'POST', body: JSON.stringify({ email: email.trim() }) },
+      );
+      const shot = result.screenshot?.image_base64
+        ? `data:${result.screenshot.mime_type};base64,${result.screenshot.image_base64}`
+        : null;
+      setState((prev) => ({
+        ...prev,
+        result,
+        shot,
+        step: result.reason === 'code_required' ? 'code_required'
+          : result.ok ? 'done' : 'error',
+      }));
+      toast(result.text, result.ok ? 'success' : 'info');
+    } catch (error) {
+      toast((error as Error).message, 'error');
+      setState((prev) => ({ ...prev, step: 'error' }));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function submitLoginCode(
+    service: 'uber' | 'rappi',
+    state: EmailLoginState,
+    setState: React.Dispatch<React.SetStateAction<EmailLoginState>>,
+  ) {
+    if (!state.code.trim()) return;
+    setBusy(`${service}-code`);
+    try {
+      const result = await coreFetch<EmailLoginResult>(
+        `/integrations/${service}/submit-login-code`,
+        { method: 'POST', body: JSON.stringify({ code: state.code.trim() }) },
+      );
+      const shot = result.screenshot?.image_base64
+        ? `data:${result.screenshot.mime_type};base64,${result.screenshot.image_base64}`
+        : null;
+      setState((prev) => ({
+        ...prev,
+        result,
+        shot,
+        code: '',
+        step: result.ok ? 'done' : 'error',
+      }));
+      toast(result.text, result.ok ? 'success' : 'error');
+    } catch (error) {
+      toast((error as Error).message, 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // ── Simple token providers ────────────────────────────────────────────────
+
   async function saveSimple(provider: string) {
     const secret = drafts[provider]?.trim();
     if (!secret) return;
@@ -240,12 +324,9 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     setBusy(provider);
     try {
       await coreFetch(`/integrations/credential/${provider}`, { method: 'DELETE' });
-      setIntegrations((prev) => prev.filter((integration) => integration.provider !== provider));
+      setIntegrations((prev) => prev.filter((i) => i.provider !== provider));
       if (provider === 'google') setGoogleAccount(null);
-      if (provider === 'google_web') {
-        setGoogleWebResult(null);
-        setGoogleWebShot(null);
-      }
+      if (provider === 'google_web') { setGoogleWebResult(null); setGoogleWebShot(null); }
       toast(`${provider} credential removed`, 'info');
     } catch (error) {
       toast((error as Error).message, 'error');
@@ -255,6 +336,156 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
   }
 
   const inputClass = 'w-full bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60';
+
+  // ── Shared email-login section renderer ───────────────────────────────────
+
+  function EmailLoginSection({
+    service,
+    label,
+    icon: Icon,
+    blurb,
+    capabilities,
+    state,
+    setState,
+  }: {
+    service: 'uber' | 'rappi';
+    label: string;
+    icon: React.ElementType;
+    blurb: string;
+    capabilities: string[];
+    state: EmailLoginState;
+    setState: React.Dispatch<React.SetStateAction<EmailLoginState>>;
+  }) {
+    const isEmailBusy = busy === `${service}-email`;
+    const isCodeBusy = busy === `${service}-code`;
+    const isBusy = isEmailBusy || isCodeBusy;
+
+    return (
+      <div className="border border-zinc-800 rounded-sm p-4 space-y-3 animate-fade-in">
+        <div className="flex items-center gap-2">
+          <Icon className="w-4 h-4 text-zinc-400" />
+          <span className="text-sm text-zinc-100 font-medium">{label}</span>
+          <Badge variant="running">BROWSER</Badge>
+          {state.step === 'done'
+            ? <Badge variant="completed">sesión activa</Badge>
+            : <Badge variant="cancelled">sin sesión</Badge>}
+        </div>
+
+        <p className="text-[11px] text-zinc-600 leading-relaxed">{blurb}</p>
+
+        <div className="flex flex-wrap gap-1.5">
+          {capabilities.map((cap) => (
+            <span key={cap} className={cn(
+              'text-[10px] font-mono px-2 py-0.5 rounded-sm border',
+              state.step === 'done' ? 'border-cyan-500/30 text-cyan-300' : 'border-zinc-800 text-zinc-600',
+            )}>
+              {cap}
+            </span>
+          ))}
+        </div>
+
+        {/* Step 1 — email input */}
+        <div className="space-y-2">
+          <p className="text-[10px] text-zinc-500 uppercase tracking-wide">Paso 1 — Correo electrónico</p>
+          <div className="flex gap-2">
+            <input
+              aria-label={`${label} email`}
+              type="email"
+              autoComplete="email"
+              value={state.email}
+              onChange={(e) => setState((prev) => ({ ...prev, email: e.target.value }))}
+              placeholder="tu@correo.com"
+              className={cn(inputClass, 'flex-1')}
+              disabled={isBusy || state.step === 'done'}
+            />
+            <Button
+              size="sm"
+              onClick={() => startEmailLogin(service, setState)}
+              disabled={isBusy || !state.email.trim() || state.step === 'done'}
+            >
+              {isEmailBusy
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <LogIn className="w-3.5 h-3.5" />}
+              Iniciar sesión
+            </Button>
+          </div>
+        </div>
+
+        {/* Step 2 — code input (shown only when waiting for code) */}
+        {(state.step === 'code_required' || state.step === 'error') && (
+          <div className="space-y-2 border-t border-zinc-800 pt-3">
+            <p className="text-[10px] text-zinc-500 uppercase tracking-wide">
+              Paso 2 — Código de verificación
+            </p>
+            <p className="text-[11px] text-amber-300/80">
+              Revisa tu correo o teléfono y escribe el código que recibiste.
+            </p>
+            <div className="flex gap-2">
+              <input
+                aria-label={`${label} código`}
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                maxLength={8}
+                value={state.code}
+                onChange={(e) => setState((prev) => ({ ...prev, code: e.target.value.replace(/\D/g, '') }))}
+                placeholder="ej. 123456"
+                className={cn(inputClass, 'flex-1 font-mono tracking-widest')}
+                disabled={isCodeBusy}
+              />
+              <Button
+                size="sm"
+                onClick={() => submitLoginCode(service, state, setState)}
+                disabled={isCodeBusy || state.code.length < 4}
+              >
+                {isCodeBusy
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <Hash className="w-3.5 h-3.5" />}
+                Enviar código
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Result text */}
+        {state.result && (
+          <div className={cn(
+            'flex items-start gap-2 text-xs font-mono rounded-sm border px-3 py-2',
+            state.result.ok
+              ? 'border-emerald-500/30 text-emerald-400'
+              : 'border-amber-500/30 text-amber-300',
+          )}>
+            <ShieldCheck className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+            <span className="break-words">{state.result.text}</span>
+          </div>
+        )}
+
+        {/* Screenshot */}
+        {state.shot && (
+          <div className="inline-block border border-zinc-800 rounded-sm bg-zinc-950 p-3">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={state.shot} alt={`${label} screenshot`} className="w-[28rem] max-w-full h-auto" />
+          </div>
+        )}
+
+        {/* Reset when done or error */}
+        {(state.step === 'done' || state.step === 'error') && (
+          <div className="pt-1 border-t border-zinc-800">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setState(initEmailLogin())}
+              disabled={isBusy}
+            >
+              Reiniciar login
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   return (
     <ScrollArea className="h-full">
@@ -294,7 +525,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
             <input
               aria-label="Google client ID"
               value={google.client_id}
-              onChange={(event) => setGoogle((prev) => ({ ...prev, client_id: event.target.value }))}
+              onChange={(e) => setGoogle((prev) => ({ ...prev, client_id: e.target.value }))}
               placeholder="Client ID — …apps.googleusercontent.com"
               className={inputClass}
             />
@@ -303,7 +534,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
               type="password"
               autoComplete="off"
               value={google.client_secret}
-              onChange={(event) => setGoogle((prev) => ({ ...prev, client_secret: event.target.value }))}
+              onChange={(e) => setGoogle((prev) => ({ ...prev, client_secret: e.target.value }))}
               placeholder="Client secret — GOCSPX-…"
               className={inputClass}
             />
@@ -312,7 +543,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
               type="password"
               autoComplete="off"
               value={google.refresh_token}
-              onChange={(event) => setGoogle((prev) => ({ ...prev, refresh_token: event.target.value }))}
+              onChange={(e) => setGoogle((prev) => ({ ...prev, refresh_token: e.target.value }))}
               placeholder="Refresh token — 1//…"
               className={inputClass}
             />
@@ -386,10 +617,10 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
           </div>
 
           <p className="text-[11px] text-zinc-600 leading-relaxed">
-            Used only to establish a local browser session for “Continue with Google” flows. If Google asks for 2FA, EVA stops and sends a screenshot.
+            Used only to establish a local browser session for &ldquo;Continue with Google&rdquo; flows. If Google asks for 2FA, EVA stops and sends a screenshot.
           </p>
           <p className="text-[11px] font-mono text-amber-400/80 leading-relaxed">
-            Local setup: use BROWSER_HEADLESS=false in eva-core to complete 2FA interactively.
+            En servidor: usa el endpoint <code className="bg-zinc-900 px-1 rounded">/integrations/google-web/import-session</code> para importar cookies desde tu browser local.
           </p>
 
           <div className="space-y-2">
@@ -398,7 +629,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
               type="email"
               autoComplete="username"
               value={googleWeb.email}
-              onChange={(event) => setGoogleWeb((prev) => ({ ...prev, email: event.target.value }))}
+              onChange={(e) => setGoogleWeb((prev) => ({ ...prev, email: e.target.value }))}
               placeholder={googleWebIntegration?.secret_hint ? `Saved (${googleWebIntegration.secret_hint}) — paste email to replace` : 'Google email'}
               className={inputClass}
             />
@@ -407,7 +638,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
               type="password"
               autoComplete="current-password"
               value={googleWeb.password}
-              onChange={(event) => setGoogleWeb((prev) => ({ ...prev, password: event.target.value }))}
+              onChange={(e) => setGoogleWeb((prev) => ({ ...prev, password: e.target.value }))}
               placeholder="Google password"
               className={inputClass}
             />
@@ -451,9 +682,31 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
           </div>
         </div>
 
+        {/* ── Uber — email + OTP login ── */}
+        <EmailLoginSection
+          service="uber"
+          label="Uber"
+          icon={Car}
+          blurb="Inicia sesión con tu correo para que EVA pueda abrir Uber Web, ver tarifas y solicitar viajes (con aprobación requerida). El código de verificación llega a tu correo o teléfono."
+          capabilities={['Cotizar viajes', 'Pedir viaje (con aprobación)', 'Estado del viaje']}
+          state={uberLogin}
+          setState={setUberLogin}
+        />
+
+        {/* ── Rappi — email + OTP login ── */}
+        <EmailLoginSection
+          service="rappi"
+          label="Rappi"
+          icon={UtensilsCrossed}
+          blurb="Inicia sesión con tu correo para que EVA pueda hacer pedidos de comida y productos en Rappi (con aprobación requerida). El código de verificación llega a tu correo o teléfono."
+          capabilities={['Ver menús y productos', 'Hacer pedido (con aprobación)', 'Estado del pedido']}
+          state={rappiLogin}
+          setState={setRappiLogin}
+        />
+
         {/* ── Simple token providers ── */}
         {SIMPLE_PROVIDERS.map(({ provider, label, icon: Icon, blurb, capabilities, placeholder }) => {
-          const current = integrations.find((integration) => integration.provider === provider);
+          const current = integrations.find((i) => i.provider === provider);
           return (
             <div key={provider} className="border border-zinc-800 rounded-sm p-4 space-y-3 animate-fade-in">
               <div className="flex items-center gap-2">
@@ -465,12 +718,12 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
               </div>
               <p className="text-[11px] text-zinc-600">{blurb}</p>
               <div className="flex flex-wrap gap-1.5">
-                {capabilities.map((capability) => (
-                  <span key={capability} className={cn(
+                {capabilities.map((cap) => (
+                  <span key={cap} className={cn(
                     'text-[10px] font-mono px-2 py-0.5 rounded-sm border',
                     current ? 'border-cyan-500/30 text-cyan-300' : 'border-zinc-800 text-zinc-600',
                   )}>
-                    {capability}
+                    {cap}
                   </span>
                 ))}
               </div>
@@ -480,7 +733,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
                   autoComplete="off"
                   aria-label={`${label} token`}
                   value={drafts[provider] ?? ''}
-                  onChange={(event) => setDrafts((prev) => ({ ...prev, [provider]: event.target.value }))}
+                  onChange={(e) => setDrafts((prev) => ({ ...prev, [provider]: e.target.value }))}
                   placeholder={placeholder}
                   className={inputClass}
                 />

@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
 import { AuthenticatedRequest } from '../common/types';
 import { GoogleWebLoginService } from '../integrations/google-web-login.service';
 
@@ -13,5 +13,20 @@ export class GoogleWebController {
     @Req() req: AuthenticatedRequest,
   ) {
     return this.googleWeb.startSession(req.user.orgId, body?.task_id);
+  }
+
+  /**
+   * Import a Google session from cookies exported by the user's local browser.
+   * Body: { cookies: <Cookie-Editor JSON array> | <Playwright StorageState> }
+   * This is the server-safe alternative to manual browser login.
+   */
+  @Post('import-session')
+  @HttpCode(HttpStatus.OK)
+  importSession(
+    @Body() body: { cookies: unknown },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    if (!body?.cookies) throw new BadRequestException('cookies payload is required');
+    return this.googleWeb.importSession(req.user.orgId, body.cookies);
   }
 }

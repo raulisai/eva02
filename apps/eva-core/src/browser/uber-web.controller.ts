@@ -24,6 +24,28 @@ export class UberWebController {
     return this.uber.startGoogleLogin(req.user.orgId, body?.task_id);
   }
 
+  @Post('start-email-login')
+  @HttpCode(HttpStatus.OK)
+  startEmailLogin(
+    @Body() body: { email: string; task_id?: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const email = body?.email?.trim();
+    if (!email) throw new BadRequestException('email is required');
+    return this.uber.startEmailLogin(req.user.orgId, email, body?.task_id);
+  }
+
+  @Post('submit-login-code')
+  @HttpCode(HttpStatus.OK)
+  submitLoginCode(
+    @Body() body: { code: string; task_id?: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const code = body?.code?.trim();
+    if (!code) throw new BadRequestException('code is required');
+    return this.uber.submitLoginCode(req.user.orgId, code, body?.task_id);
+  }
+
   @Post('estimate')
   @HttpCode(HttpStatus.OK)
   estimate(

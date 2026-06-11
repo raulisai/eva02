@@ -19,6 +19,8 @@ import { ScheduleService } from '../schedule.service';
 import { ScriptForgeService } from '../script-forge.service';
 import { SoulContextService } from '../soul-context.service';
 import { UberWebService } from '../../integrations/uber-web.service';
+import { RappiWebService } from '../../integrations/rappi-web.service';
+import { GoogleWebLoginService } from '../../integrations/google-web-login.service';
 import { WhatsAppWebService } from '../../integrations/whatsapp-web.service';
 import { classifyTier } from '../tier';
 import { Task } from '../../tasks/task.types';
@@ -243,6 +245,8 @@ describe('AgentRunnerService', () => {
         {
           provide: UberWebService,
           useValue: {
+            startEmailLogin: jest.fn().mockResolvedValue({ ok: true, reason: 'code_required', session_id: 'uber-session-1', text: 'Ingresé el correo en Uber. Dime el código.' }),
+            submitLoginCode: jest.fn().mockResolvedValue({ ok: true, reason: 'logged_in', session_id: 'uber-session-1', text: '✅ Uber quedó autenticado.' }),
             startSession: jest.fn().mockResolvedValue({
               session_id: 'uber-session-1',
               state: 'logged_in',
@@ -392,6 +396,22 @@ describe('AgentRunnerService', () => {
           provide: CommunicationService,
           useValue: {
             listActiveChannels: jest.fn().mockResolvedValue(['dashboard']),
+          },
+        },
+        {
+          provide: RappiWebService,
+          useValue: {
+            startEmailLogin: jest.fn().mockResolvedValue({ ok: true, reason: 'code_required', session_id: 'rappi-session-1', text: 'Ingresé el correo en Rappi. Dime el código.' }),
+            submitLoginCode: jest.fn().mockResolvedValue({ ok: true, reason: 'logged_in', session_id: 'rappi-session-1', text: '✅ Rappi quedó autenticado.' }),
+            startSession: jest.fn().mockResolvedValue({ session_id: 'rappi-session-1', state: 'login_required', current_url: null }),
+          },
+        },
+        {
+          provide: GoogleWebLoginService,
+          useValue: {
+            openManualLogin: jest.fn().mockResolvedValue({ ok: true, app: 'Google Chrome', url: 'https://accounts.google.com', profile_id: 'profile-1', text: 'Chrome se abrió con el perfil de Google.' }),
+            startSession: jest.fn().mockResolvedValue({ ok: true, state: 'logged_in', session_id: 'google-session-1', text: 'Autenticado.' }),
+            hasCredential: jest.fn().mockResolvedValue(false),
           },
         },
       ],

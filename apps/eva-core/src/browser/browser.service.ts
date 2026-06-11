@@ -159,6 +159,28 @@ export class BrowserService {
     return { sessionId, selector };
   }
 
+  async getOrCreateProfile(orgId: string, service: string) {
+    return this.repo.getOrCreateProfile(orgId, service);
+  }
+
+  async findLatestOpenSession(profileId: string, orgId: string) {
+    return this.repo.findLatestOpenSessionForProfile(profileId, orgId);
+  }
+
+  async openWithStorageState(
+    input: { sessionId: string; profileId: string; url: string; storageState: unknown },
+    orgId: string,
+  ) {
+    const result = await this.runtime.openWithStorageState(input);
+    const session = await this.repo.createSession({
+      orgId,
+      profileId: input.profileId,
+      taskId: undefined,
+      metadata: { purpose: 'session-import' },
+    });
+    return { ...session, ...result };
+  }
+
   async close(sessionId: string, orgId: string) {
     const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     const state = await this.runtime.storageState(sessionId);

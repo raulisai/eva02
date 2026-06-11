@@ -125,6 +125,7 @@ describe('BrowserService', () => {
             wait: jest.fn(),
             close: jest.fn(),
             storageState: jest.fn().mockResolvedValue({ cookies: [{ name: 'sid', value: 'secret' }] }),
+            openWithStorageState: jest.fn().mockResolvedValue({ url: 'https://accounts.google.com/', title: 'Google' }),
           } satisfies BrowserRuntime,
         },
       ],

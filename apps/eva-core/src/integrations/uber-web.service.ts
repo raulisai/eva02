@@ -8,7 +8,7 @@ const UBER_DEEPLINK_URL = 'https://m.uber.com/ul/';
 const UBER_SERVICE = 'uber_web';
 const DEFAULT_SETTLE_MS = 5000;
 
-export type UberWebState = 'logged_in' | 'login_required' | 'quote_ready' | 'loading' | 'unknown';
+export type UberWebState = 'logged_in' | 'login_required' | 'email_required' | 'code_required' | 'quote_ready' | 'loading' | 'unknown';
 
 export interface UberSessionStatus {
   session_id: string;
@@ -70,6 +70,22 @@ export interface UberManualLoginResult {
   profile_id: string;
   closed_automated_session: boolean;
   text: string;
+}
+
+export interface UberEmailLoginStartResult {
+  ok: boolean;
+  reason: 'code_required' | 'already_logged_in' | 'no_email_field' | 'unknown';
+  session_id: string;
+  text: string;
+  screenshot?: BrowserScreenshot;
+}
+
+export interface UberCodeSubmitResult {
+  ok: boolean;
+  reason: 'logged_in' | 'invalid_code' | 'code_expired' | 'no_active_session' | 'unknown';
+  session_id?: string;
+  text: string;
+  screenshot?: BrowserScreenshot;
 }
 
 @Injectable()
@@ -236,6 +252,81 @@ export class UberWebService {
     return this.loginUberWithGoogleFromSession(orgId, opened.id, taskId);
   }
 
+  async startEmailLogin(orgId: string, email: string, taskId?: string): Promise<UberEmailLoginStartResult> {
+    const opened = await this.browser.open({
+      service: UBER_SERVICE,
+      url: UBER_HOME_URL,
+      task_id: taskId,
+      reuse_open: false,
+      metadata: { service: UBER_SERVICE, purpose: 'uber-email-login', email },
+    }, orgId);
+    await this.browser.wait(opened.id, orgId, this.settleMs());
+
+    const signals = await this.inspectPage(opened.id, orgId);
+    if (signals.state === 'logged_in' || signals.state === 'quote_ready') {
+      const screenshot = await this.browser.screenshot(opened.id, orgId);
+      return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Uber Web ya tiene sesión activa.', screenshot };
+    }
+
+    // Try to click "Use email" link if present (Uber shows phone by default)
+    await this.clickUseEmail(opened.id, orgId);
+    await this.browser.wait(opened.id, orgId, 1500);
+
+    const entered = await this.typeEmailAndContinue(opened.id, orgId, email);
+    if (!entered) {
+      const screenshot = await this.browser.screenshot(opened.id, orgId);
+      return { ok: false, reason: 'no_email_field', session_id: opened.id, text: 'No encontré el campo de email en Uber. Te envié screenshot para resolverlo manualmente.', screenshot };
+    }
+
+    await this.browser.wait(opened.id, orgId, 3000);
+    const afterSignals = await this.inspectPage(opened.id, orgId);
+    const screenshot = await this.browser.screenshot(opened.id, orgId);
+
+    if (afterSignals.state === 'code_required') {
+      return {
+        ok: true,
+        reason: 'code_required',
+        session_id: opened.id,
+        text: `Ingresé el correo **${email}** en Uber. Te enviaron un código de verificación — dímelo y lo escribo para completar el login.`,
+        screenshot,
+      };
+    }
+
+    if (afterSignals.state === 'logged_in' || afterSignals.state === 'quote_ready') {
+      return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Uber Web quedó autenticado directamente con el correo.', screenshot };
+    }
+
+    return { ok: false, reason: 'unknown', session_id: opened.id, text: 'Ingresé el correo pero Uber no mostró la pantalla de código. Te envié screenshot para verificar el estado.', screenshot };
+  }
+
+  async submitLoginCode(orgId: string, code: string, taskId?: string): Promise<UberCodeSubmitResult> {
+    const profile = await this.browser.getOrCreateProfile(orgId, UBER_SERVICE);
+    const session = await this.browser.findLatestOpenSession(profile.id, orgId);
+    if (!session) {
+      return { ok: false, reason: 'no_active_session', text: 'No encontré una sesión activa de Uber donde ingresar el código. Inicia el login primero.' };
+    }
+
+    const typed = await this.typeCodeAndSubmit(session.id, orgId, code);
+    if (!typed) {
+      const screenshot = await this.browser.screenshot(session.id, orgId);
+      return { ok: false, reason: 'unknown', session_id: session.id, text: 'No encontré el campo de código en la pantalla actual de Uber. Te envié screenshot.', screenshot };
+    }
+
+    await this.browser.wait(session.id, orgId, 3000);
+    const signals = await this.inspectPage(session.id, orgId);
+    const screenshot = await this.browser.screenshot(session.id, orgId);
+
+    if (signals.state === 'logged_in' || signals.state === 'quote_ready') {
+      return { ok: true, reason: 'logged_in', session_id: session.id, text: '✅ Uber Web quedó autenticado. Ya puedes pedir cotizaciones.', screenshot };
+    }
+
+    if (signals.state === 'code_required') {
+      return { ok: false, reason: 'invalid_code', session_id: session.id, text: 'El código parece incorrecto o expirado. Verifica y dime el código correcto.', screenshot };
+    }
+
+    return { ok: false, reason: 'unknown', session_id: session.id, text: 'Ingresé el código pero Uber no terminó de autenticar. Te envié screenshot del estado actual.', screenshot };
+  }
+
   async openManualLogin(orgId: string): Promise<UberManualLoginResult> {
     const opened = await this.browser.openManualProfile({
       service: UBER_SERVICE,
@@ -307,6 +398,12 @@ export class UberWebService {
 
         if (quoteCandidates.length > 0) {
           return { state: 'quote_ready', googleLoginAvailable, quoteCandidates, textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
+        }
+
+        const codeRequired = /verifica|verification code|c[oó]digo de verificaci[oó]n|enter.*code|ingresa.*c[oó]digo|check your email|revisa tu correo|one-time|otp/i.test(text)
+          && !loginRequired;
+        if (codeRequired) {
+          return { state: 'code_required', googleLoginAvailable, quoteCandidates: [], textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
         }
 
         if (loginRequired || googleLoginAvailable || location.href.includes('/login')) {
@@ -399,6 +496,86 @@ export class UberWebService {
         'Uber todavía no quedó autenticado. Te envié screenshot del estado actual; cuando completes el paso manual, reintento la cotización.',
       ].join('\n'),
     };
+  }
+
+  private async clickUseEmail(sessionId: string, orgId: string): Promise<boolean> {
+    return this.browser.evaluate<boolean>(sessionId, orgId, () => {
+      const candidates = Array.from(document.querySelectorAll('a, button, div[role="button"], span[role="button"]'));
+      const match = candidates.find((el) => {
+        const text = `${el.textContent ?? ''} ${el.getAttribute('aria-label') ?? ''}`.toLowerCase();
+        return /use email|usar correo|email instead|correo electrónico|sign in with email|iniciar.*correo/i.test(text);
+      });
+      if (!match) return false;
+      (match as HTMLElement).click();
+      return true;
+    });
+  }
+
+  private async typeEmailAndContinue(sessionId: string, orgId: string, email: string): Promise<boolean> {
+    return this.browser.evaluate<boolean, { email: string }>(sessionId, orgId, ({ email }) => {
+      const isVisible = (el: HTMLElement | null) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0;
+      };
+      const selectors = ['input[type="email"]', 'input[name="email"]', 'input[placeholder*="mail"]', 'input[placeholder*="correo"]'];
+      const input = selectors.map(s => document.querySelector(s) as HTMLInputElement).find(el => isVisible(el));
+      if (!input) return false;
+      input.focus();
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (nativeInputValueSetter) {
+        nativeInputValueSetter.call(input, email);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        input.value = email;
+      }
+      // Click continue button
+      const buttons = Array.from(document.querySelectorAll('button[type="submit"], button'));
+      const btn = buttons.find(el => {
+        const txt = el.textContent?.toLowerCase() ?? '';
+        return (/continuar|continue|next|siguiente|enviar|send|submit/i.test(txt)) && isVisible(el as HTMLElement);
+      }) ?? buttons.find(el => isVisible(el as HTMLElement));
+      if (btn) (btn as HTMLElement).click();
+      return true;
+    }, { email });
+  }
+
+  private async typeCodeAndSubmit(sessionId: string, orgId: string, code: string): Promise<boolean> {
+    return this.browser.evaluate<boolean, { code: string }>(sessionId, orgId, ({ code }) => {
+      const isVisible = (el: HTMLElement | null) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0;
+      };
+      // Try individual digit inputs first (OTP widget pattern)
+      const digitInputs = Array.from(document.querySelectorAll('input[type="tel"], input[type="number"], input[maxlength="1"], input[data-testid*="otp"]'))
+        .filter(el => isVisible(el as HTMLElement)) as HTMLInputElement[];
+      if (digitInputs.length >= 4) {
+        digitInputs.slice(0, code.length).forEach((inp, i) => {
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+          if (setter) { setter.call(inp, code[i]); inp.dispatchEvent(new Event('input', { bubbles: true })); }
+          else inp.value = code[i];
+        });
+        const btn = document.querySelector('button[type="submit"]') as HTMLElement;
+        if (btn && isVisible(btn)) btn.click();
+        return true;
+      }
+      // Single code input
+      const selectors = ['input[autocomplete="one-time-code"]', 'input[name*="code"]', 'input[placeholder*="código"]', 'input[placeholder*="code"]', 'input[type="tel"]'];
+      const input = selectors.map(s => document.querySelector(s) as HTMLInputElement).find(el => isVisible(el));
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+      if (setter) { setter.call(input, code); input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); }
+      else input.value = code;
+      const buttons = Array.from(document.querySelectorAll('button[type="submit"], button'));
+      const btn = buttons.find(el => {
+        const txt = el.textContent?.toLowerCase() ?? '';
+        return (/confirmar|confirm|verif|enviar|send|continue|continuar|submit/i.test(txt)) && isVisible(el as HTMLElement);
+      }) ?? buttons.find(el => isVisible(el as HTMLElement));
+      if (btn) (btn as HTMLElement).click();
+      return true;
+    }, { code });
   }
 
   private async clickContinueWithGoogle(sessionId: string, orgId: string): Promise<boolean> {
