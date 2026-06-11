@@ -65,6 +65,8 @@ const MAX_DEPTH = 1;
 const OBSERVATION_LIMIT = 1200;
 /** Args mostrados en PASOS PREVIOS — el código propio debe verse para poder corregirlo. */
 const ARGS_HISTORY_LIMIT = 800;
+/** Cuántos pasos recientes se muestran a fidelidad completa; los previos se comprimen. */
+const RECENT_FULL_STEPS = 2;
 const DEFAULT_ROOT_STEPS = 6;
 const DEFAULT_SUB_STEPS = 3;
 /** Two consecutive unparseable decisions → the model/key isn't up to it, bail out. */
@@ -118,6 +120,10 @@ export class AgentLoopService {
     const log = opts.log ?? (async () => undefined);
     const available = this.tools.filter((t) => !t.rootOnly || depth === 0);
     const extras = depth === 0 ? await this.resolveExtras(orgId, goal) : { skills: [], secretAliases: [] };
+    // El system (rol + herramientas + skills + secrets + reglas) es idéntico en
+    // todos los pasos del run: se calcula UNA vez y se manda como prefijo
+    // cacheable. Así no se re-cobran ~600 tokens estáticos por paso.
+    const systemPrompt = this.buildSystemPrompt(opts, available, extras);
 
     const steps: AgentLoopStep[] = [];
     let tokensUsed = 0;
@@ -132,7 +138,7 @@ export class AgentLoopService {
       let decision: { thought: string; tool: string; args: Record<string, unknown> } | null = null;
       try {
         const res = await this.modelRouter.generate(
-          this.buildLoopPrompt(goal, opts, steps, available, maxSteps - i, extras),
+          this.buildUserPrompt(goal, opts.context, steps, maxSteps - i),
           {
             orgId,
             taskId,
@@ -141,6 +147,8 @@ export class AgentLoopService {
             responseFormat: 'json',
             temperature: 0,
             maxTokens: DECIDE_MAX_TOKENS,
+            systemPrompt,
+            cacheSystem: true,
           },
         );
         tokensUsed += res.usage.totalTokens;
@@ -236,26 +244,19 @@ export class AgentLoopService {
 
   // ── prompt ────────────────────────────────────────────────────────────────
 
-  private buildLoopPrompt(
-    goal: string,
-    opts: AgentLoopOptions,
-    steps: AgentLoopStep[],
-    tools: ToolSpec[],
-    stepsLeft: number,
-    extras: LoopExtras,
-  ): string {
+  /**
+   * Bloque ESTÁTICO del run: rol + catálogo de herramientas + skills + secrets
+   * + reglas. Idéntico en todos los pasos → se manda como systemPrompt cacheable
+   * para no re-cobrar tokens de entrada en cada decisión.
+   */
+  private buildSystemPrompt(opts: AgentLoopOptions, tools: ToolSpec[], extras: LoopExtras): string {
     const blocks: string[] = [
       `Eres EVA en modo agente autónomo${opts.role ? `, actuando como ${opts.role}` : ''}. Resuelve el OBJETIVO eligiendo UNA acción por turno.`,
-      '',
-      `OBJETIVO: ${goal}`,
-    ];
-    if (opts.context) blocks.push('', `CONTEXTO:\n${opts.context}`);
-    blocks.push(
       '',
       'HERRAMIENTAS:',
       ...tools.map((t) => `- ${t.usage}`),
       '- final_answer{"text"}: entrega la respuesta final al usuario (español, directa).',
-    );
+    ];
     if (extras.skills.length > 0) {
       blocks.push(
         '',
@@ -269,22 +270,50 @@ export class AgentLoopService {
         `SECRETS DISPONIBLES (escribe el alias literal en tu código; EVA sustituye el valor al ejecutar y tú NUNCA lo ves): ${extras.secretAliases.join(', ')}`,
       );
     }
-    if (steps.length > 0) {
-      blocks.push('', 'PASOS PREVIOS:');
-      for (const s of steps) {
-        blocks.push(`→ ${s.tool}(${this.truncate(JSON.stringify(s.args), ARGS_HISTORY_LIMIT)}) ⇒ ${s.observation}`);
-      }
-    }
     blocks.push(
       '',
       'REGLAS:',
       '- Antes de resolver desde cero, revisa memory_recall y las SKILLS GUARDADAS.',
       '- Para código: divide en pasos pequeños (inspeccionar→preparar→ejecutar→verificar). Los archivos en /work persisten entre pasos de esta tarea.',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
-      `- Te quedan ${stepsLeft} acciones. Las herramientas son de solo lectura/sandbox: si el objetivo exige enviar o modificar algo externo, junta la información y explica en final_answer qué quedaría pendiente de aprobación.`,
+      '- Las herramientas son de solo lectura/sandbox: si el objetivo exige enviar o modificar algo externo, junta la información y explica en final_answer qué quedaría pendiente de aprobación.',
       'Responde SOLO con JSON: {"thought":"breve","tool":"<nombre>","args":{...}}',
     );
     return blocks.join('\n');
+  }
+
+  /**
+   * Parte DINÁMICA: objetivo + contexto + historial de pasos + acciones
+   * restantes. Es lo único que cambia entre pasos, así que es lo único que
+   * paga tokens nuevos. Las observaciones viejas van compactadas.
+   */
+  private buildUserPrompt(goal: string, context: string | undefined, steps: AgentLoopStep[], stepsLeft: number): string {
+    const blocks: string[] = [`OBJETIVO: ${goal}`];
+    if (context) blocks.push('', `CONTEXTO:\n${context}`);
+    if (steps.length > 0) {
+      blocks.push('', 'PASOS PREVIOS:', ...this.renderHistory(steps));
+    }
+    blocks.push('', `Te quedan ${stepsLeft} acciones. Elige la siguiente acción y responde SOLO con el JSON.`);
+    return blocks.join('\n');
+  }
+
+  /**
+   * Historial con fidelidad decreciente: las últimas RECENT_FULL acciones se
+   * muestran completas (el modelo aún razona sobre ellas); las anteriores se
+   * comprimen a una línea. Evita el crecimiento O(n²) del prompt por paso.
+   */
+  private renderHistory(steps: AgentLoopStep[]): string[] {
+    return steps.map((s, idx) => {
+      const recent = idx >= steps.length - RECENT_FULL_STEPS;
+      const args = this.truncate(JSON.stringify(s.args), recent ? ARGS_HISTORY_LIMIT : 100);
+      const obs = recent ? s.observation : this.compactObservation(s.observation);
+      return `→ ${s.tool}(${args}) ⇒ ${obs}`;
+    });
+  }
+
+  private compactObservation(obs: string): string {
+    const firstMeaningful = obs.split('\n').find((l) => l.trim()) ?? obs;
+    return this.truncate(firstMeaningful, 160);
   }
 
   private parseDecision(raw: string): { thought: string; tool: string; args: Record<string, unknown> } | null {

@@ -267,7 +267,15 @@ export class ModelRouterService {
       max_tokens: opts.maxTokens ?? 1024,
       messages:   [{ role: 'user', content }],
     };
-    if (system) body['system'] = system;
+    if (system) {
+      // cacheSystem → bloque cacheable (prompt caching de Anthropic). El prefijo
+      // estable se reusa entre pasos del bucle sin re-cobrar tokens de entrada.
+      // Si el system es muy corto para el mínimo de caché, Anthropic lo ignora
+      // sin error, así que es seguro marcarlo siempre que pidan cacheSystem.
+      body['system'] = opts.cacheSystem
+        ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }]
+        : system;
+    }
     if (opts.temperature !== undefined) body['temperature'] = opts.temperature;
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {

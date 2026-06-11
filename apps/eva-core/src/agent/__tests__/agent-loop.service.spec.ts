@@ -36,6 +36,7 @@ describe('AgentLoopService', () => {
   let sandbox: jest.Mocked<SandboxService>;
   let skillLibrary: jest.Mocked<SkillLibraryService>;
   let approvals: jest.Mocked<ApprovalsService>;
+  let drive: jest.Mocked<GoogleDriveService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -122,6 +123,7 @@ describe('AgentLoopService', () => {
     sandbox = module.get(SandboxService);
     skillLibrary = module.get(SkillLibraryService);
     approvals = module.get(ApprovalsService);
+    drive = module.get(GoogleDriveService);
   });
 
   it('returns the final answer when the model answers directly', async () => {
@@ -350,9 +352,10 @@ describe('AgentLoopService', () => {
 
     const result = await service.run(ORG, TASK, 'limpia mis descargas');
 
-    const firstPrompt = modelRouter.generate.mock.calls[0][0] as string;
-    expect(firstPrompt).toContain('SKILLS GUARDADAS');
-    expect(firstPrompt).toContain('gen-cleaner');
+    // Las skills viven en el systemPrompt cacheable, no en el user prompt.
+    const firstSystem = modelRouter.generate.mock.calls[0][1]!.systemPrompt as string;
+    expect(firstSystem).toContain('SKILLS GUARDADAS');
+    expect(firstSystem).toContain('gen-cleaner');
     expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, { kind: 'python', code: 'print("clean")', orgId: ORG });
     expect(result.steps[0].observation).toContain('[skill gen-cleaner]');
   });
@@ -381,9 +384,11 @@ describe('AgentLoopService', () => {
 
     await service.run(ORG, TASK, 'usa la API de stripe');
 
-    const prompt = modelRouter.generate.mock.calls[0][0] as string;
-    expect(prompt).toContain('§§secret(stripe)');
-    expect(prompt).not.toContain('inactivo');
+    const system = modelRouter.generate.mock.calls[0][1]!.systemPrompt as string;
+    expect(system).toContain('§§secret(stripe)');
+    expect(system).not.toContain('inactivo');
+    // marcado cacheable para no re-cobrar el prefijo estático cada paso
+    expect(modelRouter.generate.mock.calls[0][1]!.cacheSystem).toBe(true);
   });
 
   // ── delegate con rol ───────────────────────────────────────────────────────
@@ -396,8 +401,9 @@ describe('AgentLoopService', () => {
 
     const result = await service.run(ORG, TASK, 'proyecto de datos');
 
-    const subPrompt = modelRouter.generate.mock.calls[1][0] as string;
-    expect(subPrompt).toContain('actuando como programador');
+    // El rol delegado viaja en el systemPrompt del sub-agente.
+    const subSystem = modelRouter.generate.mock.calls[1][1]!.systemPrompt as string;
+    expect(subSystem).toContain('actuando como programador');
     expect(result.steps[0].observation).toBe('análisis listo');
   });
 
@@ -439,9 +445,45 @@ describe('AgentLoopService', () => {
 
     await service.run(ORG, TASK, 'objetivo');
 
-    const prompt = modelRouter.generate.mock.calls[0][0] as string;
-    expect(prompt).toContain('inspeccionar→preparar→ejecutar→verificar');
-    expect(prompt).toContain('Nunca declares éxito');
-    expect(prompt).toContain('/work persisten');
+    // Las reglas de disciplina viven en el systemPrompt estable.
+    const system = modelRouter.generate.mock.calls[0][1]!.systemPrompt as string;
+    expect(system).toContain('inspeccionar→preparar→ejecutar→verificar');
+    expect(system).toContain('Nunca declares éxito');
+    expect(system).toContain('/work persisten');
+  });
+
+  it('keeps the static system identical across steps so the prefix stays cacheable', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"1","tool":"web_search","args":{"query":"a"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"2","tool":"web_search","args":{"query":"b"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"fin"}}'));
+
+    await service.run(ORG, TASK, 'objetivo multi-paso');
+
+    const systems = modelRouter.generate.mock.calls.map((c) => c[1]!.systemPrompt);
+    // Mismo system en los 3 pasos → el prefijo cacheable da hits en pasos 2..N.
+    expect(systems[0]).toBe(systems[1]);
+    expect(systems[1]).toBe(systems[2]);
+  });
+
+  it('compacts older observations but keeps the two most recent at full fidelity', async () => {
+    const longObs = 'X'.repeat(900);
+    research.answer.mockResolvedValue({ text: longObs, tool: 'public-api', sources: [] });
+    drive.fetchForQuery.mockResolvedValue({ ok: true, text: 'Y'.repeat(900) });
+    gmail.fetchLatest.mockResolvedValue({ ok: true, text: 'Z'.repeat(900) });
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"1","tool":"web_search","args":{"query":"a"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"2","tool":"drive_read","args":{"query":"b"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"3","tool":"gmail_read","args":{}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"fin"}}'));
+
+    await service.run(ORG, TASK, 'objetivo largo');
+
+    // 4º decide (calls[3]): el paso 1 (web_search, viejo) va compactado; los
+    // pasos 2-3 (drive/gmail, recientes) siguen completos.
+    const lastUser = modelRouter.generate.mock.calls[3][0] as string;
+    expect(lastUser).not.toContain('X'.repeat(900));   // viejo, comprimido
+    expect(lastUser).toContain('Y'.repeat(900));        // reciente, completo
+    expect(lastUser).toContain('Z'.repeat(900));        // reciente, completo
   });
 });

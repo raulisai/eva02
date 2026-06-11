@@ -541,7 +541,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       // delegación a sub-agente) hasta resolver. Si el bucle no puede
       // (sin keys, sin decisiones válidas), cae al pipeline clásico.
       if (tier.tier === 'long') {
-        const handled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt, task.created_by);
+        const handled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt, task.created_by, soulContext);
         if (handled) return;
         await this.log(orgId, taskId, 'agent-loop no resolvió — usando pipeline clásico', 'loop');
       }
@@ -688,7 +688,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         const reason = staleReason ?? 'non-actionable';
         await this.log(orgId, taskId, `model answer rejected as ${reason}; trying project tools`, 'model');
         // El bucle agéntico tiene más herramientas e itera; es la primera opción.
-        const loopHandled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt, task.created_by);
+        const loopHandled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt, task.created_by, soulContext);
         if (loopHandled) return;
         const recovered = await this.recoverWithTools(orgId, taskId, contextualInput, startedAt, input);
         if (recovered) return;
@@ -1217,16 +1217,8 @@ export class AgentRunnerService implements OnApplicationBootstrap {
   ): string {
     const blocks: string[] = [input];
 
-    const p = soulContext.personal_profile;
-    const persona = soulContext.persona_context;
-    const profileBits = [
-      p.full_name ? `usuario: ${p.full_name}` : null,
-      p.preferred_address ? `llámale ${p.preferred_address}` : null,
-      (p.occupation ?? persona.occupation) ? `se dedica a ${p.occupation ?? persona.occupation}` : null,
-      p.current_location ? `está en ${p.current_location}` : null,
-      persona.communication_preferences ? `estilo preferido: ${persona.communication_preferences}` : null,
-    ].filter(Boolean);
-    if (profileBits.length > 0) blocks.push('', `(Contexto: ${profileBits.join(' · ')})`);
+    const identity = this.slimIdentityLine(soulContext);
+    if (identity) blocks.push('', `(Contexto: ${identity})`);
 
     if (proactiveTriggerMessages.length > 0) {
       blocks.push('', 'Sugerencias proactivas (menciónalas solo si fluye):', ...proactiveTriggerMessages.map(m => `- ${m}`));
@@ -1243,6 +1235,24 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     }
 
     return blocks.length === 1 ? input : blocks.join('\n');
+  }
+
+  /**
+   * Identidad esencial en una línea (~30 tokens): lo mínimo para que un agente
+   * actúe sin tener que gastar un memory_recall solo para saber quién es el
+   * usuario. Usado por el tier chat y por el bucle agéntico.
+   */
+  private slimIdentityLine(soulContext: AgentSoulContext): string | null {
+    const p = soulContext.personal_profile;
+    const persona = soulContext.persona_context;
+    const bits = [
+      p.full_name ? `usuario: ${p.full_name}` : null,
+      p.preferred_address ? `llámale ${p.preferred_address}` : null,
+      (p.occupation ?? persona.occupation) ? `se dedica a ${p.occupation ?? persona.occupation}` : null,
+      p.current_location ? `está en ${p.current_location}` : null,
+      persona.communication_preferences ? `estilo preferido: ${persona.communication_preferences}` : null,
+    ].filter(Boolean);
+    return bits.length > 0 ? bits.join(' · ') : null;
   }
 
   /**
@@ -1593,14 +1603,24 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     conversationContext: ConversationContextTurn[],
     startedAt: number,
     userId?: string,
+    soulContext?: AgentSoulContext,
   ): Promise<boolean> {
     try {
-      const context = conversationContext.length > 0
-        ? conversationContext
-          .slice(-4)
-          .map((turn) => `${turn.role === 'user' ? 'Usuario' : 'EVA'}: ${turn.text.slice(0, 300)}`)
-          .join('\n')
-        : undefined;
+      // Contexto mínimo necesario: identidad del usuario en una línea + últimos
+      // 4 turnos. Nada de agenda/metas/patrones (el agente los pide con sus
+      // herramientas si los necesita) → contexto suficiente sin inflar tokens.
+      const contextParts: string[] = [];
+      const identity = soulContext ? this.slimIdentityLine(soulContext) : null;
+      if (identity) contextParts.push(`Usuario: ${identity}`);
+      if (conversationContext.length > 0) {
+        contextParts.push(
+          conversationContext
+            .slice(-4)
+            .map((turn) => `${turn.role === 'user' ? 'Usuario' : 'EVA'}: ${turn.text.slice(0, 300)}`)
+            .join('\n'),
+        );
+      }
+      const context = contextParts.length > 0 ? contextParts.join('\n') : undefined;
       const outcome = await this.agentLoop.run(orgId, taskId, input, {
         context,
         userId,

@@ -789,11 +789,20 @@ describe('AgentRunnerService', () => {
       toolsUsed: ['web_search'],
     });
 
+    soul.getAgentContext.mockResolvedValue({
+      personal_profile: { full_name: 'Raúl', current_location: 'CDMX' },
+      cowork_context: {}, goals: [], persona_context: {},
+    } as never);
+
     await service.run(ORG, TASK);
 
     expect(agentLoop.run).toHaveBeenCalledWith(ORG, TASK,
       'automatiza un reporte diario de ventas con gráficos y envíalo',
-      expect.objectContaining({ log: expect.any(Function) }));
+      expect.objectContaining({ log: expect.any(Function), userId: 'user-1' }));
+    // Contexto mínimo necesario: identidad del usuario disponible sin gastar un memory_recall.
+    const loopCtx = (agentLoop.run.mock.calls[0][3] as { context?: string }).context ?? '';
+    expect(loopCtx).toContain('Raúl');
+    expect(loopCtx).toContain('CDMX');
     const resultEvent = events.publish.mock.calls.map(([event]) => event).find((event) => event.type === 'task.result');
     expect((resultEvent!.payload as { text: string; model: string }).model).toBe('agent-loop');
     expect((resultEvent!.payload as { text: string }).text).toContain('Reporte armado');

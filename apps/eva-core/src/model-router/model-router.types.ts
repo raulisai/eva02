@@ -16,6 +16,12 @@ export interface GenerateOptions {
   imageBase64?: string;
   imageMimeType?: string;
   requestType?: 'reasoning' | 'tools' | 'code' | 'response';
+  /**
+   * Marca el systemPrompt como prefijo cacheable. Útil cuando el MISMO system
+   * se reenvía muchas veces (p. ej. el bucle agéntico): Claude lo cachea con
+   * cache_control ephemeral; OpenAI/Gemini ya cachean el prefijo estable solos.
+   */
+  cacheSystem?: boolean;
 }
 
 export interface GenerateResult {
