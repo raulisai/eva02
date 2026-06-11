@@ -141,12 +141,14 @@ export class UberWebService {
   async estimateRide(orgId: string, input: {
     origin: string;
     destination: string;
+    url?: string;
     taskId?: string;
     skipGoogleLogin?: boolean;
   }): Promise<UberEstimateResult> {
+    const targetUrl = input.url || this.buildRouteUrl(input.origin, input.destination);
     const opened = await this.browser.open({
       service: UBER_SERVICE,
-      url: this.buildRouteUrl(input.origin, input.destination),
+      url: targetUrl,
       task_id: input.taskId,
       reuse_open: true,
       metadata: {
@@ -181,6 +183,7 @@ export class UberWebService {
           return this.estimateRide(orgId, {
             origin: input.origin,
             destination: input.destination,
+            url: input.url,
             taskId: input.taskId,
             skipGoogleLogin: true,
           });

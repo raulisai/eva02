@@ -1,20 +1,185 @@
-'use client';
-
+import { useState, useEffect } from 'react';
 import { useTaskEvents, useLiveStatus } from '@/hooks/use-ws';
 import { StatusBadge } from './status-badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { shortId, age } from '@/lib/utils';
-import type { Task, TokenLog } from '@/lib/types';
-import { Brain, BarChart3, Code, MessageSquare, Cpu } from 'lucide-react';
+import type { Task, TokenLog, EvaEvent, TaskStatus } from '@/lib/types';
+import { coreFetch } from '@/lib/core-api';
+import { Brain, BarChart3, Code, MessageSquare, Cpu, RotateCcw, Square, Loader2 } from 'lucide-react';
 
 interface TaskDetailProps {
   task: Task;
   tokenLogs?: TokenLog[];
+  initialEvents?: EvaEvent[];
 }
 
-export function TaskDetail({ task, tokenLogs = [] }: TaskDetailProps) {
-  const liveStatus = useLiveStatus(task.id) ?? task.status;
-  const taskEvents = useTaskEvents(task.id);
+function EventItem({ ev }: { ev: EvaEvent }) {
+  const [expanded, setExpanded] = useState(false);
+  const timeStr = new Date(ev.ts).toLocaleTimeString();
+
+  let title = ev.type;
+  let content = null;
+  let badgeColor = 'bg-zinc-800 text-zinc-400 border-zinc-700';
+
+  if (ev.type === 'task.log') {
+    const scope = String(ev.payload.scope ?? 'debug');
+    const msg = String(ev.payload.message ?? '');
+    const isError = ev.payload.level === 'error' || msg.startsWith('ERROR:') || msg.toLowerCase().includes('failed') || msg.toLowerCase().includes('error');
+    
+    title = `log [${scope}]`;
+    badgeColor = isError 
+      ? 'bg-red-500/10 text-red-400 border-red-500/20' 
+      : scope === 'pipeline'
+        ? 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+        : scope === 'tools'
+          ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+          : scope === 'model'
+            ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'
+            : scope === 'loop'
+              ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20'
+              : 'bg-zinc-800 text-zinc-400 border-zinc-700';
+
+    content = (
+      <p className={`font-mono text-xs break-words ${isError ? 'text-red-400 font-semibold' : 'text-zinc-300'}`}>
+        {msg}
+      </p>
+    );
+  } else if (ev.type === 'task.say') {
+    title = 'say';
+    badgeColor = 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20';
+    content = (
+      <div className="bg-cyan-500/5 border border-cyan-500/20 rounded p-2 text-xs text-cyan-200 italic">
+        <span className="font-semibold not-italic text-cyan-400 mr-1">EVA:</span>
+        "{String(ev.payload.text ?? '')}"
+      </div>
+    );
+  } else if (ev.type === 'task.result') {
+    title = 'result';
+    badgeColor = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
+    content = (
+      <div className="bg-emerald-500/5 border border-emerald-500/20 rounded p-2 text-xs text-emerald-300 font-mono whitespace-pre-wrap">
+        <span className="font-semibold text-emerald-400 block mb-1">🏁 Final Result:</span>
+        {typeof ev.payload.text === 'string' ? ev.payload.text : JSON.stringify(ev.payload, null, 2)}
+      </div>
+    );
+  } else if (ev.type === 'task.form_request') {
+    title = 'form request';
+    badgeColor = 'bg-purple-500/10 text-purple-400 border-purple-500/20';
+    content = (
+      <div className="bg-purple-500/5 border border-purple-500/20 rounded p-2 text-xs text-purple-300">
+        <span className="font-semibold text-purple-400 block mb-1">📝 Form Request:</span>
+        {String(ev.payload.message ?? '')}
+      </div>
+    );
+  } else if (ev.type === 'task.setup_required') {
+    title = 'setup required';
+    badgeColor = 'bg-rose-500/10 text-rose-400 border-rose-500/20';
+    content = (
+      <div className="bg-rose-500/5 border border-rose-500/20 rounded p-2 text-xs text-rose-300">
+        <span className="font-semibold text-rose-400 block mb-1">⚙️ Setup Required:</span>
+        {String(ev.payload.message ?? '')}
+      </div>
+    );
+  } else {
+    content = (
+      <pre className="text-[10px] font-mono text-zinc-500 overflow-x-auto">
+        {JSON.stringify(ev.payload, null, 2)}
+      </pre>
+    );
+  }
+
+  return (
+    <div className="border border-zinc-900 bg-zinc-950/20 rounded p-2.5 hover:bg-zinc-900/10 transition-colors">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[9px] text-zinc-600">{timeStr}</span>
+          <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-medium border ${badgeColor}`}>
+            {title}
+          </span>
+        </div>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="text-[9px] font-mono text-zinc-500 hover:text-zinc-300 underline"
+        >
+          {expanded ? 'Hide JSON' : 'Show JSON'}
+        </button>
+      </div>
+      
+      <div className="pl-1">
+        {content}
+      </div>
+
+      {expanded && (
+        <div className="mt-2 pt-2 border-t border-zinc-900/60">
+          <pre className="text-[9px] font-mono text-zinc-500 overflow-x-auto bg-zinc-950/50 p-2 rounded max-h-40">
+            {JSON.stringify(ev, null, 2)}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function TaskDetail({ task, tokenLogs = [], initialEvents = [] }: TaskDetailProps) {
+  const liveStatusFromWs = useLiveStatus(task.id);
+  const [localStatus, setLocalStatus] = useState<TaskStatus>(task.status);
+  const currentStatus = liveStatusFromWs ?? localStatus;
+
+  const liveEvents = useTaskEvents(task.id);
+  const [eventsList, setEventsList] = useState<EvaEvent[]>(initialEvents);
+  const [isActionLoading, setIsActionLoading] = useState(false);
+
+  // Sync WebSocket state updates with localStatus
+  useEffect(() => {
+    if (liveStatusFromWs) {
+      setLocalStatus(liveStatusFromWs);
+    }
+  }, [liveStatusFromWs]);
+
+  // Sync / append new live events when they arrive
+  useEffect(() => {
+    if (liveEvents.length > 0) {
+      setEventsList(prev => {
+        const existingIds = new Set(prev.map(e => e.id || `${e.type}-${e.ts}`));
+        const newEvents = liveEvents.filter(e => !existingIds.has(e.id || `${e.type}-${e.ts}`));
+        if (newEvents.length === 0) return prev;
+        return [...prev, ...newEvents].sort((a, b) => a.ts - b.ts);
+      });
+    }
+  }, [liveEvents]);
+
+  const isTerminal = ['completed', 'failed', 'cancelled'].includes(currentStatus);
+  const cancelLabel = currentStatus === 'running' || currentStatus === 'planning' ? 'Stop Task' : 'Cancel Task';
+
+  const handleCancel = async () => {
+    setIsActionLoading(true);
+    try {
+      await coreFetch(`/tasks/${task.id}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'cancelled' }),
+      });
+      setLocalStatus('cancelled');
+    } catch (err) {
+      console.error('Failed to cancel task:', err);
+    } finally {
+      setIsActionLoading(false);
+    }
+  };
+
+  const handleRetry = async () => {
+    setIsActionLoading(true);
+    try {
+      await coreFetch(`/tasks/${task.id}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'pending' }),
+      });
+      setLocalStatus('pending');
+    } catch (err) {
+      console.error('Failed to retry task:', err);
+    } finally {
+      setIsActionLoading(false);
+    }
+  };
 
 
   // Summing tokens and cost for this task
@@ -51,7 +216,36 @@ export function TaskDetail({ task, tokenLogs = [] }: TaskDetailProps) {
               <p className="text-sm text-zinc-400 mt-1">{task.description}</p>
             )}
           </div>
-          <StatusBadge status={liveStatus} />
+          <div className="flex items-center gap-3">
+            {isTerminal ? (
+              <button
+                onClick={handleRetry}
+                disabled={isActionLoading}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium font-mono border border-emerald-500/30 text-emerald-400 bg-emerald-500/5 hover:bg-emerald-500/10 hover:border-emerald-500/50 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                {isActionLoading ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RotateCcw className="w-3.5 h-3.5" />
+                )}
+                Retry Task
+              </button>
+            ) : (
+              <button
+                onClick={handleCancel}
+                disabled={isActionLoading}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium font-mono border border-red-500/30 text-red-400 bg-red-500/5 hover:bg-red-500/10 hover:border-red-500/50 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                {isActionLoading ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                )}
+                {cancelLabel}
+              </button>
+            )}
+            <StatusBadge status={currentStatus} />
+          </div>
         </div>
 
         <div className={`grid ${tokenLogs.length > 0 ? 'grid-cols-5' : 'grid-cols-3'} gap-4 pt-3 border-t border-zinc-800`}>
@@ -105,23 +299,18 @@ export function TaskDetail({ task, tokenLogs = [] }: TaskDetailProps) {
         {/* Live event log for this task */}
         <div className="panel flex flex-col min-h-0">
           <p className="text-[10px] font-mono text-zinc-600 uppercase tracking-widest px-3 py-2 border-b border-zinc-800 flex-shrink-0">
-            Live events
-            {taskEvents.length > 0 && (
-              <span className="ml-2 text-cyan-500">{taskEvents.length}</span>
+            Execution Log
+            {eventsList.length > 0 && (
+              <span className="ml-2 text-cyan-500">{eventsList.length}</span>
             )}
           </p>
           <ScrollArea className="flex-1 p-3">
-            {taskEvents.length === 0 ? (
+            {eventsList.length === 0 ? (
               <p className="text-xs text-zinc-700 font-mono">Waiting for events…</p>
             ) : (
               <div className="space-y-2">
-                {taskEvents.map((ev, i) => (
-                  <div key={i} className="event-new">
-                    <p className="font-mono text-[10px] text-zinc-600">
-                      {new Date(ev.ts).toLocaleTimeString()}
-                    </p>
-                    <p className="font-mono text-xs text-cyan-400">{ev.type}</p>
-                  </div>
+                {eventsList.map((ev, i) => (
+                  <EventItem key={ev.id || i} ev={ev} />
                 ))}
               </div>
             )}

@@ -1,5 +1,6 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import Redis from 'ioredis';
+import { DatabaseService } from '../database/database.service';
 
 export type EvaEventType =
   | 'task.created'
@@ -51,6 +52,10 @@ export class EventBusService implements OnModuleInit, OnModuleDestroy {
   private readonly handlers = new Map<EvaEventType, Array<(e: EvaEvent) => Promise<void>>>();
   private consuming = false;
 
+  constructor(
+    private readonly db: DatabaseService,
+  ) {}
+
   async onModuleInit() {
     const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
     this.publisher = new Redis(url, { lazyConnect: true });
@@ -89,6 +94,24 @@ export class EventBusService implements OnModuleInit, OnModuleDestroy {
         'ts', String(ts),
       );
       this.logger.debug(`Published ${event.type} [${id}]`);
+
+      // Persist task events to the task_events database table
+      if (event.taskId && event.orgId) {
+        await this.db.admin
+          .from('task_events')
+          .insert({
+            org_id: event.orgId,
+            task_id: event.taskId,
+            event_type: event.type,
+            payload: event.payload ?? {},
+          })
+          .then(({ error }) => {
+            if (error) {
+              this.logger.error(`Failed to persist task event ${event.type} to DB`, error);
+            }
+          });
+      }
+
       return id;
     } catch (err) {
       this.logger.error(`Failed to publish ${event.type}`, err);

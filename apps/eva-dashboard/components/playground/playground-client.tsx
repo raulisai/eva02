@@ -14,6 +14,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { StatusBadge } from '@/components/tasks/status-badge';
 import { cn, shortId } from '@/lib/utils';
 import type { EvaEvent, Task, TaskStatus } from '@/lib/types';
+import { InteractiveFormBubble } from './interactive-form-bubble';
 
 const STAGES = [
   { key: 'pending',              label: 'Received',  icon: Inbox },
@@ -105,12 +106,34 @@ export function PlaygroundClient() {
     setBusy(true);
     setError(null);
     try {
+      let deviceLocation: { latitude: number; longitude: number; accuracy?: number; timestamp?: number } | null = null;
+      if (typeof window !== 'undefined' && navigator.geolocation) {
+        deviceLocation = await new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              resolve({
+                latitude: pos.coords.latitude,
+                longitude: pos.coords.longitude,
+                accuracy: pos.coords.accuracy,
+                timestamp: pos.timestamp,
+              });
+            },
+            () => resolve(null),
+            { timeout: 2000, enableHighAccuracy: true }
+          );
+        });
+      }
+
       const created = await coreFetch<Task>('/tasks', {
         method: 'POST',
         body: JSON.stringify({
           title: text.length > 80 ? `${text.slice(0, 77)}...` : text,
           description: text,
-          metadata: { source: 'playground', conversation_context: conversationContext },
+          metadata: {
+            source: 'playground',
+            conversation_context: conversationContext,
+            device_location: deviceLocation || undefined,
+          },
         }),
       });
       setSession((prev) => [...prev, { task: created, order: text }]);
@@ -406,46 +429,40 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
         const payload = event.payload as {
           message?: string;
           form?: {
+            form_key?: string;
             title?: string;
             description?: string;
-            fields?: Array<{ id: string; type?: string; label?: string; placeholder?: string; required?: boolean }>;
+            fields?: Array<{ id: string; type?: string; label?: string; placeholder?: string; required?: boolean; profile_path?: string }>;
           };
         };
         const form = payload.form;
         return (
-          <div key={`form-${index}`} className="flex justify-start animate-slide-up">
-            <div className="max-w-[85%] border border-amber-500/30 bg-amber-500/5 rounded-sm p-3 space-y-3">
-              <div className="flex items-center gap-2 text-amber-200">
-                <ClipboardList className="w-3.5 h-3.5" />
-                <span className="text-xs font-medium">{form?.title ?? 'Falta informacion'}</span>
-              </div>
-              {(payload.message || form?.description) && (
-                <p className="text-xs text-zinc-300 leading-relaxed">{payload.message ?? form?.description}</p>
-              )}
-              <div className="space-y-2">
-                {(form?.fields ?? []).map((field) => (
-                  <label key={field.id} className="block space-y-1">
-                    <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
-                      {field.label ?? field.id}{field.required ? ' *' : ''}
-                    </span>
-                    {field.type === 'textarea' ? (
-                      <textarea
-                        placeholder={field.placeholder}
-                        rows={2}
-                        className="w-full bg-zinc-950 border border-zinc-700 rounded-sm px-2.5 py-2 text-xs text-zinc-100 placeholder:text-zinc-600"
-                      />
-                    ) : (
-                      <input
-                        type={field.type === 'number' ? 'number' : 'text'}
-                        placeholder={field.placeholder}
-                        className="w-full bg-zinc-950 border border-zinc-700 rounded-sm px-2.5 py-2 text-xs text-zinc-100 placeholder:text-zinc-600"
-                      />
-                    )}
-                  </label>
-                ))}
-              </div>
-            </div>
-          </div>
+          <InteractiveFormBubble
+            key={`form-${index}`}
+            taskId={entry.task.id}
+            orgId={entry.task.org_id}
+            message={payload.message}
+            form={form}
+            onSubmit={async (values) => {
+              const formKey = form?.form_key ?? 'unknown';
+              const description = JSON.stringify({ form_key: formKey, ...values });
+              await coreFetch<Task>('/tasks', {
+                method: 'POST',
+                body: JSON.stringify({
+                  title: `Formulario: ${form?.title ?? formKey}`,
+                  description,
+                  metadata: {
+                    source: 'playground',
+                    form_key: formKey,
+                    parent_task_id: entry.task.id,
+                    conversation_context: [
+                      { role: 'user', text: entry.order },
+                    ],
+                  },
+                }),
+              });
+            }}
+          />
         );
       })}
 

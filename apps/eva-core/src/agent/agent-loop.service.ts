@@ -6,6 +6,8 @@ import { ModelRouterService } from '../model-router/model-router.service';
 import { GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
 import { GoogleDriveService } from './google-drive.service';
+import { DatabaseService } from '../database/database.service';
+import { TaskCancelledError } from '../tasks/task.types';
 import { MissingInformationError, ResearchToolsService } from './research-tools.service';
 import { SandboxLanguage, SandboxService } from './sandbox.service';
 import { ScheduleService } from './schedule.service';
@@ -98,6 +100,7 @@ export class AgentLoopService {
   private readonly tools: ToolSpec[];
 
   constructor(
+    private readonly db: DatabaseService,
     private readonly modelRouter: ModelRouterService,
     private readonly research: ResearchToolsService,
     private readonly gmail: GmailService,
@@ -135,6 +138,18 @@ export class AgentLoopService {
     }
 
     for (let i = 0; i < maxSteps; i += 1) {
+      // Check if the task was cancelled by the user in the database
+      const { data: currentTask } = await this.db.admin
+        .from('tasks')
+        .select('status')
+        .eq('id', taskId)
+        .eq('org_id', orgId)
+        .maybeSingle();
+
+      if (currentTask?.status === 'cancelled') {
+        throw new TaskCancelledError();
+      }
+
       let decision: { thought: string; tool: string; args: Record<string, unknown> } | null = null;
       try {
         const res = await this.modelRouter.generate(

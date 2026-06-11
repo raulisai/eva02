@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AgentLoopService } from '../agent-loop.service';
+import { DatabaseService } from '../../database/database.service';
 import { ApprovalsService } from '../../approvals/approvals.service';
 import { IntegrationsService } from '../../integrations/integrations.service';
 import { ModelRouterService } from '../../model-router/model-router.service';
@@ -42,6 +43,22 @@ describe('AgentLoopService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AgentLoopService,
+        {
+          provide: DatabaseService,
+          useValue: {
+            admin: {
+              from: jest.fn().mockReturnValue({
+                select: jest.fn().mockReturnValue({
+                  eq: jest.fn().mockReturnValue({
+                    eq: jest.fn().mockReturnValue({
+                      maybeSingle: jest.fn().mockResolvedValue({ data: { status: 'running' } }),
+                    }),
+                  }),
+                }),
+              }),
+            },
+          },
+        },
         { provide: ModelRouterService, useValue: { generate: jest.fn() } },
         {
           provide: ResearchToolsService,

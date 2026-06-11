@@ -44,6 +44,23 @@ export default async function TaskDetailPage({ params }: { params: { id: string 
     .eq('org_id', profile.org_id)
     .order('created_at', { ascending: true });
 
+  // Query task events for this task, filtering by org_id
+  const { data: dbEvents } = await supabase
+    .from('task_events')
+    .select('*')
+    .eq('task_id', params.id)
+    .eq('org_id', profile.org_id)
+    .order('created_at', { ascending: true });
+
+  const initialEvents = (dbEvents || []).map(e => ({
+    id: e.id,
+    type: e.event_type,
+    orgId: e.org_id,
+    taskId: e.task_id,
+    payload: e.payload || {},
+    ts: new Date(e.created_at).getTime(),
+  }));
+
   return (
     <>
       <Topbar
@@ -59,7 +76,11 @@ export default async function TaskDetailPage({ params }: { params: { id: string 
         }
       />
       <div className="flex-1 min-h-0">
-        <TaskDetail task={task as Task} tokenLogs={(tokenLogs || []) as TokenLog[]} />
+        <TaskDetail
+          task={task as Task}
+          tokenLogs={(tokenLogs || []) as TokenLog[]}
+          initialEvents={initialEvents}
+        />
       </div>
     </>
   );

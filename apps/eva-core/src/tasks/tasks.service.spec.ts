@@ -157,5 +157,56 @@ describe('TasksService', () => {
       ).rejects.toThrow(BadRequestException);
       expect(repo.updateStatus).not.toHaveBeenCalled();
     });
+
+    it('allows transition from failed to pending and resets fields', async () => {
+      repo.findByIdOrThrow.mockResolvedValue(makeTask({ status: 'failed', started_at: 'yes', completed_at: 'yes', error: 'error text' }));
+      repo.updateStatus.mockResolvedValue(makeTask({ status: 'pending', title: 'Test task' }));
+
+      const result = await service.transition(MOCK_TASK_ID, MOCK_ORG_ID, 'pending');
+      expect(result.status).toBe('pending');
+      expect(repo.updateStatus).toHaveBeenCalledWith(
+        MOCK_TASK_ID,
+        MOCK_ORG_ID,
+        'pending',
+        { started_at: null, completed_at: null, error: null, result: null }
+      );
+      expect(events.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'task.created', orgId: MOCK_ORG_ID, taskId: MOCK_TASK_ID })
+      );
+    });
+
+    it('allows transition from cancelled to pending and resets fields', async () => {
+      repo.findByIdOrThrow.mockResolvedValue(makeTask({ status: 'cancelled', started_at: 'yes', completed_at: 'yes' }));
+      repo.updateStatus.mockResolvedValue(makeTask({ status: 'pending', title: 'Test task' }));
+
+      const result = await service.transition(MOCK_TASK_ID, MOCK_ORG_ID, 'pending');
+      expect(result.status).toBe('pending');
+      expect(repo.updateStatus).toHaveBeenCalledWith(
+        MOCK_TASK_ID,
+        MOCK_ORG_ID,
+        'pending',
+        { started_at: null, completed_at: null, error: null, result: null }
+      );
+      expect(events.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'task.created', orgId: MOCK_ORG_ID, taskId: MOCK_TASK_ID })
+      );
+    });
+
+    it('allows transition from completed to pending and resets fields', async () => {
+      repo.findByIdOrThrow.mockResolvedValue(makeTask({ status: 'completed', started_at: 'yes', completed_at: 'yes', result: { text: 'ok' } }));
+      repo.updateStatus.mockResolvedValue(makeTask({ status: 'pending', title: 'Test task' }));
+
+      const result = await service.transition(MOCK_TASK_ID, MOCK_ORG_ID, 'pending');
+      expect(result.status).toBe('pending');
+      expect(repo.updateStatus).toHaveBeenCalledWith(
+        MOCK_TASK_ID,
+        MOCK_ORG_ID,
+        'pending',
+        { started_at: null, completed_at: null, error: null, result: null }
+      );
+      expect(events.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'task.created', orgId: MOCK_ORG_ID, taskId: MOCK_TASK_ID })
+      );
+    });
   });
 });

@@ -9,7 +9,7 @@ import { ModelRouterService } from '../model-router/model-router.service';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { ToolRouterService } from '../tool-router/tool-router.service';
 import { TasksService } from '../tasks/tasks.service';
-import { Task } from '../tasks/task.types';
+import { Task, TaskCancelledError } from '../tasks/task.types';
 import { ConversationDigesterService } from './conversation-digester.service';
 import { DriveFetchResult, GoogleDriveService } from './google-drive.service';
 import { CreateEventInput } from './google-calendar.service';
@@ -126,7 +126,7 @@ const PUBLIC_API_DIRECT_SIGNALS = /\b(clima|weather|temperatura|pron[oó]stico|l
 const EMAIL_SIGNALS = /\b(correo|email|mail|mensajes|bandeja|inbox|gmail|outlook|mis mails|mis correos)\b/i;
 const CALENDAR_SIGNALS_PERSONAL = /\b(mi(s)? (citas?|eventos?|agenda|calendario)|qu[eé] tengo|tengo algo|tengo una cita)\b/i;
 const DRIVE_SIGNALS = /\b(drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|mis hojas|mis sheets|archivos? (grandes?|pesados?|de google)|carpeta(s)? (de google|en drive)|qu[eé] (archivos?|carpetas?|docs?) tengo)\b/i;
-const UBER_SIGNALS = /\b(uber|taxi|viaje)\b/i;
+const UBER_SIGNALS = /\b(uber|taxi|viajes?|viajar|vieajes?|traslado|transporte)\b/i;
 const UBER_ESTIMATE_SIGNALS = /\b(cu[aá]nto|cuanto|costo|costar|cuesta|sale|precio|tarifa|cotiza|cotizar|estimaci[oó]n|estimate|quote)\b/i;
 const UBER_ORDER_SIGNALS = /\b(pedir|pide|solicita|solicitar|ordena|ordenar|manda|mandar|confirma|confirmar|reserva|reservar)\b/i;
 const UBER_EMAIL_LOGIN_SIGNALS = /\b(inicia[r]?\s+(?:sesi[oó]n|sesion)|log\s*in|iniciar|conectar|vincular)\b.{0,30}\b(uber)\b|\b(uber)\b.{0,30}\b(correo|email|mail)\b/i;
@@ -360,7 +360,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       }
 
       // ── Uber email login fast-path ────────────────────────────────────────
-      if (UBER_EMAIL_LOGIN_SIGNALS.test(input) && !this.isUberBrowserQuoteRequest(input)) {
+      if (UBER_EMAIL_LOGIN_SIGNALS.test(input) && !await this.isUberBrowserQuoteRequest(input, orgId, conversationContext, taskId)) {
         await this.tasks.transition(taskId, orgId, 'planning');
         await this.tasks.transition(taskId, orgId, 'running');
         await this.say(orgId, taskId, 'Abro Uber e ingreso tu correo para iniciar sesión.');
@@ -377,7 +377,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       }
 
       // ── Uber Web quote fast-path — browser profile, screenshot, no ride order ──
-      if (this.isUberBrowserQuoteRequest(input)) {
+      if (await this.isUberBrowserQuoteRequest(input, orgId, conversationContext, taskId)) {
         await this.tasks.transition(taskId, orgId, 'planning');
         await this.tasks.transition(taskId, orgId, 'running');
         await this.say(orgId, taskId, 'Abro Uber Web solo para cotizar y te mando screenshot antes de cualquier acción.');
@@ -699,6 +699,10 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
       this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: result.text, conversationContext });
     } catch (error) {
+      if (error instanceof TaskCancelledError) {
+        await this.log(orgId, taskId, 'Ejecución abortada: la tarea fue cancelada por el usuario.', 'pipeline');
+        return;
+      }
       if (error instanceof MissingInformationError) {
         await this.requestMissingInformation(orgId, taskId, error);
         return;
@@ -851,10 +855,21 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     startedAt: number,
     conversationContext: ConversationContextTurn[],
   ): Promise<void> {
-    const route = await this.extractUberRoute(input, orgId);
+    let route: { origin: string; destination: string; url?: string } | null;
+    try {
+      route = await this.extractUberRoute(input, orgId, conversationContext, true, taskId);
+    } catch (err) {
+      if (err instanceof MissingInformationError) {
+        await this.requestMissingInformation(orgId, taskId, err);
+        return;
+      }
+      throw err;
+    }
+    if (!route) return;
     const result = await this.uber.estimateRide(orgId, {
       origin: route.origin,
       destination: route.destination,
+      url: route.url,
       taskId,
     });
     await this.maybePublishBrowserScreenshot(orgId, taskId, result.session.screenshot, 'Uber Web');
@@ -865,10 +880,14 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     }
   }
 
-  private isUberBrowserQuoteRequest(input: string): boolean {
-    return UBER_SIGNALS.test(input)
-      && UBER_ESTIMATE_SIGNALS.test(input)
-      && !UBER_ORDER_SIGNALS.test(input);
+  private async isUberBrowserQuoteRequest(input: string, orgId: string, context: ConversationContextTurn[] = [], taskId?: string): Promise<boolean> {
+    if (/m\.uber\.com/i.test(input)) return true;
+    if (UBER_SIGNALS.test(input) && !UBER_EMAIL_LOGIN_SIGNALS.test(input)) {
+      if (/\buber\b/i.test(input)) return true;
+      const route = await this.extractUberRoute(input, orgId, context, false, taskId);
+      if (route) return true;
+    }
+    return false;
   }
 
   private isOtpSubmission(input: string, conversationContext: ConversationContextTurn[]): boolean {
@@ -1015,57 +1034,209 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     return null;
   }
 
-  private async extractUberRoute(input: string, orgId: string): Promise<{ origin: string; destination: string }> {
-    const patterns = [
-      /\b(?:de|desde)\s+(.+?)\s+(?:a|hasta|para)\s+(.+?)(?:\?|$|[.,])/i,
-      /\borigen[:\s]+(.+?)\s+destino[:\s]+(.+?)(?:\?|$|[.,])/i,
-      /\b(?:a|hasta|para)\s+(.+?)(?:\?|$|[.,])/i,
-    ];
-
-    for (const pattern of patterns) {
-      const match = input.match(pattern);
-      if (!match) continue;
-      const origin = match.length > 2 ? await this.normalizeUberPlace(match[1], orgId) : await this.defaultUberOrigin(orgId);
-      const destination = this.cleanUberPlace(match.length > 2 ? match[2] : match[1]);
-      if (origin && destination) return { origin, destination };
+  private async reverseGeocode(lat: number, lon: number): Promise<string | null> {
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&accept-language=es`, {
+        headers: {
+          'User-Agent': 'EVA-Agentic-Platform/1.0 (djoker@eva.ai)',
+        },
+      });
+      if (res.ok) {
+        const data = await res.json() as { display_name?: string };
+        if (data.display_name) {
+          return data.display_name;
+        }
+      }
+    } catch (error) {
+      this.logger.warn(`Reverse geocoding failed: ${(error as Error).message}`);
     }
-
-    throw new MissingInformationError(
-      'Para cotizar Uber necesito origen y destino.',
-      {
-        form_key: 'uber.estimate_route',
-        title: 'Ruta para cotizar Uber',
-        description: 'Solo consultaré tarifas visibles y mandaré screenshot; no pediré ni confirmaré el viaje.',
-        fields: [
-          {
-            id: 'origin',
-            type: 'text',
-            label: 'Origen',
-            placeholder: 'Ej. Roma Norte, Ciudad de Mexico',
-            required: true,
-          },
-          {
-            id: 'destination',
-            type: 'text',
-            label: 'Destino',
-            placeholder: 'Ej. Aeropuerto Internacional de la Ciudad de Mexico',
-            required: true,
-          },
-        ],
-      },
-    );
+    return null;
   }
 
-  private async normalizeUberPlace(value: string, orgId: string): Promise<string> {
+  private async extractUberRoute(
+    input: string,
+    orgId: string,
+    context: ConversationContextTurn[] = [],
+    throwOnError = true,
+    taskId?: string,
+  ): Promise<{ origin: string; destination: string; url?: string } | null> {
+    // 0. Check if input is a JSON form response (submitted from the dashboard form)
+    try {
+      const parsed = JSON.parse(input);
+      if (parsed && typeof parsed === 'object' && parsed.form_key === 'uber.estimate_route') {
+        const origin = String(parsed.origin ?? '').trim();
+        const destination = String(parsed.destination ?? '').trim();
+        if (origin && destination) return { origin, destination };
+      }
+    } catch {
+      // Not JSON — proceed to normal parsing
+    }
+
+    // 1. Check if input or recent turns contain a direct Uber URL
+    const allInputs = [input, ...[...context].reverse().map(t => t.text)];
+    for (const text of allInputs) {
+      const urlMatch = text.match(/(https?:\/\/[^\s>)"',]+)/i);
+      if (urlMatch && urlMatch[0].includes('uber.com')) {
+        let url = urlMatch[0].replace(/[.,;:'"*?!)+\]>]+$/, '');
+        let origin = '';
+        let destination = '';
+        try {
+          const urlObj = new URL(url);
+          const pickupStr = urlObj.searchParams.get('pickup');
+          const dropStr = urlObj.searchParams.get('drop[0]') || urlObj.searchParams.get('drop');
+          if (pickupStr) {
+            const pObj = JSON.parse(pickupStr);
+            origin = pObj.addressLine1 || pObj.addressLine2 || 'Ubicación de origen';
+          }
+          if (dropStr) {
+            const dObj = JSON.parse(dropStr);
+            destination = dObj.addressLine1 || dObj.addressLine2 || 'Ubicación de destino';
+          }
+        } catch {
+          // ignore
+        }
+        if (!origin) origin = 'Origen desde URL';
+        if (!destination) destination = 'Destino desde URL';
+        return { origin, destination, url };
+      }
+    }
+
+    // 2. Otherwise scan input and context for text patterns
+    const patterns = [
+      /\b(?:de|desde)\s+(.+?)\s+(?:a|hasta|para|al)\s+(.+?)(?:\?|$|[.,])/i,
+      /\borigen[:\s]+(.+?)\s+destino[:\s]+(.+?)(?:\?|$|[.,])/i,
+      /\b(?:a|hasta|para|al)\s+(.+?)(?:\?|$|[.,])/i,
+    ];
+
+    for (const text of allInputs) {
+      for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (!match) continue;
+
+        let rawOrigin = match.length > 2 ? match[1] : null;
+        let rawDest = match.length > 2 ? match[2] : match[1];
+
+        if (rawOrigin) {
+          const cleanedOrigin = this.cleanUberPlace(rawOrigin);
+          if (cleanedOrigin.toLowerCase() === 'uber' || cleanedOrigin.toLowerCase() === 'taxi' || !cleanedOrigin) {
+            rawOrigin = null; // Ignore "de uber" or "de taxi" as origin
+          }
+        }
+
+        let origin: string;
+        try {
+          origin = rawOrigin ? await this.normalizeUberPlace(rawOrigin, orgId, taskId) : await this.defaultUberOrigin(orgId, taskId);
+        } catch {
+          // defaultUberOrigin throws MissingInformationError when no profile address is set
+          // Let the outer logic decide if we should propagate or return null
+          origin = '';
+        }
+        const destination = this.cleanUberPlace(rawDest);
+        if (origin && destination) return { origin, destination };
+        // Have destination but no origin from profile → ask form only for origin
+        if (destination && !origin) {
+          if (throwOnError) {
+            throw new MissingInformationError(
+              'Para cotizar Uber necesito saber desde dónde sales.',
+              {
+                form_key: 'uber.estimate_route',
+                title: 'Ruta para cotizar Uber',
+                description: `Tengo el destino: **${destination}**. ¿Desde dónde sales?`,
+                fields: [
+                  {
+                    id: 'origin',
+                    type: 'text',
+                    label: 'Origen',
+                    placeholder: 'Ej. Roma Norte, Ciudad de Mexico',
+                    required: true,
+                  },
+                  {
+                    id: 'destination',
+                    type: 'text',
+                    label: 'Destino',
+                    placeholder: destination,
+                    required: true,
+                  },
+                ],
+              },
+            );
+          }
+          return null;
+        }
+      }
+    }
+
+    if (throwOnError) {
+      throw new MissingInformationError(
+        'Para cotizar Uber necesito origen y destino.',
+        {
+          form_key: 'uber.estimate_route',
+          title: 'Ruta para cotizar Uber',
+          description: 'Solo consultaré tarifas visibles y mandaré screenshot; no pediré ni confirmaré el viaje.',
+          fields: [
+            {
+              id: 'origin',
+              type: 'text',
+              label: 'Origen',
+              placeholder: 'Ej. Roma Norte, Ciudad de Mexico',
+              required: true,
+            },
+            {
+              id: 'destination',
+              type: 'text',
+              label: 'Destino',
+              placeholder: 'Ej. Aeropuerto Internacional de la Ciudad de Mexico',
+              required: true,
+            },
+          ],
+        },
+      );
+    }
+    return null;
+  }
+
+  private async normalizeUberPlace(value: string, orgId: string, taskId?: string): Promise<string> {
     const cleaned = this.cleanUberPlace(value);
     if (!/\b(mi ubicaci[oó]n|ubicaci[oó]n actual|aqu[ií]|aqui|donde estoy|mi casa|casa)\b/i.test(cleaned)) return cleaned;
+    
+    if (taskId) {
+      try {
+        const task = await this.tasks.getTask(taskId, orgId);
+        const deviceLocation = task.metadata?.device_location as { latitude: number; longitude: number } | null;
+        if (deviceLocation && typeof deviceLocation.latitude === 'number' && typeof deviceLocation.longitude === 'number') {
+          const address = await this.reverseGeocode(deviceLocation.latitude, deviceLocation.longitude);
+          if (address) {
+            return address;
+          }
+        }
+      } catch (e) {
+        this.logger.warn(`Could not resolve device location for normalizeUberPlace in task ${taskId}: ${(e as Error).message}`);
+      }
+    }
+
     const profile = await this.soul.getPersonalProfile(orgId).catch(() => ({} as PersonalProfile));
     const fallback = String(profile.current_location ?? profile.address ?? '').trim();
     if (fallback) return fallback;
     return cleaned;
   }
 
-  private async defaultUberOrigin(orgId: string): Promise<string> {
+  private async defaultUberOrigin(orgId: string, taskId?: string): Promise<string> {
+    if (taskId) {
+      try {
+        const task = await this.tasks.getTask(taskId, orgId);
+        const deviceLocation = task.metadata?.device_location as { latitude: number; longitude: number } | null;
+        if (deviceLocation && typeof deviceLocation.latitude === 'number' && typeof deviceLocation.longitude === 'number') {
+          const address = await this.reverseGeocode(deviceLocation.latitude, deviceLocation.longitude);
+          if (address) {
+            this.logger.log(`Resolved Uber origin from device location coordinates in task ${taskId}: ${address}`);
+            return address;
+          }
+        }
+      } catch (e) {
+        this.logger.warn(`Could not resolve device location for defaultUberOrigin in task ${taskId}: ${(e as Error).message}`);
+      }
+    }
+
     const profile = await this.soul.getPersonalProfile(orgId).catch(() => ({} as PersonalProfile));
     const origin = String(profile.current_location ?? profile.address ?? '').trim();
     if (origin) return origin;
@@ -1090,11 +1261,19 @@ export class AgentRunnerService implements OnApplicationBootstrap {
   }
 
   private cleanUberPlace(value: string): string {
-    return value
+    let cleaned = value
       .replace(/\b(en|por)\s+uber\b/ig, '')
-      .replace(/\b(cu[aá]nto|cuanto|costo|costar|cuesta|sale|precio|tarifa|cotiza|cotizar|estimaci[oó]n|uber|taxi|viaje)\b/ig, '')
+      .replace(/\b(cu[aá]nto|cuanto|costo|costar|cuesta|sale|precio|tarifa|cotiza|cotizar|estimaci[oó]n|uber|taxi|viajes?|vieajes?|traslados?|transportes?)\b/ig, '')
       .replace(/\s+/g, ' ')
       .trim();
+
+    // Repeatedly strip leading Spanish prepositions/articles
+    while (true) {
+      const next = cleaned.replace(/^(?:el|la|los|las|un|una|unos|unas|de|del|al|a|para|este|ese|mi|tu|su)\s+/ig, '');
+      if (next === cleaned) break;
+      cleaned = next;
+    }
+    return cleaned;
   }
 
   private async maybePublishWhatsAppQr(orgId: string, taskId: string, screenshot?: { image_base64: string; mime_type: string }) {

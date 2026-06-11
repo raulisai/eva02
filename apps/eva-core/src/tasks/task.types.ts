@@ -29,6 +29,9 @@ const TRANSITIONS: Partial<Record<TaskStatus, TaskStatus[]>> = {
   planning:             ['running', 'failed', 'cancelled'],
   running:              ['waiting_for_approval', 'completed', 'failed', 'cancelled'],
   waiting_for_approval: ['running', 'completed', 'failed', 'cancelled'],
+  failed:               ['pending'],
+  cancelled:            ['pending'],
+  completed:            ['pending'],
 };
 
 export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
@@ -36,3 +39,10 @@ export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
 }
 
 export const TERMINAL_STATUSES: TaskStatus[] = ['completed', 'failed', 'cancelled'];
+
+export class TaskCancelledError extends Error {
+  constructor() {
+    super('Task was cancelled by the user');
+    this.name = 'TaskCancelledError';
+  }
+}

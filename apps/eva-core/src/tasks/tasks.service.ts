@@ -47,8 +47,23 @@ export class TasksService {
 
     if (nextStatus === 'running' && !task.started_at) extras.started_at = now;
     if (nextStatus === 'completed' || nextStatus === 'failed') extras.completed_at = now;
+    if (nextStatus === 'pending') {
+      extras.started_at = null;
+      extras.completed_at = null;
+      extras.error = null;
+      extras.result = null;
+    }
 
     const updated = await this.repo.updateStatus(taskId, orgId, nextStatus, extras);
+
+    if (nextStatus === 'pending') {
+      await this.events.publish({
+        type: 'task.created',
+        orgId,
+        taskId,
+        payload: { taskId, title: updated.title },
+      });
+    }
 
     const eventTypeMap: Partial<Record<TaskStatus, 'task.started' | 'task.completed' | 'task.failed' | 'task.cancelled' | 'task.waiting_approval'>> = {
       running:   'task.started',

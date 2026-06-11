@@ -1230,6 +1230,58 @@ describe('AgentRunnerService', () => {
     }));
   });
 
+  it('routes Uber quote requests even with typos like "vieaje"', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'busca el costo de el vieaje de metro puebla a el zocalo',
+    }));
+    const uber = module.get(UberWebService) as jest.Mocked<UberWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(uber.estimateRide).toHaveBeenCalledWith(ORG, {
+      origin: 'metro puebla',
+      destination: 'zocalo',
+      taskId: TASK,
+    });
+  });
+
+  it('routes Uber quote requests from direct product selection URLs', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'estimar viaje (https://m.uber.com/go/product-selection?pickup=%7B%22addressLine1%22%3A%22calle%20uno%2031%22%7D&drop%5B0%5D=%7B%22addressLine1%22%3A%22Z%C3%B3calo%22%7D)',
+    }));
+    const uber = module.get(UberWebService) as jest.Mocked<UberWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(uber.estimateRide).toHaveBeenCalledWith(ORG, {
+      origin: 'calle uno 31',
+      destination: 'Zócalo',
+      url: 'https://m.uber.com/go/product-selection?pickup=%7B%22addressLine1%22%3A%22calle%20uno%2031%22%7D&drop%5B0%5D=%7B%22addressLine1%22%3A%22Z%C3%B3calo%22%7D',
+      taskId: TASK,
+    });
+  });
+
+  it('routes Uber quote requests using conversation context when current turn is a pronoun/relative request', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'puedes validar ese viaje en uber',
+      metadata: {
+        conversation_context: [
+          { role: 'user', text: 'busca el costo de el vieaje de metro puebla a el zocalo' },
+          { role: 'assistant', text: 'Aquí tienes la cotización de Uber.' },
+        ],
+      },
+    }));
+    const uber = module.get(UberWebService) as jest.Mocked<UberWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(uber.estimateRide).toHaveBeenCalledWith(ORG, {
+      origin: 'metro puebla',
+      destination: 'zocalo',
+      taskId: TASK,
+    });
+  });
+
   it('routes watsap latest-message requests to WhatsApp Web, never the model fallback', async () => {
     tasks.getTask.mockResolvedValue(makeTask({ description: 'cual es el ultimo mensaje que tengo de watsap?' }));
     const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
