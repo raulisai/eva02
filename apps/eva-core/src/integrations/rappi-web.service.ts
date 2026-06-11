@@ -1,9 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { BrowserScreenshot } from '../browser/browser.types';
 import { BrowserService } from '../browser/browser.service';
+import { SmartNavigatorService } from '../browser/smart-navigator.service';
 
 const RAPPI_SERVICE = 'rappi_web';
 const RAPPI_LOGIN_URL = 'https://www.rappi.com.mx/login';
+// Direct email-form URL — skips the "choose method" screen
+const RAPPI_EMAIL_URL = 'https://www.rappi.com.mx/login/email?url_redirect=%2F&source=WEB_HEADER';
 const SETTLE_MS = 4000;
 
 export type RappiWebState =
@@ -47,7 +50,10 @@ interface RappiPageSignals {
 export class RappiWebService {
   private readonly logger = new Logger(RappiWebService.name);
 
-  constructor(private readonly browser: BrowserService) {}
+  constructor(
+    private readonly browser: BrowserService,
+    @Optional() private readonly smartNav?: SmartNavigatorService,
+  ) {}
 
   async startSession(orgId: string, taskId?: string): Promise<RappiSessionStatus> {
     const opened = await this.browser.open({
@@ -64,9 +70,10 @@ export class RappiWebService {
   }
 
   async startEmailLogin(orgId: string, email: string, taskId?: string): Promise<RappiEmailLoginStartResult> {
+    // Navigate directly to the email-login form — skips "choose method" screen
     const opened = await this.browser.open({
       service: RAPPI_SERVICE,
-      url: RAPPI_LOGIN_URL,
+      url: RAPPI_EMAIL_URL,
       task_id: taskId,
       reuse_open: false,
       metadata: { service: RAPPI_SERVICE, purpose: 'rappi-email-login', email },
@@ -77,6 +84,31 @@ export class RappiWebService {
     if (signals.state === 'logged_in') {
       const screenshot = await this.browser.screenshot(opened.id, orgId);
       return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Rappi ya tiene sesión activa.', screenshot };
+    }
+
+    // If the direct URL redirected to the general login page, click "Continuar con correo"
+    let hasEmailField = await this.hasVisibleEmailField(opened.id, orgId);
+    if (!hasEmailField) {
+      const clicked = await this.clickUseEmail(opened.id, orgId);
+      if (clicked) {
+        await this.browser.wait(opened.id, orgId, 2000);
+        hasEmailField = await this.hasVisibleEmailField(opened.id, orgId);
+      }
+    }
+
+    if (!hasEmailField && this.smartNav?.available) {
+      // Smart-navigator fallback: cheap model finds the email-login path.
+      this.logger.log('Rappi email field not found via selectors — handing off to smart navigator');
+      await this.smartNav.navigate(
+        orgId,
+        opened.id,
+        'Llega a la pantalla de inicio de sesión de Rappi con correo electrónico. '
+        + 'Si ves opciones de método (teléfono, Google, Facebook, correo), elige continuar con correo electrónico '
+        + 'para que quede visible el campo donde se escribe el email. No uses Google, Facebook ni teléfono.',
+        { maxSteps: 4, taskId },
+      );
+      await this.browser.wait(opened.id, orgId, 1500);
+      hasEmailField = await this.hasVisibleEmailField(opened.id, orgId);
     }
 
     const entered = await this.typeEmailAndContinue(opened.id, orgId, email);
@@ -167,28 +199,100 @@ export class RappiWebService {
     }
   }
 
-  private async typeEmailAndContinue(sessionId: string, orgId: string, email: string): Promise<boolean> {
-    return this.browser.evaluate<boolean, { email: string }>(sessionId, orgId, ({ email }) => {
+  private async hasVisibleEmailField(sessionId: string, orgId: string): Promise<boolean> {
+    return this.browser.evaluate<boolean>(sessionId, orgId, () => {
       const isVisible = (el: HTMLElement | null) => {
         if (!el) return false;
-        const style = window.getComputedStyle(el);
-        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0;
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetWidth > 0;
       };
-      const selectors = ['input[type="email"]', 'input[name="email"]', 'input[placeholder*="correo"]', 'input[placeholder*="mail"]', 'input[id*="email"]'];
-      const input = selectors.map(s => document.querySelector(s) as HTMLInputElement).find(el => isVisible(el));
+      const selectors = ['input[type="email"]', 'input[name="email"]', 'input[placeholder*="correo" i]', 'input[placeholder*="mail" i]', 'input[id*="email" i]'];
+      return selectors.some((s) => isVisible(document.querySelector(s) as HTMLElement));
+    });
+  }
+
+  private async clickUseEmail(sessionId: string, orgId: string): Promise<boolean> {
+    return this.browser.evaluate<boolean>(sessionId, orgId, () => {
+      const candidates = Array.from(document.querySelectorAll('a, button, div[role="button"], span[role="button"], li'));
+      const match = candidates.find((el) => {
+        const text = `${el.textContent ?? ''} ${el.getAttribute('aria-label') ?? ''}`.toLowerCase();
+        return /correo electr[oó]nico|usar correo|continuar con correo|use email|sign in with email|iniciar.*correo|continue.*email|email/i.test(text);
+      });
+      if (!match) return false;
+      (match as HTMLElement).click();
+      return true;
+    });
+  }
+
+  private async typeEmailAndContinue(sessionId: string, orgId: string, email: string): Promise<boolean> {
+    // Phase 1: type char-by-char to trigger React synthetic events
+    const found = await this.browser.evaluate<boolean, { email: string }>(sessionId, orgId, ({ email }) => {
+      const isVisible = (el: HTMLElement | null) => {
+        if (!el) return false;
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetWidth > 0;
+      };
+      const selectors = [
+        'input[type="email"]', 'input[name="email"]',
+        'input[placeholder*="correo" i]', 'input[placeholder*="mail" i]',
+        'input[id*="email" i]', 'input[autocomplete="email"]',
+      ];
+      const input = selectors.map((s) => document.querySelector(s) as HTMLInputElement).find((el) => isVisible(el));
       if (!input) return false;
+
       input.focus();
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      if (setter) { setter.call(input, email); input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); }
-      else input.value = email;
-      const buttons = Array.from(document.querySelectorAll('button[type="submit"], button'));
-      const btn = buttons.find(el => {
-        const txt = el.textContent?.toLowerCase() ?? '';
-        return /continuar|continue|siguiente|next|enviar|send|ingresar|entrar|submit/i.test(txt) && isVisible(el as HTMLElement);
-      }) ?? buttons.find(el => isVisible(el as HTMLElement));
-      if (btn) (btn as HTMLElement).click();
+      let current = '';
+      for (const char of email) {
+        current += char;
+        if (setter) setter.call(input, current);
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true }));
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
+      }
+      input.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     }, { email });
+
+    if (!found) return false;
+
+    // Phase 2: wait for React to re-render and enable the submit button
+    await this.browser.wait(sessionId, orgId, 600);
+
+    // Phase 3: click submit button or press Enter
+    await this.browser.evaluate<void>(sessionId, orgId, () => {
+      const isVisible = (el: HTMLElement | null) => {
+        if (!el) return false;
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetWidth > 0;
+      };
+      const selectors = [
+        'input[type="email"]', 'input[name="email"]',
+        'input[placeholder*="correo" i]', 'input[placeholder*="mail" i]',
+        'input[id*="email" i]', 'input[autocomplete="email"]',
+      ];
+      const input = selectors.map((s) => document.querySelector(s) as HTMLInputElement).find((el) => isVisible(el));
+
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('button[type="submit"], button'));
+      const submitBtn = buttons.find((el) => {
+        if (!isVisible(el) || (el as HTMLButtonElement).disabled) return false;
+        const txt = el.textContent?.toLowerCase() ?? '';
+        return /continuar|continue|siguiente|next|enviar|send|ingresar|entrar|submit/i.test(txt);
+      }) ?? buttons.find((el) => isVisible(el) && !(el as HTMLButtonElement).disabled);
+
+      if (submitBtn) {
+        submitBtn.click();
+      } else if (input) {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+        const form = input.closest('form');
+        if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    });
+
+    return true;
   }
 
   private async typeCodeAndSubmit(sessionId: string, orgId: string, code: string): Promise<boolean> {

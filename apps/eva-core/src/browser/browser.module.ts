@@ -4,9 +4,11 @@ import { DatabaseModule } from '../database/database.module';
 import { EventsModule } from '../events/events.module';
 import { ApprovalsModule } from '../approvals/approvals.module';
 import { IntegrationsModule } from '../integrations/integrations.module';
+import { ModelRouterModule } from '../model-router/model-router.module';
 import { BrowserController } from './browser.controller';
 import { BrowserRepository } from './browser.repository';
 import { BrowserService } from './browser.service';
+import { SmartNavigatorService } from './smart-navigator.service';
 import { BROWSER_RUNTIME } from './browser.types';
 import { GoogleWebController } from './google-web.controller';
 import { WhatsAppWebController } from './whatsapp-web.controller';
@@ -18,11 +20,12 @@ import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
 import { RappiWebService } from '../integrations/rappi-web.service';
 
 @Module({
-  imports: [DatabaseModule, EventsModule, ApprovalsModule, IntegrationsModule],
+  imports: [DatabaseModule, EventsModule, ApprovalsModule, IntegrationsModule, ModelRouterModule],
   controllers: [BrowserController, WhatsAppWebController, UberWebController, GoogleWebController, RappiWebController],
   providers: [
     BrowserRepository,
     BrowserService,
+    SmartNavigatorService,
     WhatsAppWebService,
     GoogleWebLoginService,
     UberWebService,
@@ -35,6 +38,6 @@ import { RappiWebService } from '../integrations/rappi-web.service';
       }),
     },
   ],
-  exports: [BrowserService, WhatsAppWebService, UberWebService, GoogleWebLoginService, RappiWebService],
+  exports: [BrowserService, SmartNavigatorService, WhatsAppWebService, UberWebService, GoogleWebLoginService, RappiWebService],
 })
 export class BrowserModule {}

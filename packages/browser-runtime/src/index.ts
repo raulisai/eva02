@@ -210,11 +210,6 @@ export class PlaywrightBrowserRuntime {
       '--disable-gpu',
       '--disable-blink-features=AutomationControlled',
       '--disable-infobars',
-      '--disable-extensions',
-      '--disable-default-apps',
-      '--no-default-browser-check',
-      '--no-first-run',
-      '--lang=es-MX',
     ];
   }
 

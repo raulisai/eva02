@@ -86,8 +86,16 @@ export interface GoogleCredential {
   refresh_token: string;
 }
 
-/** Google web-login credential used only to establish a local browser profile. */
+/**
+ * Google web-login credential used only to establish a local browser profile.
+ *
+ * SECURITY: `password` is OPTIONAL and discouraged. The preferred, more secure
+ * flow is cookie import (see GoogleWebLoginService.importSession) — session
+ * cookies are scoped, expirable and revocable by signing out, unlike a stored
+ * reusable password. Cookies live encrypted in the browser profile
+ * (BrowserProfileCrypto / AES-256-GCM), never in plaintext.
+ */
 export interface GoogleWebCredential {
   email: string;
-  password: string;
+  password?: string;
 }

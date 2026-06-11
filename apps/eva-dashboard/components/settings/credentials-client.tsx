@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import type React from 'react';
 import {
   Fingerprint, Mail, Calendar, HardDrive, Contact, Car, Github, ShoppingCart,
   Loader2, Trash2, PlugZap, ShieldCheck, Search, KeyRound, LogIn, Hash,
@@ -89,6 +90,163 @@ function initEmailLogin(): EmailLoginState {
   return { step: 'idle', email: '', code: '', result: null, shot: null };
 }
 
+const inputClass = 'w-full bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60';
+
+// ── Shared email-login section — must live OUTSIDE CredentialsClient so React
+// doesn't treat it as a new component type on every parent render (which would
+// reset focus and discard text after each keystroke).
+function EmailLoginSection({
+  service,
+  label,
+  icon: Icon,
+  blurb,
+  capabilities,
+  state,
+  setState,
+  busy,
+  onStartEmailLogin,
+  onSubmitCode,
+}: {
+  service: 'uber' | 'rappi';
+  label: string;
+  icon: React.ElementType;
+  blurb: string;
+  capabilities: string[];
+  state: EmailLoginState;
+  setState: React.Dispatch<React.SetStateAction<EmailLoginState>>;
+  busy: string | null;
+  onStartEmailLogin: (service: 'uber' | 'rappi', setState: React.Dispatch<React.SetStateAction<EmailLoginState>>) => void;
+  onSubmitCode: (service: 'uber' | 'rappi', state: EmailLoginState, setState: React.Dispatch<React.SetStateAction<EmailLoginState>>) => void;
+}) {
+  const isEmailBusy = busy === `${service}-email`;
+  const isCodeBusy = busy === `${service}-code`;
+  const isBusy = isEmailBusy || isCodeBusy;
+
+  return (
+    <div className="border border-zinc-800 rounded-sm p-4 space-y-3 animate-fade-in">
+      <div className="flex items-center gap-2">
+        <Icon className="w-4 h-4 text-zinc-400" />
+        <span className="text-sm text-zinc-100 font-medium">{label}</span>
+        <Badge variant="running">BROWSER</Badge>
+        {state.step === 'done'
+          ? <Badge variant="completed">sesión activa</Badge>
+          : <Badge variant="cancelled">sin sesión</Badge>}
+      </div>
+
+      <p className="text-[11px] text-zinc-600 leading-relaxed">{blurb}</p>
+
+      <div className="flex flex-wrap gap-1.5">
+        {capabilities.map((cap) => (
+          <span key={cap} className={cn(
+            'text-[10px] font-mono px-2 py-0.5 rounded-sm border',
+            state.step === 'done' ? 'border-cyan-500/30 text-cyan-300' : 'border-zinc-800 text-zinc-600',
+          )}>
+            {cap}
+          </span>
+        ))}
+      </div>
+
+      {/* Step 1 — email input */}
+      <div className="space-y-2">
+        <p className="text-[10px] text-zinc-500 uppercase tracking-wide">Paso 1 — Correo electrónico</p>
+        <div className="flex gap-2">
+          <input
+            aria-label={`${label} email`}
+            type="email"
+            autoComplete="email"
+            value={state.email}
+            onChange={(e) => setState((prev) => ({ ...prev, email: e.target.value }))}
+            placeholder="tu@correo.com"
+            className={cn(inputClass, 'flex-1')}
+            disabled={isBusy || state.step === 'done'}
+          />
+          <Button
+            size="sm"
+            onClick={() => onStartEmailLogin(service, setState)}
+            disabled={isBusy || !state.email.trim() || state.step === 'done'}
+          >
+            {isEmailBusy
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <LogIn className="w-3.5 h-3.5" />}
+            Iniciar sesión
+          </Button>
+        </div>
+      </div>
+
+      {/* Step 2 — code input (shown only when waiting for code) */}
+      {(state.step === 'code_required' || state.step === 'error') && (
+        <div className="space-y-2 border-t border-zinc-800 pt-3">
+          <p className="text-[10px] text-zinc-500 uppercase tracking-wide">
+            Paso 2 — Código de verificación
+          </p>
+          <p className="text-[11px] text-amber-300/80">
+            Revisa tu correo o teléfono y escribe el código que recibiste.
+          </p>
+          <div className="flex gap-2">
+            <input
+              aria-label={`${label} código`}
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={8}
+              value={state.code}
+              onChange={(e) => setState((prev) => ({ ...prev, code: e.target.value.replace(/\D/g, '') }))}
+              placeholder="ej. 123456"
+              className={cn(inputClass, 'flex-1 font-mono tracking-widest')}
+              disabled={isCodeBusy}
+            />
+            <Button
+              size="sm"
+              onClick={() => onSubmitCode(service, state, setState)}
+              disabled={isCodeBusy || state.code.length < 4}
+            >
+              {isCodeBusy
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <Hash className="w-3.5 h-3.5" />}
+              Enviar código
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Result text */}
+      {state.result && (
+        <div className={cn(
+          'flex items-start gap-2 text-xs font-mono rounded-sm border px-3 py-2',
+          state.result.ok
+            ? 'border-emerald-500/30 text-emerald-400'
+            : 'border-amber-500/30 text-amber-300',
+        )}>
+          <ShieldCheck className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <span className="break-words">{state.result.text}</span>
+        </div>
+      )}
+
+      {/* Screenshot */}
+      {state.shot && (
+        <div className="inline-block border border-zinc-800 rounded-sm bg-zinc-950 p-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={state.shot} alt={`${label} screenshot`} className="w-[28rem] max-w-full h-auto" />
+        </div>
+      )}
+
+      {/* Reset when done or error */}
+      {(state.step === 'done' || state.step === 'error') && (
+        <div className="pt-1 border-t border-zinc-800">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setState(initEmailLogin())}
+            disabled={isBusy}
+          >
+            Reiniciar login
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CredentialsClient({ initialIntegrations }: CredentialsClientProps) {
   const { toast } = useToast();
   const [integrations, setIntegrations] = useState(initialIntegrations);
@@ -108,7 +266,6 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
   const [rappiLogin, setRappiLogin] = useState<EmailLoginState>(initEmailLogin());
 
   const googleIntegration = integrations.find((i) => i.provider === 'google');
-  const googleWebIntegration = integrations.find((i) => i.provider === 'google_web');
 
   function patchLocal(updated: Integration) {
     setIntegrations((prev) => {
@@ -189,24 +346,30 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     }
   }
 
-  // ── Google Web Login ──────────────────────────────────────────────────────
+  // ── Google Web Login — cookie import ─────────────────────────────────────
 
-  async function saveGoogleWeb() {
-    setBusy('google-web');
+  async function importGoogleSession() {
+    const raw = googleWebCookies.trim();
+    if (!raw) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      toast('El JSON de cookies no es válido. Exporta de nuevo desde Cookie-Editor.', 'error');
+      return;
+    }
+    setBusy('google-web-import');
+    setGoogleWebImportResult(null);
     setGoogleWebResult(null);
     setGoogleWebShot(null);
     try {
-      const updated = await coreFetch<Integration>('/integrations/credential/google_web', {
-        method: 'PUT',
-        body: JSON.stringify({
-          secret: JSON.stringify(googleWeb),
-          status: 'active',
-          config: { purpose: 'browser_login', mfa: 'manual_user_required' },
-        }),
-      });
-      patchLocal(updated);
-      setGoogleWeb((prev) => ({ email: prev.email, password: '' }));
-      toast('Google Web credential saved (encrypted)', 'success');
+      const result = await coreFetch<{ ok: boolean; text: string }>(
+        '/integrations/google-web/import-session',
+        { method: 'POST', body: JSON.stringify({ cookies: parsed }) },
+      );
+      setGoogleWebImportResult(result);
+      if (result.ok) setGoogleWebCookies('');
+      toast(result.text, result.ok ? 'success' : 'error');
     } catch (error) {
       toast((error as Error).message, 'error');
     } finally {
@@ -214,7 +377,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     }
   }
 
-  async function testGoogleWebLogin() {
+  async function testGoogleWebSession() {
     setBusy('google-web-test');
     setGoogleWebResult(null);
     setGoogleWebShot(null);
@@ -326,163 +489,12 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
       await coreFetch(`/integrations/credential/${provider}`, { method: 'DELETE' });
       setIntegrations((prev) => prev.filter((i) => i.provider !== provider));
       if (provider === 'google') setGoogleAccount(null);
-      if (provider === 'google_web') { setGoogleWebResult(null); setGoogleWebShot(null); }
       toast(`${provider} credential removed`, 'info');
     } catch (error) {
       toast((error as Error).message, 'error');
     } finally {
       setBusy(null);
     }
-  }
-
-  const inputClass = 'w-full bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60';
-
-  // ── Shared email-login section renderer ───────────────────────────────────
-
-  function EmailLoginSection({
-    service,
-    label,
-    icon: Icon,
-    blurb,
-    capabilities,
-    state,
-    setState,
-  }: {
-    service: 'uber' | 'rappi';
-    label: string;
-    icon: React.ElementType;
-    blurb: string;
-    capabilities: string[];
-    state: EmailLoginState;
-    setState: React.Dispatch<React.SetStateAction<EmailLoginState>>;
-  }) {
-    const isEmailBusy = busy === `${service}-email`;
-    const isCodeBusy = busy === `${service}-code`;
-    const isBusy = isEmailBusy || isCodeBusy;
-
-    return (
-      <div className="border border-zinc-800 rounded-sm p-4 space-y-3 animate-fade-in">
-        <div className="flex items-center gap-2">
-          <Icon className="w-4 h-4 text-zinc-400" />
-          <span className="text-sm text-zinc-100 font-medium">{label}</span>
-          <Badge variant="running">BROWSER</Badge>
-          {state.step === 'done'
-            ? <Badge variant="completed">sesión activa</Badge>
-            : <Badge variant="cancelled">sin sesión</Badge>}
-        </div>
-
-        <p className="text-[11px] text-zinc-600 leading-relaxed">{blurb}</p>
-
-        <div className="flex flex-wrap gap-1.5">
-          {capabilities.map((cap) => (
-            <span key={cap} className={cn(
-              'text-[10px] font-mono px-2 py-0.5 rounded-sm border',
-              state.step === 'done' ? 'border-cyan-500/30 text-cyan-300' : 'border-zinc-800 text-zinc-600',
-            )}>
-              {cap}
-            </span>
-          ))}
-        </div>
-
-        {/* Step 1 — email input */}
-        <div className="space-y-2">
-          <p className="text-[10px] text-zinc-500 uppercase tracking-wide">Paso 1 — Correo electrónico</p>
-          <div className="flex gap-2">
-            <input
-              aria-label={`${label} email`}
-              type="email"
-              autoComplete="email"
-              value={state.email}
-              onChange={(e) => setState((prev) => ({ ...prev, email: e.target.value }))}
-              placeholder="tu@correo.com"
-              className={cn(inputClass, 'flex-1')}
-              disabled={isBusy || state.step === 'done'}
-            />
-            <Button
-              size="sm"
-              onClick={() => startEmailLogin(service, setState)}
-              disabled={isBusy || !state.email.trim() || state.step === 'done'}
-            >
-              {isEmailBusy
-                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                : <LogIn className="w-3.5 h-3.5" />}
-              Iniciar sesión
-            </Button>
-          </div>
-        </div>
-
-        {/* Step 2 — code input (shown only when waiting for code) */}
-        {(state.step === 'code_required' || state.step === 'error') && (
-          <div className="space-y-2 border-t border-zinc-800 pt-3">
-            <p className="text-[10px] text-zinc-500 uppercase tracking-wide">
-              Paso 2 — Código de verificación
-            </p>
-            <p className="text-[11px] text-amber-300/80">
-              Revisa tu correo o teléfono y escribe el código que recibiste.
-            </p>
-            <div className="flex gap-2">
-              <input
-                aria-label={`${label} código`}
-                type="text"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                maxLength={8}
-                value={state.code}
-                onChange={(e) => setState((prev) => ({ ...prev, code: e.target.value.replace(/\D/g, '') }))}
-                placeholder="ej. 123456"
-                className={cn(inputClass, 'flex-1 font-mono tracking-widest')}
-                disabled={isCodeBusy}
-              />
-              <Button
-                size="sm"
-                onClick={() => submitLoginCode(service, state, setState)}
-                disabled={isCodeBusy || state.code.length < 4}
-              >
-                {isCodeBusy
-                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  : <Hash className="w-3.5 h-3.5" />}
-                Enviar código
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {/* Result text */}
-        {state.result && (
-          <div className={cn(
-            'flex items-start gap-2 text-xs font-mono rounded-sm border px-3 py-2',
-            state.result.ok
-              ? 'border-emerald-500/30 text-emerald-400'
-              : 'border-amber-500/30 text-amber-300',
-          )}>
-            <ShieldCheck className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-            <span className="break-words">{state.result.text}</span>
-          </div>
-        )}
-
-        {/* Screenshot */}
-        {state.shot && (
-          <div className="inline-block border border-zinc-800 rounded-sm bg-zinc-950 p-3">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={state.shot} alt={`${label} screenshot`} className="w-[28rem] max-w-full h-auto" />
-          </div>
-        )}
-
-        {/* Reset when done or error */}
-        {(state.step === 'done' || state.step === 'error') && (
-          <div className="pt-1 border-t border-zinc-800">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setState(initEmailLogin())}
-              disabled={isBusy}
-            >
-              Reiniciar login
-            </Button>
-          </div>
-        )}
-      </div>
-    );
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -605,51 +617,73 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
           </div>
         </div>
 
-        {/* ── Google Web Login — browser profile bootstrap ── */}
+        {/* ── Google Web Login — cookie import ── */}
         <div className="border border-zinc-800 rounded-sm p-4 space-y-4 animate-fade-in">
           <div className="flex items-center gap-2">
             <KeyRound className="w-4 h-4 text-zinc-400" />
             <span className="text-sm text-zinc-100 font-medium">Google Web Login</span>
             <Badge variant="running">BROWSER</Badge>
-            {googleWebIntegration?.secret_hint
-              ? <Badge variant="completed">configured {googleWebIntegration.secret_hint}</Badge>
-              : <Badge variant="cancelled">not connected</Badge>}
+            {googleWebImportResult?.ok || googleWebResult?.ok
+              ? <Badge variant="completed">sesión activa</Badge>
+              : <Badge variant="cancelled">sin sesión</Badge>}
           </div>
 
-          <p className="text-[11px] text-zinc-600 leading-relaxed">
-            Used only to establish a local browser session for &ldquo;Continue with Google&rdquo; flows. If Google asks for 2FA, EVA stops and sends a screenshot.
-          </p>
-          <p className="text-[11px] font-mono text-amber-400/80 leading-relaxed">
-            En servidor: usa el endpoint <code className="bg-zinc-900 px-1 rounded">/integrations/google-web/import-session</code> para importar cookies desde tu browser local.
+          <p className="text-[11px] text-zinc-500 leading-relaxed">
+            Importa las cookies de tu sesión de Google para que EVA pueda usar &ldquo;Continuar con Google&rdquo; en Uber y otros servicios — sin guardar tu contraseña.
           </p>
 
-          <div className="space-y-2">
-            <input
-              aria-label="Google Web email"
-              type="email"
-              autoComplete="username"
-              value={googleWeb.email}
-              onChange={(e) => setGoogleWeb((prev) => ({ ...prev, email: e.target.value }))}
-              placeholder={googleWebIntegration?.secret_hint ? `Saved (${googleWebIntegration.secret_hint}) — paste email to replace` : 'Google email'}
-              className={inputClass}
-            />
-            <input
-              aria-label="Google Web password"
-              type="password"
-              autoComplete="current-password"
-              value={googleWeb.password}
-              onChange={(e) => setGoogleWeb((prev) => ({ ...prev, password: e.target.value }))}
-              placeholder="Google password"
-              className={inputClass}
+          {/* Steps */}
+          <ol className="space-y-2 text-[11px] text-zinc-400 list-none">
+            <li className="flex items-start gap-2">
+              <span className="text-[10px] font-mono bg-zinc-800 text-zinc-300 rounded-full w-4 h-4 flex items-center justify-center flex-shrink-0 mt-0.5">1</span>
+              <span>Instala la extensión <strong className="text-zinc-300">Cookie-Editor</strong> en tu Chrome o Firefox local.</span>
+            </li>
+            <li className="flex items-start gap-2">
+              <span className="text-[10px] font-mono bg-zinc-800 text-zinc-300 rounded-full w-4 h-4 flex items-center justify-center flex-shrink-0 mt-0.5">2</span>
+              <span>Ve a <code className="bg-zinc-900 px-1 rounded text-zinc-300">accounts.google.com</code>, inicia sesión, abre Cookie-Editor → <strong className="text-zinc-300">Export → Export as JSON</strong>.</span>
+            </li>
+            <li className="flex items-start gap-2">
+              <span className="text-[10px] font-mono bg-zinc-800 text-zinc-300 rounded-full w-4 h-4 flex items-center justify-center flex-shrink-0 mt-0.5">3</span>
+              <span>Pega el JSON abajo e importa. EVA lo encripta en el servidor — nunca lo devuelve al cliente.</span>
+            </li>
+          </ol>
+
+          <div className="space-y-1.5">
+            <label className="text-[10px] uppercase tracking-wide text-zinc-500">Cookies JSON</label>
+            <textarea
+              aria-label="Google cookies JSON"
+              value={googleWebCookies}
+              onChange={(e) => setGoogleWebCookies(e.target.value)}
+              placeholder={'[{"name":"SID","value":"...","domain":".google.com",...}, ...]'}
+              rows={5}
+              className={cn(inputClass, 'resize-none font-mono text-[10px] leading-relaxed')}
             />
           </div>
 
+          {/* Import result */}
+          {googleWebImportResult && (
+            <div className={cn(
+              'flex items-start gap-2 text-xs font-mono rounded-sm border px-3 py-2',
+              googleWebImportResult.ok
+                ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-400'
+                : 'border-red-500/30 bg-red-500/5 text-red-400',
+            )}>
+              {googleWebImportResult.ok
+                ? <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                : <XCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />}
+              <span className="break-words">{googleWebImportResult.text}</span>
+            </div>
+          )}
+
+          {/* Session test result */}
           {googleWebResult && (
             <div className={cn(
               'flex items-start gap-2 text-xs font-mono rounded-sm border px-3 py-2',
-              googleWebResult.ok ? 'border-emerald-500/30 text-emerald-400' : 'border-amber-500/30 text-amber-300',
+              googleWebResult.ok
+                ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-400'
+                : 'border-amber-500/30 bg-amber-500/5 text-amber-300',
             )}>
-              <ShieldCheck className="w-3.5 h-3.5 mt-0.5" />
+              <ShieldCheck className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
               <span className="break-words">{googleWebResult.text}</span>
             </div>
           )}
@@ -657,28 +691,32 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
           {googleWebShot && (
             <div className="inline-block border border-zinc-800 rounded-sm bg-zinc-950 p-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={googleWebShot} alt="Google Web login screenshot" className="w-[28rem] max-w-full h-auto" />
+              <img src={googleWebShot} alt="Google Web session screenshot" className="w-[28rem] max-w-full h-auto" />
             </div>
           )}
 
           <div className="flex items-center gap-2 pt-1 border-t border-zinc-800">
             <Button
               size="sm"
-              onClick={saveGoogleWeb}
-              disabled={busy !== null || !googleWeb.email || !googleWeb.password}
+              onClick={importGoogleSession}
+              disabled={busy !== null || !googleWebCookies.trim()}
             >
-              {busy === 'google-web' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <KeyRound className="w-3.5 h-3.5" />}
-              Save web login
+              {busy === 'google-web-import'
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <Upload className="w-3.5 h-3.5" />}
+              Importar sesión
             </Button>
-            <Button size="sm" variant="outline" onClick={testGoogleWebLogin} disabled={busy !== null || !googleWebIntegration}>
-              {busy === 'google-web-test' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PlugZap className="w-3.5 h-3.5" />}
-              Test browser login
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={testGoogleWebSession}
+              disabled={busy !== null}
+            >
+              {busy === 'google-web-test'
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <PlugZap className="w-3.5 h-3.5" />}
+              Verificar sesión
             </Button>
-            {googleWebIntegration && (
-              <Button size="sm" variant="destructive" onClick={() => remove('google_web')} disabled={busy !== null}>
-                <Trash2 className="w-3.5 h-3.5" />
-              </Button>
-            )}
           </div>
         </div>
 
@@ -691,6 +729,9 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
           capabilities={['Cotizar viajes', 'Pedir viaje (con aprobación)', 'Estado del viaje']}
           state={uberLogin}
           setState={setUberLogin}
+          busy={busy}
+          onStartEmailLogin={startEmailLogin}
+          onSubmitCode={submitLoginCode}
         />
 
         {/* ── Rappi — email + OTP login ── */}
@@ -702,6 +743,9 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
           capabilities={['Ver menús y productos', 'Hacer pedido (con aprobación)', 'Estado del pedido']}
           state={rappiLogin}
           setState={setRappiLogin}
+          busy={busy}
+          onStartEmailLogin={startEmailLogin}
+          onSubmitCode={submitLoginCode}
         />
 
         {/* ── Simple token providers ── */}

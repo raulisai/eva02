@@ -172,6 +172,19 @@ export class GoogleWebLoginService {
       }
 
       if (signals.state === 'password_required' && signals.passwordSelector) {
+        // Cookie-only credential (no stored password): we cannot auto-fill this
+        // screen. Surface it for manual completion instead of typing undefined.
+        if (!credential.password) {
+          return this.withScreenshot(orgId, sessionId, {
+            ok: false,
+            state: 'password_required',
+            session_id: sessionId,
+            current_url: signals.currentUrl,
+            title: signals.title,
+            email: credential.email,
+            text: `Google pidió contraseña para ${credential.email}, pero esta cuenta usa sesión por cookies (sin contraseña guardada). Vuelve a importar cookies frescas desde tu navegador local.`,
+          });
+        }
         await this.browser.typeNow(sessionId, orgId, signals.passwordSelector, credential.password);
         await this.clickFirst(sessionId, orgId, {
           selectors: ['#passwordNext button', '#passwordNext', 'button[jsname="LgbsSe"]'],
@@ -223,7 +236,8 @@ export class GoogleWebLoginService {
     if (!secret) return null;
     try {
       const credential = JSON.parse(secret) as Partial<GoogleWebCredential>;
-      if (!credential.email || !credential.password) return null;
+      // Email is required; password is optional (cookie-import flow stores no password).
+      if (!credential.email) return null;
       return { email: credential.email, password: credential.password };
     } catch {
       return null;
