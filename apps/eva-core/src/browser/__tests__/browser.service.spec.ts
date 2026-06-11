@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BrowserRuntime } from '@eva/browser-runtime';
+import { BrowserProfileCrypto, BrowserRuntime } from '@eva/browser-runtime';
 import { EventBusService } from '../../events/event-bus.service';
 import { ApprovalsService } from '../../approvals/approvals.service';
 import { BrowserRepository } from '../browser.repository';
@@ -183,5 +183,36 @@ describe('BrowserService', () => {
     }));
     expect(prepared.action_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({ type: 'browser.screenshot.created', orgId: ORG }));
+  });
+
+  it('restores browser session from encrypted state in the DB if available', async () => {
+    const mockState = { cookies: [{ name: 'session-id', value: 'secret', domain: 'example.com' }] };
+    const crypto = new BrowserProfileCrypto();
+    const encrypted = crypto.encryptJson(mockState);
+
+    repo.getOrCreateProfile.mockResolvedValueOnce({
+      id: PROFILE,
+      org_id: ORG,
+      service: 'local-test',
+      label: 'local-test',
+      encrypted_state: encrypted,
+      kms_key_ref: 'dev-kms-mock',
+      created_at: now,
+      updated_at: now,
+    });
+
+    const result = await service.open({
+      service: 'local-test',
+      url: 'https://example.com',
+      task_id: TASK,
+    }, ORG);
+
+    expect(runtime.openWithStorageState).toHaveBeenCalledWith({
+      sessionId: SESSION,
+      profileId: PROFILE,
+      url: 'https://example.com',
+      storageState: mockState,
+    });
+    expect(result.current_url).toBe('https://accounts.google.com/');
   });
 });

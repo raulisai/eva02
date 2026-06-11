@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { chromium, BrowserContext, Page } from 'playwright';
 
 export interface BrowserRuntimeSession {
@@ -62,7 +62,7 @@ export class PlaywrightBrowserRuntime {
   private readonly channel?: string;
 
   constructor(options: BrowserRuntimeOptions = {}) {
-    this.profilesRoot = options.profilesRoot ?? join(tmpdir(), 'eva-browser-profiles');
+    this.profilesRoot = options.profilesRoot ?? join(homedir(), '.eva-browser-profiles');
     this.headless = options.headless ?? true;
     this.channel = options.channel ?? process.env.BROWSER_CHANNEL;
   }

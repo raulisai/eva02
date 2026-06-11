@@ -331,4 +331,8 @@ export class RappiWebService {
       return true;
     }, { code });
   }
+
+  async getProfile(orgId: string) {
+    return this.browser.getOrCreateProfile(orgId, RAPPI_SERVICE);
+  }
 }

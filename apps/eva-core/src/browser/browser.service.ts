@@ -1,6 +1,6 @@
 import * as childProcess from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BadRequestException, Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { BrowserProfileCrypto, BrowserRuntime } from '@eva/browser-runtime';
@@ -53,11 +53,32 @@ export class BrowserService {
         taskId: dto.task_id,
         metadata: dto.metadata,
       });
-    const result = await this.runtime.open({
-      sessionId: session.id,
-      profileId: profile.id,
-      url: dto.url,
-    });
+
+    let decryptedState: any = null;
+    if (profile.encrypted_state) {
+      try {
+        decryptedState = this.profileCrypto.decryptJson(profile.encrypted_state);
+      } catch (error) {
+        this.logger.error(`Failed to decrypt profile state for ${profile.id}: ${(error as Error).message}`);
+      }
+    }
+
+    let result: { url: string; title: string };
+    if (decryptedState) {
+      result = await this.runtime.openWithStorageState({
+        sessionId: session.id,
+        profileId: profile.id,
+        url: dto.url,
+        storageState: decryptedState,
+      });
+    } else {
+      result = await this.runtime.open({
+        sessionId: session.id,
+        profileId: profile.id,
+        url: dto.url,
+      });
+    }
+
     const updated = await this.repo.updateSession(session.id, orgId, {
       current_url: result.url,
       metadata: { ...session.metadata, title: result.title },
@@ -280,7 +301,7 @@ export class BrowserService {
   }
 
   private profileDir(profileId: string): string {
-    return join(process.env.BROWSER_PROFILES_DIR ?? join(tmpdir(), 'eva-browser-profiles'), profileId);
+    return join(process.env.BROWSER_PROFILES_DIR ?? join(homedir(), '.eva-browser-profiles'), profileId);
   }
 
   private manualBrowserCommand(profileDir: string, url: string): { command: string; args: string[]; app: string } {

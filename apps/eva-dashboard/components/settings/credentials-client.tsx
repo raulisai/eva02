@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type React from 'react';
 import {
   Fingerprint, Mail, Calendar, HardDrive, Contact, Car, Github, ShoppingCart,
@@ -81,13 +81,14 @@ type EmailLoginStep = 'idle' | 'code_required' | 'done' | 'error';
 interface EmailLoginState {
   step: EmailLoginStep;
   email: string;
+  password?: string;
   code: string;
   result: EmailLoginResult | null;
   shot: string | null;
 }
 
 function initEmailLogin(): EmailLoginState {
-  return { step: 'idle', email: '', code: '', result: null, shot: null };
+  return { step: 'idle', email: '', password: '', code: '', result: null, shot: null };
 }
 
 const inputClass = 'w-full bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60';
@@ -106,6 +107,8 @@ function EmailLoginSection({
   busy,
   onStartEmailLogin,
   onSubmitCode,
+  onVerifySession,
+  showPassword,
 }: {
   service: 'uber' | 'rappi';
   label: string;
@@ -117,10 +120,13 @@ function EmailLoginSection({
   busy: string | null;
   onStartEmailLogin: (service: 'uber' | 'rappi', setState: React.Dispatch<React.SetStateAction<EmailLoginState>>) => void;
   onSubmitCode: (service: 'uber' | 'rappi', state: EmailLoginState, setState: React.Dispatch<React.SetStateAction<EmailLoginState>>) => void;
+  onVerifySession: (service: 'uber' | 'rappi', setState: React.Dispatch<React.SetStateAction<EmailLoginState>>) => void;
+  showPassword?: boolean;
 }) {
   const isEmailBusy = busy === `${service}-email`;
   const isCodeBusy = busy === `${service}-code`;
-  const isBusy = isEmailBusy || isCodeBusy;
+  const isVerifyBusy = busy === `${service}-verify`;
+  const isBusy = isEmailBusy || isCodeBusy || isVerifyBusy;
 
   return (
     <div className="border border-zinc-800 rounded-sm p-4 space-y-3 animate-fade-in">
@@ -149,7 +155,7 @@ function EmailLoginSection({
       {/* Step 1 — email input */}
       <div className="space-y-2">
         <p className="text-[10px] text-zinc-500 uppercase tracking-wide">Paso 1 — Correo electrónico</p>
-        <div className="flex gap-2">
+        <div className="flex flex-col gap-2 md:flex-row">
           <input
             aria-label={`${label} email`}
             type="email"
@@ -157,13 +163,26 @@ function EmailLoginSection({
             value={state.email}
             onChange={(e) => setState((prev) => ({ ...prev, email: e.target.value }))}
             placeholder="tu@correo.com"
-            className={cn(inputClass, 'flex-1')}
+            className={cn(inputClass, 'flex-[2]')}
             disabled={isBusy || state.step === 'done'}
           />
+          {showPassword && (
+            <input
+              aria-label={`${label} password`}
+              type="password"
+              autoComplete="current-password"
+              value={state.password || ''}
+              onChange={(e) => setState((prev) => ({ ...prev, password: e.target.value }))}
+              placeholder="Contraseña (opcional)"
+              className={cn(inputClass, 'flex-[1.5]')}
+              disabled={isBusy || state.step === 'done'}
+            />
+          )}
           <Button
             size="sm"
             onClick={() => onStartEmailLogin(service, setState)}
             disabled={isBusy || !state.email.trim() || state.step === 'done'}
+            className="md:w-auto w-full flex-shrink-0"
           >
             {isEmailBusy
               ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -230,9 +249,9 @@ function EmailLoginSection({
         </div>
       )}
 
-      {/* Reset when done or error */}
-      {(state.step === 'done' || state.step === 'error') && (
-        <div className="pt-1 border-t border-zinc-800">
+      {/* Action buttons (Verify / Reset) */}
+      <div className="pt-1 border-t border-zinc-800 flex flex-wrap gap-2">
+        {(state.step === 'done' || state.step === 'error') && (
           <Button
             size="sm"
             variant="outline"
@@ -241,8 +260,21 @@ function EmailLoginSection({
           >
             Reiniciar login
           </Button>
-        </div>
-      )}
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onVerifySession(service, setState)}
+          disabled={isBusy}
+        >
+          {isVerifyBusy ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <PlugZap className="w-3.5 h-3.5" />
+          )}
+          Verificar sesión
+        </Button>
+      </div>
     </div>
   );
 }
@@ -264,6 +296,28 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [uberLogin, setUberLogin] = useState<EmailLoginState>(initEmailLogin());
   const [rappiLogin, setRappiLogin] = useState<EmailLoginState>(initEmailLogin());
+
+  useEffect(() => {
+    async function loadStatuses() {
+      try {
+        const uberRes = await coreFetch<{ has_session: boolean }>('/integrations/uber/status');
+        if (uberRes.has_session) {
+          setUberLogin((prev) => ({ ...prev, step: 'done' }));
+        }
+      } catch (err) {
+        console.error('Failed to load Uber session status', err);
+      }
+      try {
+        const rappiRes = await coreFetch<{ has_session: boolean }>('/integrations/rappi/status');
+        if (rappiRes.has_session) {
+          setRappiLogin((prev) => ({ ...prev, step: 'done' }));
+        }
+      } catch (err) {
+        console.error('Failed to load Rappi session status', err);
+      }
+    }
+    loadStatuses();
+  }, []);
 
   const googleIntegration = integrations.find((i) => i.provider === 'google');
 
@@ -404,14 +458,22 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
     service: 'uber' | 'rappi',
     setState: React.Dispatch<React.SetStateAction<EmailLoginState>>,
   ) {
-    const email = service === 'uber' ? uberLogin.email : rappiLogin.email;
+    const loginState = service === 'uber' ? uberLogin : rappiLogin;
+    const email = loginState.email;
+    const password = loginState.password;
     if (!email.trim()) return;
     setBusy(`${service}-email`);
     setState((prev) => ({ ...prev, result: null, shot: null }));
     try {
       const result = await coreFetch<EmailLoginResult>(
         `/integrations/${service}/start-email-login`,
-        { method: 'POST', body: JSON.stringify({ email: email.trim() }) },
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            email: email.trim(),
+            password: password?.trim() || undefined,
+          }),
+        },
       );
       const shot = result.screenshot?.image_base64
         ? `data:${result.screenshot.mime_type};base64,${result.screenshot.image_base64}`
@@ -457,6 +519,40 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
       toast(result.text, result.ok ? 'success' : 'error');
     } catch (error) {
       toast((error as Error).message, 'error');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function verifySession(
+    service: 'uber' | 'rappi',
+    setState: React.Dispatch<React.SetStateAction<EmailLoginState>>,
+  ) {
+    setBusy(`${service}-verify`);
+    setState((prev) => ({ ...prev, result: null, shot: null }));
+    try {
+      const result = await coreFetch<any>(`/integrations/${service}/start-session`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      const shot = result.screenshot?.image_base64
+        ? `data:${result.screenshot.mime_type};base64,${result.screenshot.image_base64}`
+        : null;
+      const ok = result.state === 'logged_in';
+      setState((prev) => ({
+        ...prev,
+        result: {
+          ok,
+          reason: ok ? 'logged_in' : 'unknown',
+          text: ok ? `Sesión verificada: activa` : `Sesión verificada: requiere iniciar sesión (${result.state})`,
+        },
+        shot,
+        step: ok ? 'done' : 'error',
+      }));
+      toast(ok ? 'Sesión activa' : 'Sesión inactiva o requiere iniciar sesión', ok ? 'success' : 'info');
+    } catch (error) {
+      toast((error as Error).message, 'error');
+      setState((prev) => ({ ...prev, step: 'error' }));
     } finally {
       setBusy(null);
     }
@@ -732,6 +828,8 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
           busy={busy}
           onStartEmailLogin={startEmailLogin}
           onSubmitCode={submitLoginCode}
+          onVerifySession={verifySession}
+          showPassword={true}
         />
 
         {/* ── Rappi — email + OTP login ── */}
@@ -746,6 +844,7 @@ export function CredentialsClient({ initialIntegrations }: CredentialsClientProp
           busy={busy}
           onStartEmailLogin={startEmailLogin}
           onSubmitCode={submitLoginCode}
+          onVerifySession={verifySession}
         />
 
         {/* ── Simple token providers ── */}

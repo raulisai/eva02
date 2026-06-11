@@ -1,10 +1,19 @@
-import { BadRequestException, Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
 import { AuthenticatedRequest } from '../common/types';
 import { UberWebService } from '../integrations/uber-web.service';
 
 @Controller('integrations/uber')
 export class UberWebController {
   constructor(private readonly uber: UberWebService) {}
+
+  @Get('status')
+  async getStatus(@Req() req: AuthenticatedRequest) {
+    const profile = await this.uber.getProfile(req.user.orgId);
+    return {
+      ok: true,
+      has_session: profile.encrypted_state !== null,
+    };
+  }
 
   @Post('start-session')
   @HttpCode(HttpStatus.OK)
@@ -27,12 +36,13 @@ export class UberWebController {
   @Post('start-email-login')
   @HttpCode(HttpStatus.OK)
   startEmailLogin(
-    @Body() body: { email: string; task_id?: string },
+    @Body() body: { email: string; password?: string; task_id?: string },
     @Req() req: AuthenticatedRequest,
   ) {
     const email = body?.email?.trim();
+    const password = body?.password?.trim();
     if (!email) throw new BadRequestException('email is required');
-    return this.uber.startEmailLogin(req.user.orgId, email, body?.task_id);
+    return this.uber.startEmailLogin(req.user.orgId, email, password, body?.task_id);
   }
 
   @Post('submit-login-code')

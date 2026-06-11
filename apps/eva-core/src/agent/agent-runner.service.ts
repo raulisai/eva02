@@ -442,7 +442,12 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           proactiveTriggers.map(t => t.message), recallResult.context,
         );
         const reply = await this.modelRouter.generate(chatInput, {
-          orgId, budget: 'cheap', maxTokens: 300, systemPrompt: CHAT_PROMPT,
+          orgId,
+          taskId,
+          requestType: 'response',
+          budget: 'cheap',
+          maxTokens: 300,
+          systemPrompt: CHAT_PROMPT,
         });
         await this.deliver(orgId, taskId, reply.text, reply.model, Date.now() - t0);
         await this.log(orgId, taskId, `chat answered in ${Date.now() - startedAt}ms`, 'pipeline');
@@ -663,6 +668,8 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       const t0 = Date.now();
       const result = await this.modelRouter.generate(contextualInput, {
         orgId,
+        taskId,
+        requestType: 'response',
         budget,
         systemPrompt: SYSTEM_PROMPT,
         maxTokens: tier.tier === 'long' ? 1200 : 700,
@@ -1687,6 +1694,8 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       const plannerDate = this.currentPlannerDate();
       const result = await this.modelRouter.generate(input, {
         orgId,
+        taskId,
+        requestType: 'tools',
         budget: 'cheap',
         responseFormat: 'json',
         temperature: 0,

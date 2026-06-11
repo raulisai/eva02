@@ -100,6 +100,8 @@ export class AgentLoopService {
       try {
         const res = await this.modelRouter.generate(this.buildLoopPrompt(goal, opts.context, steps, available, maxSteps - i), {
           orgId,
+          taskId,
+          requestType: 'reasoning',
           budget: 'cheap',
           responseFormat: 'json',
           temperature: 0,
@@ -181,7 +183,7 @@ export class AgentLoopService {
     try {
       const synthesis = await this.modelRouter.generate(
         `OBJETIVO: ${goal}\n\nHALLAZGOS:\n${gathered.map((s) => `[${s.tool}] ${s.observation}`).join('\n\n')}\n\nRedacta la mejor respuesta posible al objetivo usando SOLO los hallazgos. Español, directo.`,
-        { orgId, budget: 'cheap', maxTokens: 600, temperature: 0.2 },
+        { orgId, taskId, requestType: 'response', budget: 'cheap', maxTokens: 600, temperature: 0.2 },
       );
       tokensUsed += synthesis.usage.totalTokens;
       await log(`agent-loop: pasos agotados — sintetizando respuesta con ${gathered.length} hallazgos (${tokensUsed} tokens)`, 'loop');

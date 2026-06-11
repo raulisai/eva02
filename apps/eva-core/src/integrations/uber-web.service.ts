@@ -947,4 +947,8 @@ export class UberWebService {
       'Te envié screenshot para confirmar. No pedí ni confirmé ningún viaje.',
     ].join('\n');
   }
+
+  async getProfile(orgId: string) {
+    return this.browser.getOrCreateProfile(orgId, UBER_SERVICE);
+  }
 }

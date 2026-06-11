@@ -89,6 +89,7 @@ export class ModelRouterService {
         try {
           const { error } = await dbClient.admin.from('token_logs').insert({
             org_id: opts.orgId,
+            task_id: opts.taskId,
             model: result.model,
             prompt_tokens: promptTokens,
             completion_tokens: completionTokens,

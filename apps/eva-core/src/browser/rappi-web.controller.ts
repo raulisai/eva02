@@ -1,10 +1,19 @@
-import { BadRequestException, Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
 import { AuthenticatedRequest } from '../common/types';
 import { RappiWebService } from '../integrations/rappi-web.service';
 
 @Controller('integrations/rappi')
 export class RappiWebController {
   constructor(private readonly rappi: RappiWebService) {}
+
+  @Get('status')
+  async getStatus(@Req() req: AuthenticatedRequest) {
+    const profile = await this.rappi.getProfile(req.user.orgId);
+    return {
+      ok: true,
+      has_session: profile.encrypted_state !== null,
+    };
+  }
 
   @Post('start-session')
   @HttpCode(HttpStatus.OK)

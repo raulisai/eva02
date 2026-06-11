@@ -12,6 +12,7 @@ export interface GenerateOptions {
   responseFormat?: 'text' | 'json';
   /** When set, org-stored provider keys take precedence over env keys. */
   orgId?: string;
+  taskId?: string;
   imageBase64?: string;
   imageMimeType?: string;
   requestType?: 'reasoning' | 'tools' | 'code' | 'response';

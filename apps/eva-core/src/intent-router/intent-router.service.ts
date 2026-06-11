@@ -38,7 +38,7 @@ export class IntentRouterService {
 
     // 2. LLM fallback when rules are uncertain
     if (ruleResult.confidence < RULE_CONFIDENCE_THRESHOLD) {
-      result = await this.classifyByLLM(input, opts.context);
+      result = await this.classifyByLLM(input, orgId, opts.taskId, opts.context);
       result = {
         ...result,
         classifier: ruleResult.confidence > 0 ? 'hybrid' : 'llm',
@@ -133,11 +133,14 @@ export class IntentRouterService {
 
   // ── LLM classifier ────────────────────────────────────────────────────────
 
-  private async classifyByLLM(input: string, context?: string): Promise<IntentClassification> {
+  private async classifyByLLM(input: string, orgId: string, taskId?: string, context?: string): Promise<IntentClassification> {
     const prompt = context ? `Context: ${context}\n\nInput: ${input}` : input;
 
     try {
       const result = await this.modelRouter.generate(prompt, {
+        orgId,
+        taskId,
+        requestType: 'reasoning',
         systemPrompt:   LLM_SYSTEM_PROMPT,
         responseFormat: 'json',
         budget:         'cheap',
