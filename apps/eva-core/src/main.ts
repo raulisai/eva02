@@ -1,3 +1,4 @@
+// Trigger reload to pick up rebuilt packages and env vars
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { Logger, ValidationPipe } from '@nestjs/common';
