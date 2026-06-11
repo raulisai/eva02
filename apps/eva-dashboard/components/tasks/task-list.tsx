@@ -97,10 +97,10 @@ export function TaskList({ initialTasks }: TaskListProps) {
               <span className="font-mono text-xs text-zinc-500">{shortId(task.id)}</span>
               <span className="text-xs text-zinc-200 truncate pr-4">{task.title}</span>
               <span><StatusBadge status={liveStatus} /></span>
-              <span className="font-mono text-xs text-zinc-500">
+              <span className="font-mono text-xs text-zinc-500" suppressHydrationWarning>
                 {new Date(task.created_at).toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
               </span>
-              <span className="font-mono text-xs text-zinc-600">{age(task.created_at)}</span>
+              <span className="font-mono text-xs text-zinc-600" suppressHydrationWarning>{age(task.created_at)}</span>
             </div>
           );
         })}

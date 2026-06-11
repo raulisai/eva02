@@ -35,7 +35,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  if (user && isAuthPath) {
+  if (user && (isAuthPath || request.nextUrl.pathname === '/')) {
     const url = request.nextUrl.clone();
     url.pathname = '/tasks';
     return NextResponse.redirect(url);

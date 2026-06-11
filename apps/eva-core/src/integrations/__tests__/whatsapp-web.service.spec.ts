@@ -27,6 +27,8 @@ describe('WhatsAppWebService', () => {
       }),
       evaluate: jest.fn(),
       saveProfileState: jest.fn().mockResolvedValue({}),
+      typeCharacters: jest.fn().mockResolvedValue({}),
+      clickNow: jest.fn().mockResolvedValue({}),
     } as unknown as jest.Mocked<BrowserService>;
 
     service = new WhatsAppWebService(browser);
@@ -171,5 +173,52 @@ describe('WhatsAppWebService', () => {
     expect(result.answered).toEqual([expect.objectContaining({ chat_name: 'Luis' })]);
     expect(result.text).toContain('Chats visibles sin responder');
     expect(result.text).toContain('Ya contestados visibles');
+  });
+
+  it('opens and retrieves messages for a contact that is already visible in the list', async () => {
+    browser.evaluate
+      .mockResolvedValueOnce('logged_in') // detectState
+      .mockResolvedValueOnce({ open: false, actualContactName: null }) // alreadyOpen (check header)
+      .mockResolvedValueOnce({ clicked: true, actualContactName: 'Michael Sec' }) // clickedVisible
+      .mockResolvedValueOnce(['[2:09 pm] Michael Sec: Hola']); // extractOpenChatMessages
+
+    const result = await service.fetchContactMessages(ORG, 'Michael Sec', TASK);
+
+    expect(result.ok).toBe(true);
+    expect(result.text).toContain('Michael Sec');
+    expect(result.text).toContain('Hola');
+  });
+
+  it('searches for and retrieves messages for a contact that is not immediately visible', async () => {
+    browser.evaluate
+      .mockResolvedValueOnce('logged_in') // detectState
+      .mockResolvedValueOnce({ open: false, actualContactName: null }) // alreadyOpen
+      .mockResolvedValueOnce({ clicked: false, actualContactName: null }) // clickedVisible
+      .mockResolvedValueOnce(true) // searchFocused
+      .mockResolvedValueOnce({ clicked: true, actualContactName: 'Michael Sec' }) // clickedSearchResult
+      .mockResolvedValueOnce(['[2:09 pm] Michael Sec: Hola']); // extractOpenChatMessages
+
+    const result = await service.fetchContactMessages(ORG, 'Michael Sec', TASK);
+
+    expect(browser.typeCharacters).toHaveBeenCalledWith('session-1', ORG, 'Michael Sec', 80);
+    expect(result.ok).toBe(true);
+    expect(result.text).toContain('Michael Sec');
+    expect(result.text).toContain('Hola');
+  });
+
+  it('returns contact_not_found if the contact cannot be found', async () => {
+    browser.evaluate
+      .mockResolvedValueOnce('logged_in') // detectState
+      .mockResolvedValueOnce({ open: false, actualContactName: null }) // alreadyOpen
+      .mockResolvedValueOnce({ clicked: false, actualContactName: null }) // clickedVisible
+      .mockResolvedValueOnce(true) // searchFocused
+      .mockResolvedValueOnce({ clicked: false, actualContactName: null }) // clickedSearchResult
+      .mockResolvedValueOnce(true) // focus/clear search box fallback
+      .mockResolvedValueOnce({ clicked: false, actualContactName: null }); // secondAttempt fallback
+
+    const result = await service.fetchContactMessages(ORG, 'Michael Sec', TASK);
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain('No pude encontrar');
   });
 });

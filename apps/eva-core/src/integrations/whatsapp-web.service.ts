@@ -58,6 +58,21 @@ export type WhatsAppUnansweredResult =
     text: string;
   };
 
+export type WhatsAppContactMessagesResult =
+  | {
+      ok: true;
+      session: WhatsAppSessionStatus;
+      contact: string;
+      messages: string[];
+      text: string;
+    }
+  | {
+      ok: false;
+      reason: 'qr_required' | 'loading' | 'contact_not_found' | 'empty' | 'unknown';
+      session: WhatsAppSessionStatus;
+      text: string;
+    };
+
 const normalizeWhatsAppText = (value: string) => value.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
 const uniqueWhatsAppTexts = (values: Array<string | null | undefined>) => {
   const seen = new Set<string>();
@@ -330,6 +345,66 @@ export class WhatsAppWebService {
     };
   }
 
+  async fetchContactMessages(orgId: string, contactName: string, taskId?: string): Promise<WhatsAppContactMessagesResult> {
+    const session = await this.startSession(orgId, taskId);
+
+    if (session.state === 'qr_required') {
+      return {
+        ok: false,
+        reason: 'qr_required',
+        session,
+        text:
+          'Abrí WhatsApp Web, pero falta vincular la sesión. Escanea el QR con tu teléfono; '
+          + `cuando termine, vuelve a pedirme los mensajes de ${contactName}.`,
+      };
+    }
+
+    if (session.state !== 'logged_in') {
+      return {
+        ok: false,
+        reason: session.state === 'loading' ? 'loading' : 'unknown',
+        session,
+        text:
+          'WhatsApp Web abrió, pero todavía no pude confirmar que la sesión esté lista. '
+          + 'Espera unos segundos e inténtalo de nuevo.',
+      };
+    }
+
+    const { ok: opened, actualContactName } = await this.selectContact(session.session_id, orgId, contactName);
+    
+    // Always capture a screenshot of what we found/did!
+    const screenshot = await this.browser.screenshot(session.session_id, orgId);
+    const updatedSession = { ...session, screenshot };
+
+    if (!opened || !actualContactName) {
+      return {
+        ok: false,
+        reason: 'contact_not_found',
+        session: updatedSession,
+        text: `No pude encontrar ningún contacto similar a **${contactName}** en WhatsApp. Te adjunto una captura de la pantalla actual para que lo verifiques.`,
+      };
+    }
+
+    const messages = await this.extractOpenChatMessages(session.session_id, orgId);
+    
+    const exactMatch = actualContactName.toLowerCase().trim() === contactName.toLowerCase().trim();
+    const matchNotice = exactMatch 
+      ? `Mensajes recientes de **${actualContactName}**:` 
+      : `No encontré un contacto exacto para "${contactName}". Abrí el chat de **${actualContactName}** (coincidencia más cercana encontrada en la búsqueda):`;
+
+    const text = messages.length === 0
+      ? `${matchNotice}\n\nNo encontré mensajes visibles en esta conversación. Te adjunto una captura de pantalla.`
+      : `${matchNotice}\n\n` + messages.map((msg) => msg.replace(/\n+/g, ' ')).join('\n');
+
+    return {
+      ok: true,
+      session: updatedSession,
+      contact: actualContactName,
+      messages,
+      text,
+    };
+  }
+
   private settleMs(): number {
     const configured = Number(process.env.WHATSAPP_WEB_SETTLE_MS ?? DEFAULT_SETTLE_MS);
     if (!Number.isFinite(configured)) return DEFAULT_SETTLE_MS;
@@ -511,5 +586,314 @@ export class WhatsAppWebService {
       answeredLines.length ? '\nYa contestados visibles:' : '',
       answeredLines.length ? answeredLines.join('\n') : '',
     ].filter(Boolean).join('\n');
+  }
+
+  private async selectContact(sessionId: string, orgId: string, contactName: string): Promise<{ ok: boolean; actualContactName: string | null }> {
+    const contactLower = contactName.toLowerCase().trim();
+
+    // 1. Check if we are already in the chat with this contact
+    const alreadyOpen = await this.browser.evaluate<{ open: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
+      function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
+        if (!chatName || !query) return false;
+        const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+        const c = clean(chatName);
+        const q = clean(query);
+        if (c.includes(q)) return true;
+        const cWords = c.split(/\s+/);
+        const qWords = q.split(/\s+/);
+        const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw)));
+        if (allMatched) return true;
+        const initials = cWords.map((w: string) => w[0]).join('');
+        if (initials.startsWith(q)) return true;
+        return false;
+      }
+
+      const header = document.querySelector('header');
+      if (header) {
+        const titleEl = header.querySelector('[dir="auto"], span[title]');
+        const headerText = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || titleEl.textContent || '') : header.innerText || '';
+        if (isMatch(headerText, contactNameLower)) {
+          return { open: true, actualContactName: headerText };
+        }
+      }
+      return { open: false, actualContactName: null };
+    }, contactLower);
+
+    if (alreadyOpen.open) {
+      return { ok: true, actualContactName: alreadyOpen.actualContactName };
+    }
+
+    // 2. Try to click on the contact if it's already visible in the list
+    const clickedVisible = await this.browser.evaluate<{ clicked: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
+      function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
+        if (!chatName || !query) return false;
+        const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+        const c = clean(chatName);
+        const q = clean(query);
+        if (c.includes(q)) return true;
+        const cWords = c.split(/\s+/);
+        const qWords = q.split(/\s+/);
+        const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw)));
+        if (allMatched) return true;
+        const initials = cWords.map((w: string) => w[0]).join('');
+        if (initials.startsWith(q)) return true;
+        return false;
+      }
+
+      const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
+      const elements = Array.from(pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
+      for (const el of elements) {
+        const titleEl = el.querySelector('[title], [aria-label]');
+        const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || el.textContent || '') : el.textContent || '';
+        if (isMatch(chatName, contactNameLower)) {
+          (el as HTMLElement).click();
+          return { clicked: true, actualContactName: chatName };
+        }
+      }
+      return { clicked: false, actualContactName: null };
+    }, contactLower);
+
+    if (clickedVisible.clicked) {
+      await this.browser.wait(sessionId, orgId, 1500); // Wait for chat to open
+      return { ok: true, actualContactName: clickedVisible.actualContactName };
+    }
+
+    // 3. Search for the contact using clickNow + typeCharacters
+    const searchSelectors = [
+      'div[contenteditable="true"][data-tab="3"]',
+      'div.lexical-rich-text-input div[contenteditable="true"]',
+      '[data-testid="chat-list-search"]',
+      '[aria-label="Search or start new chat"]',
+      '[aria-label="Buscar o empezar un nuevo chat"]',
+      '[aria-label="Search"]',
+      '[aria-label="Buscar"]'
+    ];
+
+    let typed = false;
+    for (const selector of searchSelectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, selector, { timeout: 1500 });
+        await this.browser.evaluate(sessionId, orgId, (sel) => {
+          const el = document.querySelector(sel) as HTMLElement;
+          if (el) {
+            el.focus();
+            if (el.getAttribute('contenteditable') === 'true') {
+              el.innerText = '';
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+          }
+        }, selector);
+        await this.browser.typeCharacters(sessionId, orgId, contactName, 80);
+        typed = true;
+        break;
+      } catch (e) {
+        // ignore and try next
+      }
+    }
+
+    if (!typed) {
+      return { ok: false, actualContactName: null };
+    }
+
+    await this.browser.wait(sessionId, orgId, 2000); // Wait for search results to load
+
+    // Click the matching search result
+    const clickedSearchResult = await this.browser.evaluate<{ clicked: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
+      function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
+        if (!chatName || !query) return false;
+        const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+        const c = clean(chatName);
+        const q = clean(query);
+        if (c.includes(q)) return true;
+        const cWords = c.split(/\s+/);
+        const qWords = q.split(/\s+/);
+        const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw)));
+        if (allMatched) return true;
+        const initials = cWords.map((w: string) => w[0]).join('');
+        if (initials.startsWith(q)) return true;
+        return false;
+      }
+
+      const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
+      const elements = Array.from(pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
+      
+      // Try matching
+      for (const el of elements) {
+        const titleEl = el.querySelector('[title], [aria-label]');
+        const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || el.textContent || '') : el.textContent || '';
+        if (isMatch(chatName, contactNameLower)) {
+          (el as HTMLElement).click();
+          return { clicked: true, actualContactName: chatName };
+        }
+      }
+      
+      // Fallback to first search result
+      if (elements.length > 0) {
+        const el = elements[0];
+        (el as HTMLElement).click();
+        const titleEl = el.querySelector('[title], [aria-label]');
+        const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || el.textContent || '') : el.textContent || '';
+        return { clicked: true, actualContactName: chatName };
+      }
+      
+      return { clicked: false, actualContactName: null };
+    }, contactLower);
+
+    if (clickedSearchResult.clicked) {
+      await this.browser.wait(sessionId, orgId, 1500); // Wait for chat to open
+      return { ok: true, actualContactName: clickedSearchResult.actualContactName };
+    }
+
+    // Fallback: If full search yielded nothing, try searching for the first word/token of the query
+    const firstWord = contactName.split(/\s+/)[0];
+    if (firstWord && firstWord.length > 1 && firstWord.toLowerCase() !== contactLower) {
+      let typedFirst = false;
+      for (const selector of searchSelectors) {
+        try {
+          await this.browser.clickNow(sessionId, orgId, selector, { timeout: 1500 });
+          await this.browser.evaluate(sessionId, orgId, (sel) => {
+            const el = document.querySelector(sel) as HTMLElement;
+            if (el) {
+              el.focus();
+              if (el.getAttribute('contenteditable') === 'true') {
+                el.innerText = '';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+              }
+            }
+          }, selector);
+          await this.browser.typeCharacters(sessionId, orgId, firstWord, 80);
+          typedFirst = true;
+          break;
+        } catch (e) {
+          // ignore and try next
+        }
+      }
+
+      if (typedFirst) {
+        await this.browser.wait(sessionId, orgId, 2000);
+
+        const secondAttempt = await this.browser.evaluate<{ clicked: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
+          function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
+            if (!chatName || !query) return false;
+            const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+            const c = clean(chatName);
+            const q = clean(query);
+            if (c.includes(q)) return true;
+            const cWords = c.split(/\s+/);
+            const qWords = q.split(/\s+/);
+            const allMatched = qWords.every(qw => cWords.some(cw => cw.startsWith(qw)));
+            if (allMatched) return true;
+            const initials = cWords.map(w => w[0]).join('');
+            if (initials.startsWith(q)) return true;
+            return false;
+          }
+
+          const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
+          const elements = Array.from(pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
+          
+          for (const el of elements) {
+            const titleEl = el.querySelector('[title], [aria-label]');
+            const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || el.textContent || '') : el.textContent || '';
+            if (isMatch(chatName, contactNameLower)) {
+              (el as HTMLElement).click();
+              return { clicked: true, actualContactName: chatName };
+            }
+          }
+
+          if (elements.length > 0) {
+            const el = elements[0];
+            (el as HTMLElement).click();
+            const titleEl = el.querySelector('[title], [aria-label]');
+            const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || el.textContent || '') : el.textContent || '';
+            return { clicked: true, actualContactName: chatName };
+          }
+
+          return { clicked: false, actualContactName: null };
+        }, contactLower);
+
+        if (secondAttempt.clicked) {
+          await this.browser.wait(sessionId, orgId, 1500);
+          return { ok: true, actualContactName: secondAttempt.actualContactName };
+        }
+      }
+    }
+
+    return { ok: false, actualContactName: null };
+  }
+
+  private async extractOpenChatMessages(sessionId: string, orgId: string): Promise<string[]> {
+    const maxRetries = 10;
+    for (let i = 0; i < maxRetries; i++) {
+      const messages = await this.browser.evaluate<string[]>(sessionId, orgId, () => {
+        const main = document.querySelector('#main');
+        if (!main) return [];
+
+        const selectors = [
+          '#main .message-in',
+          '#main .message-out',
+          '#main [data-testid="msg-container"]',
+          '#main [data-pre-plain-text]',
+          '#main .copyable-text',
+          '#main span.selectable-text'
+        ];
+
+        let messageElements: Element[] = [];
+        for (const selector of selectors) {
+          const els = Array.from(main.querySelectorAll(selector));
+          if (els.length > 0) {
+            messageElements = els;
+            break;
+          }
+        }
+
+        const results: string[] = [];
+        const seenTexts = new Set<string>();
+
+        for (const el of messageElements) {
+          const prePlainText = el.getAttribute('data-pre-plain-text');
+          const textEl = el.querySelector('span.selectable-text, .copyable-text span, .copyable-text') as HTMLElement;
+          let text = '';
+          if (textEl) {
+            text = textEl.innerText.trim();
+          } else {
+            text = (el as HTMLElement).innerText ? (el as HTMLElement).innerText.trim() : '';
+          }
+          
+          if (!text) continue;
+
+          let msgLine = '';
+          if (prePlainText) {
+            msgLine = `${prePlainText.trim()} ${text}`;
+          } else {
+            const isIncoming = el.classList.contains('message-in') || el.closest('.message-in') !== null;
+            const sender = isIncoming ? 'Contacto' : 'Tú';
+            msgLine = `[${sender}]: ${text}`;
+          }
+
+          if (!seenTexts.has(msgLine)) {
+            results.push(msgLine);
+            seenTexts.add(msgLine);
+          }
+        }
+        
+        return results;
+      });
+
+      if (messages.length > 0) {
+        return messages.slice(-15);
+      }
+
+      await this.browser.wait(sessionId, orgId, 300);
+    }
+
+    return [];
+  }
+
+  private formatContactMessages(contactName: string, messages: string[]): string {
+    if (messages.length === 0) {
+      return `Abrí el chat de **${contactName}**, pero no encontré mensajes visibles en la conversación.`;
+    }
+    const list = messages.map((msg) => msg.replace(/\n+/g, ' ')).join('\n');
+    return `Mensajes recientes de **${contactName}** en WhatsApp:\n\n${list}`;
   }
 }

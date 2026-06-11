@@ -380,6 +380,17 @@ describe('AgentRunnerService', () => {
               }],
               text: 'Chats visibles sin responder en WhatsApp:\n\n- **Ana** (17:38): Me avisas cuando llegues\n\nYa contestados visibles:\n- **Luis** (17:20): Ya quedó',
             }),
+            fetchContactMessages: jest.fn().mockResolvedValue({
+              ok: true,
+              session: {
+                session_id: 'browser-session-1',
+                state: 'logged_in',
+                current_url: 'https://web.whatsapp.com/',
+              },
+              contact: 'Michael Sec',
+              messages: ['[2:09 pm]: Hola'],
+              text: 'Mensajes recientes de **Michael Sec** en WhatsApp:\n\n[2:09 pm]: Hola',
+            }),
           },
         },
         {
@@ -1332,6 +1343,23 @@ describe('AgentRunnerService', () => {
     expect(result?.payload).toEqual(expect.objectContaining({
       model: 'whatsapp-web',
       text: expect.stringContaining('sin responder'),
+    }));
+  });
+
+  it('routes WhatsApp contact-specific message requests to fetchContactMessages', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'Muéstrame los mensajes de Michael Sec de WhatsApp' }));
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(whatsapp.fetchContactMessages).toHaveBeenCalledWith(ORG, 'Michael Sec', TASK);
+    expect(whatsapp.fetchLatestMessage).not.toHaveBeenCalled();
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({
+      model: 'whatsapp-web',
+      text: expect.stringContaining('Michael Sec'),
     }));
   });
 

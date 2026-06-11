@@ -835,12 +835,19 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       return;
     }
 
+    const contactToRead = this.extractWhatsAppContactToRead(input);
     const result = wantsUnansweredStatus
       ? await this.whatsapp.fetchUnansweredMessages(orgId, taskId)
-      : WHATSAPP_UNREAD_SIGNALS.test(input)
-        ? await this.whatsapp.fetchUnreadMessages(orgId, taskId)
-        : await this.whatsapp.fetchLatestMessage(orgId, taskId);
-    await this.maybePublishWhatsAppQr(orgId, taskId, result.session.screenshot);
+      : contactToRead
+        ? await this.whatsapp.fetchContactMessages(orgId, contactToRead, taskId)
+        : WHATSAPP_UNREAD_SIGNALS.test(input)
+          ? await this.whatsapp.fetchUnreadMessages(orgId, taskId)
+          : await this.whatsapp.fetchLatestMessage(orgId, taskId);
+    if (contactToRead) {
+      await this.maybePublishBrowserScreenshot(orgId, taskId, result.session.screenshot, 'WhatsApp Web');
+    } else {
+      await this.maybePublishWhatsAppQr(orgId, taskId, result.session.screenshot);
+    }
     await this.deliver(orgId, taskId, result.text, 'whatsapp-web', Date.now() - startedAt);
     await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
     if (result.ok) {
@@ -1319,6 +1326,27 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       const contact = match[1].replace(/\b(por\s+)?(whatsapp|whatsap|watsapp|watsap|guasap|wa)\b/ig, '').trim();
       const text = match[2].trim();
       if (contact && text) return { contact, text };
+    }
+    return null;
+  }
+
+  private extractWhatsAppContactToRead(input: string): string | null {
+    const patterns = [
+      /\b(?:mensajes?|chats?|conversaci[oó]n|conversaciones?)\s+(?:de|con|para)\s+([^#\n\.\?,]+)/i,
+      /\b(?:abre|ver|busca|buscar|mostrar|muestra|m[uú]estrame)\s+(?:el\s+chat\s+(?:de|con)|los\s+mensajes\s+(?:de|con))\s+([^#\n\.\?,]+)/i,
+      /\b(?:abre|ver|busca|buscar|mostrar|muestra|m[uú]estrame)\s+(?:a\s+)?([^#\n\.\?,]+?)\s+(?:en\s+whatsapp|de\s+whatsapp|en\s+wa|de\s+wa)\b/i,
+    ];
+    for (const pattern of patterns) {
+      const match = input.match(pattern);
+      if (match) {
+        let contact = match[1]
+          .replace(/\b(por\s+)?(whatsapp|whatsap|watsapp|watsap|guasap|wa)\b/ig, '')
+          .trim();
+        contact = contact.replace(/\s+(?:de|con|en|para)$/i, '').trim();
+        if (contact && contact.length > 1 && !/^(mis?|el|los|un|una|la)$/i.test(contact)) {
+          return contact;
+        }
+      }
     }
     return null;
   }

@@ -1,3 +1,5 @@
+"use client";
+
 import { useState, useEffect } from 'react';
 import { useTaskEvents, useLiveStatus } from '@/hooks/use-ws';
 import { StatusBadge } from './status-badge';
@@ -50,7 +52,7 @@ function EventItem({ ev }: { ev: EvaEvent }) {
     content = (
       <div className="bg-cyan-500/5 border border-cyan-500/20 rounded p-2 text-xs text-cyan-200 italic">
         <span className="font-semibold not-italic text-cyan-400 mr-1">EVA:</span>
-        "{String(ev.payload.text ?? '')}"
+        &ldquo;{String(ev.payload.text ?? '')}&rdquo;
       </div>
     );
   } else if (ev.type === 'task.result') {
@@ -260,7 +262,7 @@ export function TaskDetail({ task, tokenLogs = [], initialEvents = [] }: TaskDet
           ].map(({ label, value }) => (
             <div key={label}>
               <p className="text-[10px] font-mono text-zinc-600 uppercase tracking-widest">{label}</p>
-              <p className="text-xs font-mono text-zinc-300 mt-0.5">{value}</p>
+              <p className="text-xs font-mono text-zinc-300 mt-0.5" suppressHydrationWarning>{value}</p>
             </div>
           ))}
         </div>
