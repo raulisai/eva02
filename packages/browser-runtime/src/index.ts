@@ -163,12 +163,7 @@ export class PlaywrightBrowserRuntime {
     await this.closeProfileSessions(input.profileId, input.sessionId);
     const userDataDir = join(this.profilesRoot, input.profileId);
     await mkdir(userDataDir, { recursive: true });
-    await this.cleanupSingletonLocks(userDataDir);
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: this.headless,
-      args: this.stealthArgs(),
-    });
-    await this.applyStealthToContext(context);
+    const context = await this.launchContext(userDataDir);
 
     // Seed cookies from the provided payload
     const cookies = this.extractCookies(input.storageState);

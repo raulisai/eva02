@@ -394,19 +394,28 @@ export class RappiWebService {
 
   async getStoredStatus(orgId: string): Promise<RappiStoredSessionStatus> {
     const profile = await this.browser.getOrCreateProfile(orgId, RAPPI_SERVICE);
-    const latestSession = await this.browser.findLatestSession(profile.id, orgId);
+    const sessions = typeof (this.browser as any).findSessions === 'function'
+      ? await (this.browser as any).findSessions(profile.id, orgId, 10).catch(() => [])
+      : [await this.browser.findLatestSession(profile.id, orgId)].filter(Boolean);
+
+    const latestSession = sessions[0] || null;
+    const verifiedSession = sessions.find((s: any) => {
+      const m = (s?.metadata ?? {}) as Record<string, unknown>;
+      return typeof m.last_state === 'string' || typeof m.email === 'string';
+    }) || latestSession;
+
     const screenshot = await this.browser.findLatestScreenshotForProfile(profile.id, orgId);
-    const metadata = (latestSession?.metadata ?? {}) as Record<string, unknown>;
+    const metadata = (verifiedSession?.metadata ?? {}) as Record<string, unknown>;
     const state = this.asRappiState(metadata.last_state);
 
     return {
       ok: true,
       has_session: Boolean(profile.encrypted_state) && (!state || state === 'logged_in'),
-      session_id: latestSession?.id ?? null,
+      session_id: verifiedSession?.id ?? null,
       state: state ?? null,
       current_url: typeof metadata.last_current_url === 'string'
         ? metadata.last_current_url
-        : latestSession?.current_url ?? null,
+        : verifiedSession?.current_url ?? null,
       email: typeof metadata.email === 'string' ? metadata.email : undefined,
       last_verified_at: typeof metadata.last_verified_at === 'string' ? metadata.last_verified_at : undefined,
       screenshot: screenshot ?? undefined,

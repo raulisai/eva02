@@ -282,4 +282,11 @@ describe('BrowserService', () => {
     });
     expect(runtime.openWithStorageState).not.toHaveBeenCalled();
   });
+
+  it('finds sessions for a profile', async () => {
+    repo.findSessionsForProfile = jest.fn().mockResolvedValue([session]);
+    const result = await service.findSessions(PROFILE, ORG, 5);
+    expect(repo.findSessionsForProfile).toHaveBeenCalledWith(PROFILE, ORG, 5);
+    expect(result).toEqual([session]);
+  });
 });

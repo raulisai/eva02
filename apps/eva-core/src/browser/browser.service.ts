@@ -39,6 +39,7 @@ interface BrowserDebugInput {
 export class BrowserService {
   private readonly logger = new Logger(BrowserService.name);
   private readonly profileCrypto = new BrowserProfileCrypto();
+  private readonly launchesInProgress = new Map<string, Promise<void>>();
 
   constructor(
     private readonly repo: BrowserRepository,
@@ -49,99 +50,122 @@ export class BrowserService {
 
   async open(dto: OpenBrowserDto, orgId: string) {
     const profile = await this.repo.getOrCreateProfile(orgId, dto.service);
-    const reusableSession = dto.reuse_open
-      ? await this.repo.findLatestOpenSessionForProfile(profile.id, orgId)
-      : null;
-    const session = reusableSession
-      ?? await this.repo.createSession({
-        orgId,
-        profileId: profile.id,
-        taskId: dto.task_id,
-        metadata: dto.metadata,
-      });
 
-    await this.closeOtherOpenSessionsForProfile(profile.id, orgId, session.id);
-
-    let decryptedState: any = null;
-    if (profile.encrypted_state) {
+    // Wait for any pending launch on this profile to complete to avoid lock race conditions
+    const launchPromise = this.launchesInProgress.get(profile.id);
+    if (launchPromise) {
+      this.logger.log(`Launch already in progress for profile ${profile.id} — waiting...`);
       try {
-        decryptedState = this.profileCrypto.decryptJson(profile.encrypted_state);
-      } catch (error) {
-        this.logger.error(`Failed to decrypt profile state for ${profile.id}: ${(error as Error).message}`);
+        await launchPromise;
+      } catch {
+        // ignore error from previous launch, we will retry
       }
     }
 
-    await this.logBrowserAction(orgId, {
-      action: 'browser.open.start',
-      message: `opening ${dto.service} at ${this.safeUrlForLog(dto.url)}`,
-      taskId: session.task_id,
-      sessionId: session.id,
-      profileId: profile.id,
-      data: {
-        service: dto.service,
-        url: this.safeUrlForLog(dto.url),
-        reuse_open: Boolean(dto.reuse_open),
-        restored_storage_state: Boolean(decryptedState),
-      },
+    let resolveLaunch: () => void = () => {};
+    const currentLaunchPromise = new Promise<void>((resolve) => {
+      resolveLaunch = resolve;
     });
+    this.launchesInProgress.set(profile.id, currentLaunchPromise);
 
-    let result: { url: string; title: string };
     try {
-      const hasLiveRuntimeSession = this.runtime.hasSession(session.id);
-      if (decryptedState && !hasLiveRuntimeSession) {
-        result = await this.runtime.openWithStorageState({
-          sessionId: session.id,
+      const reusableSession = dto.reuse_open
+        ? await this.repo.findLatestOpenSessionForProfile(profile.id, orgId)
+        : null;
+      const session = reusableSession
+        ?? await this.repo.createSession({
+          orgId,
           profileId: profile.id,
-          url: dto.url,
-          storageState: decryptedState,
+          taskId: dto.task_id,
+          metadata: dto.metadata,
         });
-      } else {
-        result = await this.runtime.open({
-          sessionId: session.id,
-          profileId: profile.id,
-          url: dto.url,
-        });
+
+      await this.closeOtherOpenSessionsForProfile(profile.id, orgId, session.id);
+
+      let decryptedState: any = null;
+      if (profile.encrypted_state) {
+        try {
+          decryptedState = this.profileCrypto.decryptJson(profile.encrypted_state);
+        } catch (error) {
+          this.logger.error(`Failed to decrypt profile state for ${profile.id}: ${(error as Error).message}`);
+        }
       }
-    } catch (error) {
-      await this.repo.updateSession(session.id, orgId, {
-        status: 'failed',
-        metadata: {
-          ...session.metadata,
-          last_error: (error as Error).message,
-          failed_at: new Date().toISOString(),
-        },
-      }).catch(() => undefined);
+
       await this.logBrowserAction(orgId, {
-        action: 'browser.open.failed',
-        message: `browser open failed: ${(error as Error).message}`,
+        action: 'browser.open.start',
+        message: `opening ${dto.service} at ${this.safeUrlForLog(dto.url)}`,
         taskId: session.task_id,
         sessionId: session.id,
         profileId: profile.id,
-        level: 'error',
-        data: { service: dto.service, url: this.safeUrlForLog(dto.url) },
+        data: {
+          service: dto.service,
+          url: this.safeUrlForLog(dto.url),
+          reuse_open: Boolean(dto.reuse_open),
+          restored_storage_state: Boolean(decryptedState),
+        },
       });
-      if (this.isProfileLockError(error)) {
-        throw new ConflictException(
-          `El perfil local de ${dto.service} parece estar abierto en otra ventana o quedó bloqueado. `
-          + 'Cierra esa ventana del navegador y vuelve a verificar la sesión.',
-        );
-      }
-      throw error;
-    }
 
-    const updated = await this.repo.updateSession(session.id, orgId, {
-      current_url: result.url,
-      metadata: { ...session.metadata, title: result.title },
-    });
-    await this.logBrowserAction(orgId, {
-      action: 'browser.open.done',
-      message: `opened ${result.title || 'Untitled'} at ${this.safeUrlForLog(result.url)}`,
-      taskId: session.task_id,
-      sessionId: session.id,
-      profileId: profile.id,
-      data: { title: result.title, current_url: this.safeUrlForLog(result.url) },
-    });
-    return { ...updated, title: result.title };
+      let result: { url: string; title: string };
+      try {
+        const hasLiveRuntimeSession = this.runtime.hasSession(session.id);
+        if (decryptedState && !hasLiveRuntimeSession) {
+          result = await this.runtime.openWithStorageState({
+            sessionId: session.id,
+            profileId: profile.id,
+            url: dto.url,
+            storageState: decryptedState,
+          });
+        } else {
+          result = await this.runtime.open({
+            sessionId: session.id,
+            profileId: profile.id,
+            url: dto.url,
+          });
+        }
+      } catch (error) {
+        await this.repo.updateSession(session.id, orgId, {
+          status: 'failed',
+          metadata: {
+            ...session.metadata,
+            last_error: (error as Error).message,
+            failed_at: new Date().toISOString(),
+          },
+        }).catch(() => undefined);
+        await this.logBrowserAction(orgId, {
+          action: 'browser.open.failed',
+          message: `browser open failed: ${(error as Error).message}`,
+          taskId: session.task_id,
+          sessionId: session.id,
+          profileId: profile.id,
+          level: 'error',
+          data: { service: dto.service, url: this.safeUrlForLog(dto.url) },
+        });
+        if (this.isProfileLockError(error)) {
+          throw new ConflictException(
+            `El perfil local de ${dto.service} parece estar abierto en otra ventana o quedó bloqueado. `
+            + 'Cierra esa ventana del navegador y vuelve a verificar la sesión.',
+          );
+        }
+        throw error;
+      }
+
+      const updated = await this.repo.updateSession(session.id, orgId, {
+        current_url: result.url,
+        metadata: { ...session.metadata, title: result.title },
+      });
+      await this.logBrowserAction(orgId, {
+        action: 'browser.open.done',
+        message: `opened ${result.title || 'Untitled'} at ${this.safeUrlForLog(result.url)}`,
+        taskId: session.task_id,
+        sessionId: session.id,
+        profileId: profile.id,
+        data: { title: result.title, current_url: this.safeUrlForLog(result.url) },
+      });
+      return { ...updated, title: result.title };
+    } finally {
+      this.launchesInProgress.delete(profile.id);
+      resolveLaunch();
+    }
   }
 
   async openManualProfile(dto: OpenManualProfileDto, orgId: string): Promise<ManualProfileOpenResult> {
@@ -337,6 +361,10 @@ export class BrowserService {
     return this.repo.findLatestSessionForProfile(profileId, orgId);
   }
 
+  async findSessions(profileId: string, orgId: string, limit = 10) {
+    return this.repo.findSessionsForProfile(profileId, orgId, limit);
+  }
+
   async findLatestScreenshotForProfile(profileId: string, orgId: string) {
     return this.repo.findLatestScreenshotForProfile(profileId, orgId);
   }
@@ -352,21 +380,50 @@ export class BrowserService {
     input: { sessionId: string; profileId: string; url: string; storageState: unknown },
     orgId: string,
   ) {
-    const result = await this.runtime.openWithStorageState(input);
-    const session = await this.repo.createSession({
-      orgId,
-      profileId: input.profileId,
-      taskId: undefined,
-      metadata: { purpose: 'session-import' },
+    const launchPromise = this.launchesInProgress.get(input.profileId);
+    if (launchPromise) {
+      this.logger.log(`Launch already in progress for profile ${input.profileId} — waiting...`);
+      try {
+        await launchPromise;
+      } catch {
+        // ignore
+      }
+    }
+
+    let resolveLaunch: () => void = () => {};
+    const currentLaunchPromise = new Promise<void>((resolve) => {
+      resolveLaunch = resolve;
     });
-    await this.logBrowserAction(orgId, {
-      action: 'browser.storage_state.open',
-      message: `opened browser with imported storage state at ${this.safeUrlForLog(result.url)}`,
-      sessionId: session.id,
-      profileId: input.profileId,
-      data: { url: this.safeUrlForLog(result.url), title: result.title },
-    });
-    return { ...session, ...result };
+    this.launchesInProgress.set(input.profileId, currentLaunchPromise);
+
+    try {
+      const result = await this.runtime.openWithStorageState(input);
+      const session = await this.repo.createSession({
+        orgId,
+        profileId: input.profileId,
+        taskId: undefined,
+        metadata: { purpose: 'session-import' },
+      });
+      await this.logBrowserAction(orgId, {
+        action: 'browser.storage_state.open',
+        message: `opened browser with imported storage state at ${this.safeUrlForLog(result.url)}`,
+        sessionId: session.id,
+        profileId: input.profileId,
+        data: { url: this.safeUrlForLog(result.url), title: result.title },
+      });
+      return { ...session, ...result };
+    } catch (error) {
+      if (this.isProfileLockError(error)) {
+        throw new ConflictException(
+          `El perfil local de importación parece estar abierto en otra ventana o quedó bloqueado. `
+          + 'Cierra esa ventana del navegador y vuelve a intentar.',
+        );
+      }
+      throw error;
+    } finally {
+      this.launchesInProgress.delete(input.profileId);
+      resolveLaunch();
+    }
   }
 
   async saveProfileState(sessionId: string, orgId: string) {
@@ -591,7 +648,10 @@ export class BrowserService {
   }
 
   private isProfileLockError(error: unknown): boolean {
-    const message = (error as Error).message ?? '';
-    return /Target page, context or browser has been closed|SingletonLock|ProcessSingleton|user data dir|profile.*in use|browser has been closed/i.test(message);
+    if (!error) return false;
+    const message = typeof error === 'string'
+      ? error
+      : (error as Error).message || String(error);
+    return /Target page, context or browser has been closed|SingletonLock|ProcessSingleton|user data dir|profile.*in use|browser has been closed|launchPersistentContext/i.test(message);
   }
 }

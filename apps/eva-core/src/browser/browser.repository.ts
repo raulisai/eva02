@@ -101,6 +101,19 @@ export class BrowserRepository {
     return data as BrowserSession | null;
   }
 
+  async findSessionsForProfile(profileId: string, orgId: string, limit = 10): Promise<BrowserSession[]> {
+    const { data, error } = await this.db.admin
+      .from('browser_sessions')
+      .select('*')
+      .eq('org_id', orgId)
+      .eq('profile_id', profileId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) this.fail('browser_sessions.findSessionsForProfile', error);
+    return (data ?? []) as BrowserSession[];
+  }
+
   async findSessionOrThrow(sessionId: string, orgId: string): Promise<BrowserSession> {
     const { data, error } = await this.db.admin
       .from('browser_sessions')
