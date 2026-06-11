@@ -56,6 +56,8 @@ export class ScriptForgeService {
     await log('forjando script con el modelo…', 'forge');
     const generated = await this.modelRouter.generate(input, {
       orgId,
+      taskId,
+      requestType: 'code',
       budget: 'balanced',
       maxTokens: 1800,
       responseFormat: 'json',

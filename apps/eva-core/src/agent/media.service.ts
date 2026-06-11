@@ -134,6 +134,8 @@ export class MediaService {
         `Dibuja un SVG sobre: ${subject}`,
         {
           orgId,
+          taskId,
+          requestType: 'code',
           budget: 'balanced',
           maxTokens: 1800,
           systemPrompt:

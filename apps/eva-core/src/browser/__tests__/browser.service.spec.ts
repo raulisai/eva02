@@ -185,6 +185,36 @@ describe('BrowserService', () => {
     expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({ type: 'browser.screenshot.created', orgId: ORG }));
   });
 
+  it('emits browser debug logs without exposing typed text', async () => {
+    await service.clickNow(SESSION, ORG, '#buy', { timeout: 1500 });
+    await service.typeNow(SESSION, ORG, 'input[name="password"]', 'super-secret', { timeout: 1500 });
+
+    expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'task.log',
+      orgId: ORG,
+      taskId: TASK,
+      payload: expect.objectContaining({
+        scope: 'browser',
+        module: 'BrowserService',
+        action: 'browser.click',
+        selector: '#buy',
+      }),
+    }));
+    expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'task.log',
+      orgId: ORG,
+      taskId: TASK,
+      payload: expect.objectContaining({
+        scope: 'browser',
+        module: 'BrowserService',
+        action: 'browser.type',
+        selector: 'input[name="password"]',
+        chars: 12,
+      }),
+    }));
+    expect(JSON.stringify(events.publish.mock.calls)).not.toContain('super-secret');
+  });
+
   it('restores browser session from encrypted state in the DB if available', async () => {
     const mockState = { cookies: [{ name: 'session-id', value: 'secret', domain: 'example.com' }] };
     const crypto = new BrowserProfileCrypto();

@@ -111,6 +111,8 @@ export class ConversationDigesterService {
     try {
       const result = await this.modelRouter.generate(prompt, {
         orgId: input.orgId,
+        taskId: input.taskId,
+        requestType: 'reasoning',
         budget: 'cheap',
         maxTokens: 120,
         temperature: 0,

@@ -19,9 +19,19 @@ const BROADCAST_EVENTS: EvaEventType[] = [
   'task.setup_required',
   'approval.requested',
   'approval.resolved',
+  'dev.task.created',
+  'dev.task.updated',
+  'dev.task.completed',
+  'dev.task.failed',
+  'browser.screenshot.created',
   'communication.message.received',
   'communication.message.sent',
+  'communication.send.failed',
+  'wear.fast_path.started',
+  'wear.fast_path.completed',
+  'wear.fast_path.fallback',
   'wear.token.created',
+  'wear.token.expired',
 ];
 
 /**

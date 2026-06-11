@@ -41,7 +41,7 @@ export class PlannerService {
 
     // Try LLM first; fall back to deterministic stub if no key
     try {
-      return await this.planWithLLM(request.goal, intent, request.context);
+      return await this.planWithLLM(request.goal, intent, request.orgId, request.context);
     } catch (err) {
       this.logger.warn('LLM planner failed, using deterministic fallback', err);
       return this.planDeterministic(request.goal, intent);
@@ -50,12 +50,14 @@ export class PlannerService {
 
   // ── LLM planner ───────────────────────────────────────────────────────────
 
-  private async planWithLLM(goal: string, intent: string, context?: string): Promise<Plan> {
+  private async planWithLLM(goal: string, intent: string, orgId: string, context?: string): Promise<Plan> {
     const userPrompt = context
       ? `Context:\n${context}\n\nGoal: ${goal}`
       : `Goal: ${goal}`;
 
     const result = await this.modelRouter.generate(userPrompt, {
+      orgId,
+      requestType: 'reasoning',
       systemPrompt:   PLANNER_SYSTEM_PROMPT,
       responseFormat: 'json',
       budget:         'balanced',

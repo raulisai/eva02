@@ -124,7 +124,7 @@ export class SmartNavigatorService {
         continue;
       }
 
-      const action = await this.decide(orgId, fullGoal, snapshot, steps);
+      const action = await this.decide(orgId, fullGoal, snapshot, steps, opts.taskId);
       steps.push({ snapshot, action });
 
       if (action.action === 'done') {
@@ -227,6 +227,7 @@ export class SmartNavigatorService {
     goal: string,
     snapshot: PageSnapshot,
     priorSteps: NavStep[],
+    taskId?: string,
   ): Promise<NavAction> {
     const recent = priorSteps.slice(-3).map((s) => `${s.action.action} ${s.action.target ?? ''} :: ${s.action.reason}`);
     const user = JSON.stringify({
@@ -241,6 +242,8 @@ export class SmartNavigatorService {
     try {
       const res = await this.models!.generate(user, {
         orgId,
+        taskId,
+        requestType: 'tools',
         budget: 'cheap',
         responseFormat: 'json',
         systemPrompt: SYSTEM_PROMPT,

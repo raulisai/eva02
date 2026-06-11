@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { chromium, BrowserContext, Page } from 'playwright';
@@ -163,6 +163,11 @@ export class PlaywrightBrowserRuntime {
     }
     const userDataDir = join(this.profilesRoot, input.profileId);
     await mkdir(userDataDir, { recursive: true });
+    try {
+      await unlink(join(userDataDir, 'SingletonLock'));
+    } catch {
+      // Ignore
+    }
     const context = await chromium.launchPersistentContext(userDataDir, {
       headless: this.headless,
       args: this.stealthArgs(),
@@ -247,6 +252,11 @@ export class PlaywrightBrowserRuntime {
   }
 
   private async launchContext(userDataDir: string): Promise<BrowserContext> {
+    try {
+      await unlink(join(userDataDir, 'SingletonLock'));
+    } catch {
+      // Ignore
+    }
     const stealthArgs = this.stealthArgs();
     const attempts = this.channel
       ? [{ headless: this.headless, channel: this.channel, args: stealthArgs }]

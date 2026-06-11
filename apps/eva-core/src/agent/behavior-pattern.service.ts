@@ -215,6 +215,7 @@ export class BehaviorPatternService {
     try {
       const result = await this.modelRouter.generate(prompt, {
         orgId,
+        requestType: 'reasoning',
         budget: 'cheap',
         responseFormat: 'json',
         temperature: 0,

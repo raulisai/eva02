@@ -26,6 +26,7 @@ describe('WhatsAppWebService', () => {
         created_at: new Date().toISOString(),
       }),
       evaluate: jest.fn(),
+      saveProfileState: jest.fn().mockResolvedValue({}),
     } as unknown as jest.Mocked<BrowserService>;
 
     service = new WhatsAppWebService(browser);

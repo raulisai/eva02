@@ -168,6 +168,9 @@ export class WhatsAppWebService {
     const state = await this.detectState(opened.id, orgId);
 
     if (state === 'logged_in') {
+      await this.browser.saveProfileState(opened.id, orgId).catch((err) => {
+        this.logger.error(`Failed to auto-save WhatsApp profile state: ${err.message}`);
+      });
       await this.markConnected(orgId, opened.id).catch((error) => {
         this.logger.warn(`Could not mark WhatsApp integration active: ${(error as Error).message}`);
       });

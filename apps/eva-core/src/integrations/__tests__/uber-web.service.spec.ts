@@ -25,6 +25,7 @@ describe('UberWebService', () => {
       getOrCreateProfile: jest.fn().mockResolvedValue({ id: 'profile-1' }),
       findLatestOpenSession: jest.fn().mockResolvedValue({ id: SESSION }),
       updateSessionMetadata: jest.fn().mockResolvedValue({}),
+      saveProfileState: jest.fn().mockResolvedValue({}),
       screenshot: jest.fn().mockResolvedValue({
         id: 'shot-1',
         org_id: ORG,

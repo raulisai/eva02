@@ -48,6 +48,21 @@ export class JobSchedulerService implements OnApplicationBootstrap, OnApplicatio
 
   private async fire(job: ScheduledJob): Promise<void> {
     try {
+      await this.events.publish({
+        type: 'task.log',
+        orgId: job.org_id,
+        payload: {
+          message: `scheduled job due: ${job.name}`,
+          scope: 'scheduler',
+          agent: 'scheduler',
+          module: 'JobSchedulerService',
+          action: 'scheduled_job.fire.start',
+          level: 'debug',
+          scheduledJobId: job.id,
+          jobType: job.job_type,
+        },
+      });
+
       // Create a system task on behalf of the org (created_by is the owner user)
       const dto: CreateTaskDto = {
         title: `[⏰ Job] ${job.name}`,
@@ -68,8 +83,39 @@ export class JobSchedulerService implements OnApplicationBootstrap, OnApplicatio
       const nextRunAt = computeNextRunAt(job);
       await this.repo.recordRun(job.id, job.org_id, nextRunAt);
 
+      await this.events.publish({
+        type: 'task.log',
+        orgId: job.org_id,
+        taskId: task.id,
+        payload: {
+          message: `scheduled job fired: ${job.name}`,
+          scope: 'scheduler',
+          agent: 'scheduler',
+          module: 'JobSchedulerService',
+          action: 'scheduled_job.fire.done',
+          level: 'debug',
+          scheduledJobId: job.id,
+          jobType: job.job_type,
+          nextRunAt,
+        },
+      });
+
       this.logger.log(`Fired job "${job.name}" (${job.id}) → task ${task.id}. next=${nextRunAt ?? 'none (completed)'}`);
     } catch (err) {
+      await this.events.publish({
+        type: 'task.log',
+        orgId: job.org_id,
+        payload: {
+          message: `scheduled job failed: ${job.name} - ${(err as Error).message}`,
+          scope: 'scheduler',
+          agent: 'scheduler',
+          module: 'JobSchedulerService',
+          action: 'scheduled_job.fire.failed',
+          level: 'error',
+          scheduledJobId: job.id,
+          jobType: job.job_type,
+        },
+      });
       this.logger.error(`Failed to fire job "${job.name}" (${job.id})`, err);
     }
   }

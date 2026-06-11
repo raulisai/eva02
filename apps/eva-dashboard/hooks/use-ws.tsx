@@ -21,6 +21,45 @@ const WsContext = createContext<WsContextValue>({
   taskPatches: {},
 });
 
+const EVA_EVENT_STATUS: Record<string, TaskStatus | undefined> = {
+  'task.started': 'running',
+  'task.completed': 'completed',
+  'task.failed': 'failed',
+  'task.cancelled': 'cancelled',
+  'task.waiting_approval': 'waiting_for_approval',
+};
+
+const EVA_EVENTS = [
+  'task.created',
+  'task.update',
+  'task.started',
+  'task.completed',
+  'task.failed',
+  'task.cancelled',
+  'task.waiting_approval',
+  'task.say',
+  'task.log',
+  'task.result',
+  'task.media',
+  'task.form_request',
+  'task.setup_required',
+  'approval.requested',
+  'approval.resolved',
+  'dev.task.created',
+  'dev.task.updated',
+  'dev.task.completed',
+  'dev.task.failed',
+  'browser.screenshot.created',
+  'communication.message.received',
+  'communication.message.sent',
+  'communication.send.failed',
+  'wear.fast_path.started',
+  'wear.fast_path.completed',
+  'wear.fast_path.fallback',
+  'wear.token.created',
+  'wear.token.expired',
+];
+
 export function WsProvider({ token, children }: { token: string; children: React.ReactNode }) {
   const [connected, setConnected] = useState(false);
   const [events, setEvents] = useState<EvaEvent[]>([]);
@@ -48,24 +87,7 @@ export function WsProvider({ token, children }: { token: string; children: React
     socket.on('disconnect', () => setConnected(false));
     socket.on('connect_error', () => setConnected(false));
 
-    const EVA_EVENTS: Array<{ name: string; status?: TaskStatus }> = [
-      { name: 'task.created' },
-      { name: 'task.update' },
-      { name: 'task.started',          status: 'running' },
-      { name: 'task.completed',        status: 'completed' },
-      { name: 'task.failed',           status: 'failed' },
-      { name: 'task.cancelled',        status: 'cancelled' },
-      { name: 'task.waiting_approval', status: 'waiting_for_approval' },
-      { name: 'task.say' },
-      { name: 'task.log' },
-      { name: 'task.result' },
-      { name: 'task.media' },
-      { name: 'task.form_request' },
-      { name: 'task.setup_required' },
-      { name: 'approval.requested' },
-    ];
-
-    EVA_EVENTS.forEach(({ name, status }) => {
+    EVA_EVENTS.forEach((name) => {
       socket.on(name, (data: { taskId?: string; payload?: Record<string, unknown>; ts?: number }) => {
         const event: EvaEvent = {
           type: name,
@@ -75,6 +97,7 @@ export function WsProvider({ token, children }: { token: string; children: React
           ts: data.ts ?? Date.now(),
         };
         setEvents(prev => [event, ...prev].slice(0, 500));
+        const status = EVA_EVENT_STATUS[name];
         if (status && data.taskId) patchTaskStatus(data.taskId, status);
       });
     });

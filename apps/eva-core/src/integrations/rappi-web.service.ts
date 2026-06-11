@@ -82,6 +82,9 @@ export class RappiWebService {
 
     const signals = await this.inspectPage(opened.id, orgId);
     if (signals.state === 'logged_in') {
+      await this.browser.saveProfileState(opened.id, orgId).catch((err) => {
+        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
+      });
       const screenshot = await this.browser.screenshot(opened.id, orgId);
       return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Rappi ya tiene sesión activa.', screenshot };
     }
@@ -132,6 +135,9 @@ export class RappiWebService {
     }
 
     if (afterSignals.state === 'logged_in') {
+      await this.browser.saveProfileState(opened.id, orgId).catch((err) => {
+        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
+      });
       return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Rappi quedó autenticado directamente con el correo.', screenshot };
     }
 
@@ -156,6 +162,9 @@ export class RappiWebService {
     const screenshot = await this.browser.screenshot(session.id, orgId);
 
     if (signals.state === 'logged_in') {
+      await this.browser.saveProfileState(session.id, orgId).catch((err) => {
+        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
+      });
       return { ok: true, reason: 'logged_in', session_id: session.id, text: '✅ Rappi quedó autenticado. Ya puedes hacer pedidos.', screenshot };
     }
 
@@ -222,114 +231,154 @@ export class RappiWebService {
   }
 
   private async typeEmailAndContinue(sessionId: string, orgId: string, email: string): Promise<boolean> {
-    // Phase 1: type char-by-char to trigger React synthetic events
-    const found = await this.browser.evaluate<boolean, { email: string }>(sessionId, orgId, ({ email }) => {
-      const isVisible = (el: HTMLElement | null) => {
-        if (!el) return false;
-        const s = window.getComputedStyle(el);
-        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetWidth > 0;
-      };
-      const selectors = [
-        'input[type="email"]', 'input[name="email"]',
-        'input[placeholder*="correo" i]', 'input[placeholder*="mail" i]',
-        'input[id*="email" i]', 'input[autocomplete="email"]',
-      ];
-      const input = selectors.map((s) => document.querySelector(s) as HTMLInputElement).find((el) => isVisible(el));
-      if (!input) return false;
+    // Phase 1: click the email input using Playwright-native selectors (no JS injection)
+    const emailSelectors = [
+      'input[type="email"] >> nth=0',
+      'input[name="email"] >> nth=0',
+      'input[autocomplete="email"] >> nth=0',
+      'input[placeholder*="correo" i] >> nth=0',
+      'input[placeholder*="mail" i] >> nth=0',
+      'input[id*="email" i] >> nth=0',
+    ];
 
-      input.focus();
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      let current = '';
-      for (const char of email) {
-        current += char;
-        if (setter) setter.call(input, current);
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true }));
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
+    let clicked = false;
+    for (const sel of emailSelectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, sel, { timeout: 1500 });
+        clicked = true;
+        break;
+      } catch {
+        // try next
       }
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }, { email });
+    }
 
-    if (!found) return false;
+    if (!clicked) {
+      // Fallback: find and focus via evaluate
+      const found = await this.browser.evaluate<boolean>(sessionId, orgId, () => {
+        const isVisible = (el: HTMLElement | null) => {
+          if (!el) return false;
+          const s = window.getComputedStyle(el);
+          return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetWidth > 0;
+        };
+        const selectors = [
+          'input[type="email"]', 'input[name="email"]', 'input[autocomplete="email"]',
+          'input[placeholder*="correo" i]', 'input[placeholder*="mail" i]', 'input[id*="email" i]',
+        ];
+        for (const s of selectors) {
+          const inputs = Array.from(document.querySelectorAll(s)) as HTMLInputElement[];
+          const first = inputs.find(isVisible);
+          if (first) { first.focus(); first.click(); return true; }
+        }
+        return false;
+      });
+      if (!found) return false;
+    }
 
-    // Phase 2: wait for React to re-render and enable the submit button
+    // Phase 2: type email character by character with native keyboard events
+    await this.browser.typeCharacters(sessionId, orgId, email, 80);
     await this.browser.wait(sessionId, orgId, 600);
 
-    // Phase 3: click submit button or press Enter
-    await this.browser.evaluate<void>(sessionId, orgId, () => {
-      const isVisible = (el: HTMLElement | null) => {
-        if (!el) return false;
-        const s = window.getComputedStyle(el);
-        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && el.offsetWidth > 0;
-      };
-      const selectors = [
-        'input[type="email"]', 'input[name="email"]',
-        'input[placeholder*="correo" i]', 'input[placeholder*="mail" i]',
-        'input[id*="email" i]', 'input[autocomplete="email"]',
-      ];
-      const input = selectors.map((s) => document.querySelector(s) as HTMLInputElement).find((el) => isVisible(el));
-
-      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('button[type="submit"], button'));
-      const submitBtn = buttons.find((el) => {
-        if (!isVisible(el) || (el as HTMLButtonElement).disabled) return false;
-        const txt = el.textContent?.toLowerCase() ?? '';
-        return /continuar|continue|siguiente|next|enviar|send|ingresar|entrar|submit/i.test(txt);
-      }) ?? buttons.find((el) => isVisible(el) && !(el as HTMLButtonElement).disabled);
-
-      if (submitBtn) {
-        submitBtn.click();
+    // Phase 3: click submit button using Playwright-native selectors
+    const submitSelectors = [
+      'text=Continuar >> nth=0',
+      'text=Continue >> nth=0',
+      'text=Siguiente >> nth=0',
+      'text=Next >> nth=0',
+      'text=Ingresar >> nth=0',
+      'text=Enviar >> nth=0',
+      'button[type="submit"] >> nth=0',
+    ];
+    for (const sel of submitSelectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, sel, { timeout: 1500 });
+        break;
+      } catch {
+        // try next
       }
-      
-      if (input) {
-        // Force Enter key as well
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-        const form = input.closest('form');
-        if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-      }
-    });
+    }
 
     return true;
   }
 
   private async typeCodeAndSubmit(sessionId: string, orgId: string, code: string): Promise<boolean> {
-    return this.browser.evaluate<boolean, { code: string }>(sessionId, orgId, ({ code }) => {
-      const isVisible = (el: HTMLElement | null) => {
-        if (!el) return false;
-        const style = window.getComputedStyle(el);
-        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0;
-      };
-      // Individual digit inputs (OTP widget)
-      const digitInputs = Array.from(document.querySelectorAll('input[maxlength="1"], input[data-index]'))
-        .filter(el => isVisible(el as HTMLElement)) as HTMLInputElement[];
-      if (digitInputs.length >= 4) {
-        digitInputs.slice(0, code.length).forEach((inp, i) => {
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-          if (setter) { setter.call(inp, code[i]); inp.dispatchEvent(new Event('input', { bubbles: true })); }
-          else inp.value = code[i];
-        });
-        const btn = document.querySelector('button[type="submit"]') as HTMLElement;
-        if (btn && isVisible(btn)) btn.click();
-        return true;
+    const otpSelectors = [
+      'input[autocomplete="one-time-code"] >> nth=0',
+      'input[maxlength="1"] >> nth=0',
+      'input[type="tel"] >> nth=0',
+      'input[type="number"] >> nth=0',
+      'input[name*="code"] >> nth=0',
+      'input[name*="otp"] >> nth=0',
+      'input[type="text"] >> nth=0',
+      'input >> nth=0',
+    ];
+
+    let clicked = false;
+    for (const sel of otpSelectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, sel, { timeout: 1500 });
+        clicked = true;
+        break;
+      } catch {
+        // try next
       }
-      // Single field
-      const selectors = ['input[autocomplete="one-time-code"]', 'input[name*="code"]', 'input[name*="otp"]', 'input[placeholder*="código"]', 'input[placeholder*="code"]', 'input[type="tel"]'];
-      const input = selectors.map(s => document.querySelector(s) as HTMLInputElement).find(el => isVisible(el));
-      if (!input) return false;
-      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      if (setter) { setter.call(input, code); input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); }
-      else input.value = code;
-      const buttons = Array.from(document.querySelectorAll('button[type="submit"], button'));
-      const btn = buttons.find(el => {
-        const txt = el.textContent?.toLowerCase() ?? '';
-        return /confirmar|confirm|verif|continuar|continue|enviar|send|ingresar|entrar/i.test(txt) && isVisible(el as HTMLElement);
-      }) ?? buttons.find(el => isVisible(el as HTMLElement));
-      if (btn) (btn as HTMLElement).click();
-      return true;
-    }, { code });
+    }
+
+    if (!clicked) {
+      const evaluated = await this.browser.evaluate<boolean>(sessionId, orgId, () => {
+        const isVisible = (el: HTMLElement | null) => {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && el.offsetWidth > 0;
+        };
+        const selectors = [
+          'input[autocomplete="one-time-code"]',
+          'input[maxlength="1"]',
+          'input[type="tel"]',
+          'input[type="number"]',
+          'input[name*="code"]',
+          'input[name*="otp"]',
+          'input[type="text"]',
+          'input',
+        ];
+        for (const s of selectors) {
+          const inputs = Array.from(document.querySelectorAll(s)) as HTMLInputElement[];
+          const firstVisible = inputs.find(isVisible);
+          if (firstVisible) {
+            firstVisible.focus();
+            firstVisible.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (!evaluated) return false;
+    }
+
+    await this.browser.typeCharacters(sessionId, orgId, code, 120);
+    await this.browser.wait(sessionId, orgId, 800);
+
+    const submitSelectors = [
+      'text=Confirmar >> nth=0',
+      'text=Confirm >> nth=0',
+      'text=Verificar >> nth=0',
+      'text=Verify >> nth=0',
+      'text=Continuar >> nth=0',
+      'text=Continue >> nth=0',
+      'text=Siguiente >> nth=0',
+      'text=Next >> nth=0',
+      'button[type="submit"] >> nth=0',
+      'button >> nth=0',
+    ];
+    for (const sel of submitSelectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, sel, { timeout: 1500 });
+        break;
+      } catch {
+        // try next
+      }
+    }
+
+    return true;
   }
 
   async getProfile(orgId: string) {

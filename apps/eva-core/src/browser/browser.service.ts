@@ -25,6 +25,16 @@ export interface ManualProfileOpenResult {
   text: string;
 }
 
+interface BrowserDebugInput {
+  action: string;
+  message: string;
+  taskId?: string | null;
+  sessionId?: string;
+  profileId?: string;
+  level?: 'debug' | 'error';
+  data?: Record<string, unknown>;
+}
+
 @Injectable()
 export class BrowserService {
   private readonly logger = new Logger(BrowserService.name);
@@ -63,25 +73,60 @@ export class BrowserService {
       }
     }
 
+    await this.logBrowserAction(orgId, {
+      action: 'browser.open.start',
+      message: `opening ${dto.service} at ${this.safeUrlForLog(dto.url)}`,
+      taskId: session.task_id,
+      sessionId: session.id,
+      profileId: profile.id,
+      data: {
+        service: dto.service,
+        url: this.safeUrlForLog(dto.url),
+        reuse_open: Boolean(dto.reuse_open),
+        restored_storage_state: Boolean(decryptedState),
+      },
+    });
+
     let result: { url: string; title: string };
-    if (decryptedState) {
-      result = await this.runtime.openWithStorageState({
+    try {
+      if (decryptedState) {
+        result = await this.runtime.openWithStorageState({
+          sessionId: session.id,
+          profileId: profile.id,
+          url: dto.url,
+          storageState: decryptedState,
+        });
+      } else {
+        result = await this.runtime.open({
+          sessionId: session.id,
+          profileId: profile.id,
+          url: dto.url,
+        });
+      }
+    } catch (error) {
+      await this.logBrowserAction(orgId, {
+        action: 'browser.open.failed',
+        message: `browser open failed: ${(error as Error).message}`,
+        taskId: session.task_id,
         sessionId: session.id,
         profileId: profile.id,
-        url: dto.url,
-        storageState: decryptedState,
+        level: 'error',
+        data: { service: dto.service, url: this.safeUrlForLog(dto.url) },
       });
-    } else {
-      result = await this.runtime.open({
-        sessionId: session.id,
-        profileId: profile.id,
-        url: dto.url,
-      });
+      throw error;
     }
 
     const updated = await this.repo.updateSession(session.id, orgId, {
       current_url: result.url,
       metadata: { ...session.metadata, title: result.title },
+    });
+    await this.logBrowserAction(orgId, {
+      action: 'browser.open.done',
+      message: `opened ${result.title || 'Untitled'} at ${this.safeUrlForLog(result.url)}`,
+      taskId: session.task_id,
+      sessionId: session.id,
+      profileId: profile.id,
+      data: { title: result.title, current_url: this.safeUrlForLog(result.url) },
     });
     return { ...updated, title: result.title };
   }
@@ -102,6 +147,18 @@ export class BrowserService {
         `Could not open ${launch.app}. Set BROWSER_MANUAL_APP to an installed browser and try again.`,
       );
     }
+
+    await this.logBrowserAction(orgId, {
+      action: 'browser.manual.open',
+      message: `manual browser opened for ${dto.service}`,
+      profileId: profile.id,
+      data: {
+        service: dto.service,
+        app: launch.app,
+        url: this.safeUrlForLog(target.toString()),
+        closed_automated_session: closedAutomatedSession,
+      },
+    });
 
     return {
       ok: true,
@@ -129,12 +186,28 @@ export class BrowserService {
       taskId: session.task_id ?? undefined,
       payload: { sessionId, screenshotId: screenshot.id },
     });
+    await this.logBrowserAction(orgId, {
+      action: 'browser.screenshot',
+      message: `screenshot captured for session ${this.shortSession(sessionId)}`,
+      taskId: session.task_id,
+      sessionId,
+      profileId: session.profile_id,
+      data: { screenshotId: screenshot.id },
+    });
     return screenshot;
   }
 
   async extractText(sessionId: string, orgId: string, selector?: string) {
-    await this.repo.findSessionOrThrow(sessionId, orgId);
+    const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     const text = await this.runtime.extractText(sessionId, selector);
+    await this.logBrowserAction(orgId, {
+      action: 'browser.extract_text',
+      message: `extracted text from ${selector ? this.safeSelectorForLog(selector) : 'body'} (${text.length} chars)`,
+      taskId: session.task_id,
+      sessionId,
+      profileId: session.profile_id,
+      data: { selector: selector ? this.safeSelectorForLog(selector) : 'body', chars: text.length },
+    });
     return {
       kind: 'browser.extracted_text',
       treatment: 'data',
@@ -143,8 +216,20 @@ export class BrowserService {
   }
 
   async extractTable(sessionId: string, orgId: string, selector?: string) {
-    await this.repo.findSessionOrThrow(sessionId, orgId);
+    const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     const table = await this.runtime.extractTable(sessionId, selector);
+    await this.logBrowserAction(orgId, {
+      action: 'browser.extract_table',
+      message: `extracted table from ${selector ? this.safeSelectorForLog(selector) : 'table'}`,
+      taskId: session.task_id,
+      sessionId,
+      profileId: session.profile_id,
+      data: {
+        selector: selector ? this.safeSelectorForLog(selector) : 'table',
+        rows: table.rows.length,
+        columns: table.headers.length,
+      },
+    });
     return {
       kind: 'browser.extracted_table',
       treatment: 'data',
@@ -158,31 +243,72 @@ export class BrowserService {
     pageFunction: (arg: A) => T | Promise<T>,
     arg?: A,
   ): Promise<T> {
-    await this.repo.findSessionOrThrow(sessionId, orgId);
-    return this.runtime.evaluate<T, A>(sessionId, pageFunction, arg);
+    const session = await this.repo.findSessionOrThrow(sessionId, orgId);
+    const result = await this.runtime.evaluate<T, A>(sessionId, pageFunction, arg);
+    await this.logBrowserAction(orgId, {
+      action: 'browser.evaluate',
+      message: 'evaluated page function in browser session',
+      taskId: session.task_id,
+      sessionId,
+      profileId: session.profile_id,
+      data: { result_type: Array.isArray(result) ? 'array' : typeof result },
+    });
+    return result;
   }
 
   async wait(sessionId: string, orgId: string, ms: number) {
-    await this.repo.findSessionOrThrow(sessionId, orgId);
+    const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     await this.runtime.wait(sessionId, ms);
+    await this.logBrowserAction(orgId, {
+      action: 'browser.wait',
+      message: `waited ${ms}ms in browser session`,
+      taskId: session.task_id,
+      sessionId,
+      profileId: session.profile_id,
+      data: { waited_ms: ms },
+    });
     return { sessionId, waited_ms: ms };
   }
 
   async typeCharacters(sessionId: string, orgId: string, text: string, delay?: number) {
-    await this.repo.findSessionOrThrow(sessionId, orgId);
+    const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     await this.runtime.typeCharacters(sessionId, text, delay);
+    await this.logBrowserAction(orgId, {
+      action: 'browser.keyboard.type',
+      message: `typed ${text.length} keyboard character(s)`,
+      taskId: session.task_id,
+      sessionId,
+      profileId: session.profile_id,
+      data: { chars: text.length, delay_ms: delay ?? 80 },
+    });
     return { sessionId };
   }
 
   async clickNow(sessionId: string, orgId: string, selector: string, options?: { timeout?: number }) {
-    await this.repo.findSessionOrThrow(sessionId, orgId);
+    const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     await this.runtime.click(sessionId, selector, options);
+    await this.logBrowserAction(orgId, {
+      action: 'browser.click',
+      message: `clicked ${this.safeSelectorForLog(selector)}`,
+      taskId: session.task_id,
+      sessionId,
+      profileId: session.profile_id,
+      data: { selector: this.safeSelectorForLog(selector), timeout_ms: options?.timeout },
+    });
     return { sessionId, selector };
   }
 
   async typeNow(sessionId: string, orgId: string, selector: string, text: string, options?: { timeout?: number }) {
-    await this.repo.findSessionOrThrow(sessionId, orgId);
+    const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     await this.runtime.type(sessionId, selector, text, options);
+    await this.logBrowserAction(orgId, {
+      action: 'browser.type',
+      message: `filled ${this.safeSelectorForLog(selector)} (${text.length} chars)`,
+      taskId: session.task_id,
+      sessionId,
+      profileId: session.profile_id,
+      data: { selector: this.safeSelectorForLog(selector), chars: text.length, timeout_ms: options?.timeout },
+    });
     return { sessionId, selector };
   }
 
@@ -212,6 +338,13 @@ export class BrowserService {
       taskId: undefined,
       metadata: { purpose: 'session-import' },
     });
+    await this.logBrowserAction(orgId, {
+      action: 'browser.storage_state.open',
+      message: `opened browser with imported storage state at ${this.safeUrlForLog(result.url)}`,
+      sessionId: session.id,
+      profileId: input.profileId,
+      data: { url: this.safeUrlForLog(result.url), title: result.title },
+    });
     return { ...session, ...result };
   }
 
@@ -226,9 +359,18 @@ export class BrowserService {
   }
 
   async close(sessionId: string, orgId: string) {
+    const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     await this.saveProfileState(sessionId, orgId);
     await this.runtime.close(sessionId);
-    return this.repo.updateSession(sessionId, orgId, { status: 'closed' });
+    const updated = await this.repo.updateSession(sessionId, orgId, { status: 'closed' });
+    await this.logBrowserAction(orgId, {
+      action: 'browser.close',
+      message: `closed browser session ${this.shortSession(sessionId)}`,
+      taskId: session.task_id,
+      sessionId,
+      profileId: session.profile_id,
+    });
+    return updated;
   }
 
   async prepareAction(sessionId: string, orgId: string, userId: string, dto: PrepareBrowserActionDto) {
@@ -269,7 +411,59 @@ export class BrowserService {
       payload: dto.payload,
     });
 
+    await this.logBrowserAction(orgId, {
+      action: 'browser.action.prepared',
+      message: `prepared ${dto.action_type} for approval`,
+      taskId: dto.task_id,
+      sessionId,
+      profileId: session.profile_id,
+      data: {
+        action_type: dto.action_type,
+        approval_id: approval.id,
+        screenshot_id: screenshot.id,
+      },
+    });
+
     return { preparation, approval, action_hash: approval.action_hash, nonce: approval.nonce };
+  }
+
+  private async logBrowserAction(orgId: string, input: BrowserDebugInput): Promise<void> {
+    await this.events.publish({
+      type: 'task.log',
+      orgId,
+      taskId: input.taskId ?? undefined,
+      payload: {
+        message: input.message,
+        scope: 'browser',
+        agent: 'browser',
+        module: 'BrowserService',
+        action: input.action,
+        level: input.level ?? 'debug',
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        ...(input.profileId ? { profileId: input.profileId } : {}),
+        ...(input.data ?? {}),
+      },
+    });
+  }
+
+  private safeUrlForLog(rawUrl: string): string {
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.search) parsed.search = '?redacted';
+      if (parsed.hash) parsed.hash = '#redacted';
+      const value = parsed.toString();
+      return value.length > 180 ? `${value.slice(0, 177)}...` : value;
+    } catch {
+      return rawUrl.length > 180 ? `${rawUrl.slice(0, 177)}...` : rawUrl;
+    }
+  }
+
+  private safeSelectorForLog(selector: string): string {
+    return selector.length > 140 ? `${selector.slice(0, 137)}...` : selector;
+  }
+
+  private shortSession(sessionId: string): string {
+    return sessionId.slice(0, 8);
   }
 
   private parseManualUrl(url: string): URL {

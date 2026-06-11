@@ -1761,7 +1761,19 @@ export class AgentRunnerService implements OnApplicationBootstrap {
   }
 
   private log(orgId: string, taskId: string, message: string, scope: string) {
-    return this.events.publish({ type: 'task.log', orgId, taskId, payload: { message, scope } });
+    return this.events.publish({
+      type: 'task.log',
+      orgId,
+      taskId,
+      payload: {
+        message,
+        scope,
+        agent: scope,
+        module: 'AgentRunnerService',
+        action: `agent.${scope}`,
+        level: message.startsWith('ERROR:') ? 'error' : 'debug',
+      },
+    });
   }
 
   private async failSafely(orgId: string, taskId: string, message: string) {

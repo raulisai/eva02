@@ -377,6 +377,9 @@ export class UberWebService {
     }
 
     if (afterSignals.state === 'logged_in' || afterSignals.state === 'quote_ready') {
+      await this.browser.saveProfileState(opened.id, orgId).catch((err) => {
+        this.logger.error(`Failed to auto-save profile state: ${err.message}`);
+      });
       return { ok: true, reason: 'already_logged_in', session_id: opened.id, text: 'Uber Web quedó autenticado directamente con el correo.', screenshot };
     }
 
