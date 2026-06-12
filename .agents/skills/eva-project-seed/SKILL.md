@@ -18,25 +18,26 @@ Every use must end with a seed update:
 
 ## Workflow
 
-1. Read `references/project-map.md`.
-2. Read the top of `references/change-log.md` for recent deltas and pending notes.
+1. Read `references/project-map.md` and [architecture.md](file:///Users/djoker/code/eva02/docs/architecture.md).
+2. Read the top of `references/change-log.md` and [backlog.md](file:///Users/djoker/code/eva02/docs/backlog.md) for recent changes, pending tasks, and technical debts.
 3. Check `git status --short` and preserve unrelated user changes.
-4. Select any other relevant skill only after this seed is loaded, for example NestJS, Supabase, Next.js, frontend design, Playwright, or Zod.
+4. Select any other relevant skill only after this seed is loaded (e.g., NestJS, Supabase, Playwright).
 5. Inspect only the files needed to verify the seed or implement the request.
-6. Make the change with the repo's existing patterns, keeping tenant/RLS/approval/test rules intact.
-7. Verify with the narrowest meaningful command, then broader commands when risk warrants it.
-8. Update this seed before the final answer.
+6. Implement code changes following established patterns, keeping tenancy/RLS/approval/test rules intact.
+7. Verify changes with tests and commands.
+8. Update the living documentation (under `docs/`) and the backlog ([backlog.md](file:///Users/djoker/code/eva02/docs/backlog.md)) if architecture, layouts, behaviors, or tasks changed, adhering to the [improvement_loop.md](file:///Users/djoker/code/eva02/docs/improvement_loop.md) rules.
+9. Update this seed (project map and change log) before presenting the final answer.
 
-## Mandatory Seed Update
+## Mandatory Seed & Doc Update
 
-Preferred append command:
+Preferred append command to update the seed:
 
 ```bash
 python3 .agents/skills/eva-project-seed/scripts/update_seed.py \
   --change "area: compact description of what changed" \
   --files "path/a.ts,path/b.sql" \
-  --tests "npm test -- --runInBand file.spec.ts" \
-  --pending "next improvement, risk, TODO, doc drift, or test gap"
+  --tests "npm test" \
+  --pending "next improvement, risk, or test gap"
 ```
 
 If the script is unavailable, manually append the same format to `references/change-log.md`:
@@ -47,11 +48,11 @@ C: area -> compact change; files=...; tests=...
 P: pending/improve -> ...
 ```
 
-Keep entries terse and optimized for another AI agent. Prefer stable nouns, exact paths, table names, route names, and commands over prose.
+In addition, ensure [backlog.md](file:///Users/djoker/code/eva02/docs/backlog.md) and relevant files under `docs/` are updated accordingly.
 
 ## Read-Code Budget
 
-Do not re-scan the whole project by default. Use the seed as the map, then read:
+Do not re-scan the whole project by default. Use the seed and `docs/` as the map, then read:
 
 - The target files requested by the user.
 - Adjacent tests and DTO/types for changed behavior.

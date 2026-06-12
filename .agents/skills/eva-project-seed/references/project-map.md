@@ -1,8 +1,16 @@
 # EVA Compact Project Map
 
-Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Trust code over this file if they conflict; then patch this file.
+Purpose: Terse seed memory for agents working in `/Users/djoker/code/eva02`. Follow the closed-loop living documentation and self-improvement system detailed in [improvement_loop.md](file:///Users/djoker/code/eva02/docs/improvement_loop.md).
+
+Key Documentation References:
+- [architecture.md](file:///Users/djoker/code/eva02/docs/architecture.md) (High level system structure)
+- [process_flows.md](file:///Users/djoker/code/eva02/docs/process_flows.md) (System Mermaid flows & sequences)
+- [implementation_guide.md](file:///Users/djoker/code/eva02/docs/implementation_guide.md) (Multi-tenancy, RLS, env vars)
+- [project_sections.md](file:///Users/djoker/code/eva02/docs/project_sections.md) (Syllabus & codebase module map)
+- [backlog.md](file:///Users/djoker/code/eva02/docs/backlog.md) (Living backlog / improvements list)
 
 ## Hard Rules
+
 
 - Multi-tenant: every table/query must carry `org_id`; service-role Supabase queries need explicit `.eq('org_id', orgId)` or equivalent scoped write payload.
 - RLS: new tables require migration + RLS policy. AGENTS says policies live in `supabase/migrations/014_rls_policies.sql`; reality also has later RLS/policy migrations (`015`, `016`, `019`, `021`, `022`, `023`, `027`). Reconcile before adding schema.

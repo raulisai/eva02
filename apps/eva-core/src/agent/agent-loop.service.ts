@@ -62,6 +62,12 @@ export interface AgentLoopOptions {
   log?: (message: string, scope: string) => Promise<unknown>;
   forceDodCriteria?: boolean;
   blackboard?: Record<string, string>;
+  /** R1.2: Previous failure context injected when user says "reintenta". */
+  retryContext?: import('./agent-intelligence.service').RetryContext;
+  /** R2.1: Pre-built capability model block (PUEDO/NO TENGO). */
+  capabilityModel?: string;
+  /** R4.2: Current ladder level for gap registration (3=collab, 4=manual, 5=deferred). */
+  ladderLevel?: 3 | 4 | 5;
 }
 
 type ToolExecutor = (orgId: string, taskId: string, args: Record<string, unknown>) => Promise<string>;
@@ -195,10 +201,13 @@ export class AgentLoopService {
     const modelBudgetPerStep: ModelBudgetStep[] = [];
     let plan: AgentPlanItem[] = [];
     const replayContext = depth === 0 && this.intelligence ? await this.intelligence.replayExample(orgId, goal).catch(() => null) : null;
+    // R4.5: inject failure anti-patterns so the agent avoids routes that already failed
+    const failureAntiPattern = depth === 0 && this.intelligence ? await this.intelligence.replayFailureExample(orgId, goal).catch(() => null) : null;
     const inputContext = depth === 0 ? await this.latestInputAnswerContext(orgId, taskId).catch(() => null) : null;
-    const dynamicContext = [opts.context, replayContext, inputContext].filter(Boolean).join('\n\n') || undefined;
+    const dynamicContext = [opts.context, replayContext, failureAntiPattern, inputContext].filter(Boolean).join('\n\n') || undefined;
     if (depth === 0 && maxSteps >= DEFAULT_ROOT_STEPS && this.intelligence) {
-      plan = await this.intelligence.createInitialPlan(orgId, taskId, goal);
+      // R2.2: probe-before-promise — plan is built with capability model so it only uses available tools
+      plan = await this.intelligence.createInitialPlan(orgId, taskId, goal, opts.capabilityModel);
     }
 
     let dodCriteria: string[] = [];
@@ -520,12 +529,27 @@ export class AgentLoopService {
     if (gathered.length === 0) {
       if (depth === 0 && steps.length >= 2) {
         try {
-          const recovery = await this.synthesizeRecoveryOptions(orgId, taskId, goal, steps);
-          tokensUsed += recovery.usage.totalTokens;
-          await log(`agent-loop: todos los pasos fallaron — entregando respuesta de recuperación con opciones (${tokensUsed} tokens)`, 'loop');
-          this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, recovery.text);
+          // R3.2: if this is already a retry (retry_count >= 2), use manual guide (L4) instead of options
+          const retryCount = opts.retryContext?.retry_count ?? 0;
+          let recoveryText: string;
+          let ladderLevel: 3 | 4 | 5 = 3;
+          if (retryCount >= 2) {
+            ladderLevel = 4;
+            recoveryText = await this.generateManualGuide(orgId, taskId, goal, steps);
+            await log(`agent-loop: todos los pasos fallaron (retry ${retryCount}) — guía manual L4 generada`, 'loop');
+          } else {
+            const recovery = await this.synthesizeRecoveryOptions(orgId, taskId, goal, steps);
+            tokensUsed += recovery.usage.totalTokens;
+            recoveryText = recovery.text.trim();
+            await log(`agent-loop: todos los pasos fallaron — respuesta de recuperación con opciones L3 (${tokensUsed} tokens)`, 'loop');
+          }
+          // R4.2: register capability gap
+          if (this.intelligence) {
+            await this.intelligence.registerCapabilityGap(orgId, taskId, 'agent_exhausted_steps', goal, ladderLevel).catch(() => undefined);
+          }
+          this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, recoveryText);
           this.recordTrajectory(orgId, taskId, goal, steps, 'degraded', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
-          return { ok: true, degraded: true, text: recovery.text.trim(), steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
+          return { ok: true, degraded: true, text: recoveryText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
         } catch (error) {
           await log(`agent-loop: síntesis de recuperación falló — ${(error as Error).message}`, 'loop');
         }
@@ -596,6 +620,25 @@ export class AgentLoopService {
         `SECRETS DISPONIBLES (escribe el alias literal en tu código; EVA sustituye el valor al ejecutar y tú NUNCA lo ves): ${extras.secretAliases.join(', ')}`,
       );
     }
+    // R2.1: inject capability self-model so the agent knows what's available BEFORE failing
+    if (opts.capabilityModel) {
+      blocks.push('', opts.capabilityModel);
+    }
+
+    // R1.2: inject retry context to avoid repeating failed routes
+    if (opts.retryContext) {
+      const rc = opts.retryContext;
+      blocks.push(
+        '',
+        'INTENTO PREVIO (esta tarea ya falló antes — usa este contexto):',
+        `OBJETIVO ORIGINAL: ${rc.goal}`,
+        `CAUSA RAÍZ: ${rc.diagnosis}`,
+        `RUTAS YA FALLIDAS (PROHIBIDO repetirlas):\n${rc.trajectory_summary}`,
+        `ESTRATEGIA ELEGIDA ESTA VEZ: ${rc.suggested_strategy}`,
+        `REINTENTOS ENCADENADOS: ${rc.retry_count} (máx 2; al tercer fallo usa final_answer con guía manual paso a paso)`,
+      );
+    }
+
     const has = (name: string) => tools.some((t) => t.name === name);
     blocks.push(
       '',
@@ -616,7 +659,7 @@ export class AgentLoopService {
         : []),
       '- Las herramientas son de solo lectura/sandbox: si el objetivo exige enviar o modificar algo externo, junta la información y explica en final_answer qué quedaría pendiente de aprobación.',
       '- Tienes acceso legítimo y autorizado por el usuario para interactuar con sus cuentas y aplicaciones locales/externas (WhatsApp, Gmail, Calendar, Drive, Uber, Rappi) a través de tus herramientas. NUNCA respondas diciendo que no tienes acceso a información personal, privada o externa. Si tienes la herramienta, úsala y reporta el resultado de forma directa.',
-      '- PROHIBIDO cerrar con "no se pudo" a secas: si algo queda fuera de tu alcance, tu final_answer debe traer lo que SÍ conseguiste + 2-3 opciones concretas de solución (qué reintentar, qué conectar, qué harías tú en el siguiente paso).',
+      '- PROHIBIDO cerrar con "no se pudo" a secas: si algo queda fuera de tu alcance, tu final_answer DEBE traer lo que SÍ conseguiste + 2-3 opciones concretas numeradas con verbos de acción (ej. "1. Conecta X en Integraciones. 2. Dime los datos Y. 3. Reintenta con Z."). Una lista de opciones o una pregunta directa son obligatorias.',
       'Responde SOLO con JSON: {"thought":"breve","tool":"<nombre>","args":{...}}',
     );
     return blocks.join('\n');
@@ -651,7 +694,8 @@ export class AgentLoopService {
   private renderPlan(plan: AgentPlanItem[]): string {
     return plan.map((item) => {
       const marker = item.status === 'done' ? '[✓]' : item.status === 'active' ? '[→]' : '[ ]';
-      return `${marker} ${item.text}`;
+      const ownerTag = item.owner === 'user' ? ' [USUARIO]' : '';
+      return `${marker}${ownerTag} ${item.text}`;
     }).join('\n');
   }
 
@@ -749,6 +793,15 @@ export class AgentLoopService {
    * Retorna string con la violación, o null si todo está bien.
    * Solo aplica a code_execute / terminal_run (código que el agente escribió).
    */
+  /** Returns true when text contains ≥2 numbered/bulleted actionable options OR a direct question. R1.3 */
+  private hasActionablePath(text: string): boolean {
+    const lines = text.split('\n');
+    const actionableRe = /^(\d+[\.\)]\s+|[-•]\s+)[A-ZÁÉÍÓÚ]/;
+    const actionCount = lines.filter((l) => actionableRe.test(l.trim())).length;
+    if (actionCount >= 2) return true;
+    return /\?/.test(text);
+  }
+
   private async validateFinalAnswer(
     text: string,
     steps: AgentLoopStep[],
@@ -756,7 +809,9 @@ export class AgentLoopService {
     orgId: string,
     taskId: string,
   ): Promise<string | null> {
-    // Si la respuesta es un reporte honesto de fallo, no bloquear.
+    // Honest failure reports bypass DoD — they are valid step-level outputs.
+    // R1.3 path-enforcement runs at the synthesis/delivery level (synthesizeRecoveryOptions),
+    // not here, to avoid a validation loop where the agent can't exit honestly mid-run.
     if (HONEST_FAILURE_RE.test(text)) return null;
 
     // Si el último paso de código propio falló, no declarar éxito.
@@ -1823,9 +1878,33 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
       .map((s) => `[${s.tool}] ${this.truncate(s.observation, 220)}`)
       .join('\n');
     return this.modelRouter.generate(
-      `OBJETIVO DEL USUARIO: ${goal}\n\nINTENTOS REALIZADOS (ninguno produjo el resultado esperado):\n${attempts}\n\nRedacta en español una respuesta honesta y útil para el usuario: una línea con qué se intentó y por qué no salió, seguida de 2 o 3 opciones concretas y accionables para lograrlo (qué integración conectar, qué dato falta, qué reintentar de otra forma). Nada de disculpas largas ni un "no se pudo" a secas. No inventes resultados.`,
-      { orgId, taskId, requestType: 'response', budget: 'cheap', maxTokens: 400, temperature: 0.2 },
+      `OBJETIVO DEL USUARIO: ${goal}\n\nINTENTOS REALIZADOS (ninguno produjo el resultado esperado):\n${attempts}\n\nRedacta en español una respuesta honesta y útil para el usuario: una línea con qué se intentó y por qué no salió, seguida de 2 o 3 opciones concretas y accionables para lograrlo (qué integración conectar, qué dato falta, qué reintentar de otra forma). Formatea las opciones como lista numerada (1. ... 2. ... 3. ...). Nada de disculpas largas ni un "no se pudo" a secas. Las opciones concretas y accionables son OBLIGATORIAS. No inventes resultados.`,
+      { orgId, taskId, requestType: 'response', budget: 'cheap', maxTokens: 500, temperature: 0.2 },
     );
+  }
+
+  /** R3.2: L4 fallback — step-by-step manual guide leveraging what the trajectory already found. */
+  private async generateManualGuide(orgId: string, taskId: string, goal: string, steps: AgentLoopStep[]): Promise<string> {
+    const findings = steps
+      .filter((s) => !s.observation.startsWith('ERROR:') && s.observation.trim().length > 10)
+      .slice(-6)
+      .map((s) => `${s.tool}: ${s.observation.slice(0, 300)}`)
+      .join('\n');
+    const errors = steps
+      .filter((s) => s.observation.startsWith('ERROR:'))
+      .slice(-3)
+      .map((s) => `${s.tool}: ${s.observation.slice(7, 200)}`)
+      .join('\n');
+
+    try {
+      const res = await this.modelRouter.generate(
+        `OBJETIVO: ${goal}\n\nLO QUE EL AGENTE DESCUBRIÓ:\n${findings || '(nada útil recuperado)'}\n\nBLOQUEOS EXACTOS:\n${errors || '(ninguno)'}\n\nGenera una guía manual paso a paso para que el USUARIO lo haga él mismo:\n- Pasos numerados con instrucciones exactas (dónde entrar, qué clic, qué copiar)\n- Qué resultado o dato traer de vuelta\n- Cierra con: "Cuando lo tengas, mándame el resultado o una captura y lo verifico"\n- NUNCA pidas contraseñas ni tokens — pide que el usuario ACTÚE, no que comparta credenciales\n- Español, directo, sin introducción larga`,
+        { orgId, taskId, requestType: 'response', budget: 'cheap', maxTokens: 600, temperature: 0.1 },
+      );
+      return res.text;
+    } catch {
+      return `No pude ejecutar esto automáticamente. Aquí está el camino manual:\n\n1. Ve al servicio o aplicación que necesitas usar directamente.\n2. Realiza la acción que pediste: ${goal.slice(0, 200)}\n3. Cuando lo tengas, mándame el resultado o una captura y lo verifico.`;
+    }
   }
 
   // ── extras (skills + secrets, solo raíz) ──────────────────────────────────

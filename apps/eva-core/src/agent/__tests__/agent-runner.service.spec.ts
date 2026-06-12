@@ -29,6 +29,7 @@ import { classifyTier } from '../tier';
 import { Task } from '../../tasks/task.types';
 import { ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
 import { CommunicationService } from '../../communication/communication.service';
+import { AgentIntelligenceService } from '../agent-intelligence.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -480,6 +481,16 @@ describe('AgentRunnerService', () => {
             openManualLogin: jest.fn().mockResolvedValue({ ok: true, app: 'Google Chrome', url: 'https://accounts.google.com', profile_id: 'profile-1', text: 'Chrome se abrió con el perfil de Google.' }),
             startSession: jest.fn().mockResolvedValue({ ok: true, state: 'logged_in', session_id: 'google-session-1', text: 'Autenticado.' }),
             hasCredential: jest.fn().mockResolvedValue(false),
+          },
+        },
+        {
+          provide: AgentIntelligenceService,
+          useValue: {
+            loadRetryContext: jest.fn().mockResolvedValue(null),
+            persistRetryContext: jest.fn().mockResolvedValue(undefined),
+            buildRetryContext: jest.fn().mockResolvedValue(null),
+            registerCapabilityGap: jest.fn().mockResolvedValue(undefined),
+            getCapabilityGapsDigest: jest.fn().mockResolvedValue(null),
           },
         },
       ],

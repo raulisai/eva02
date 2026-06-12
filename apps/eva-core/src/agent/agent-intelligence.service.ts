@@ -11,6 +11,19 @@ export interface AgentPlanItem {
   id: string;
   text: string;
   status: 'pending' | 'active' | 'done';
+  /** Who executes this step. Defaults to 'eva'. 'user' triggers ask_user and waits. */
+  owner?: 'eva' | 'user';
+}
+
+/** Persisted when a task fails — used by the retry handler to inject context into the next run. */
+export interface RetryContext {
+  goal: string;
+  trajectory_summary: string;
+  diagnosis: string;
+  options: string[];
+  suggested_strategy: string;
+  retry_count: number;
+  root_task_id: string;
 }
 
 export interface SafetyReviewResult {
@@ -140,10 +153,11 @@ export class AgentIntelligenceService implements OnApplicationBootstrap, OnAppli
     return `Dominio(s) no permitidos para sandbox con red: ${denied.join(', ')}. Allowlist: ${settings.sandboxNetworkAllowlist.join(', ')}.`;
   }
 
-  async createInitialPlan(orgId: string, taskId: string, goal: string): Promise<AgentPlanItem[]> {
+  async createInitialPlan(orgId: string, taskId: string, goal: string, capabilityModel?: string): Promise<AgentPlanItem[]> {
+    const capBlock = capabilityModel ? `\nCAPACIDADES DISPONIBLES:\n${capabilityModel}\nUsa SOLO las capacidades listadas. Si el objetivo necesita algo no disponible, añade un paso explícito de colaboración con el usuario o ruta alternativa.` : '';
     try {
       const res = await this.modelRouter.generate(
-        `OBJETIVO: ${goal}\nGenera un plan operativo de 3 a 6 pasos cortos, verificables y sin relleno. Devuelve JSON {"steps":["..."]}.`,
+        `OBJETIVO: ${goal}${capBlock}\nGenera un plan operativo de 3 a 6 pasos cortos, verificables y sin relleno. Devuelve JSON {"steps":["..."]}.`,
         { orgId, taskId, requestType: 'reasoning', budget: 'cheap', responseFormat: 'json', maxTokens: 300, temperature: 0 },
       );
       const parsed = JSON.parse(res.text) as { steps?: unknown[] };
@@ -472,13 +486,17 @@ export class AgentIntelligenceService implements OnApplicationBootstrap, OnAppli
       .order('created_at', { ascending: false })
       .limit(30);
     const rows = (data ?? []) as Array<{ task_id?: string; goal: string; steps: AgentLoopStep[]; tools_used?: string[] }>;
-    if (rows.length === 0) return;
+
+    const gapDigest = await this.getCapabilityGapsDigest(orgId);
+
+    if (rows.length === 0 && !gapDigest) return;
     const digestInput = rows.map((r) => `OBJ: ${r.goal}\nTOOLS: ${(r.tools_used ?? []).join(', ')}\nLAST: ${(r.steps ?? []).slice(-2).map((s) => s.observation).join(' | ')}`).join('\n\n');
+    const gapSection = gapDigest ? `\n\nCAPACIDADES FALTANTES RECURRENTES: ${gapDigest}\nPropón integraciones o skills que resuelvan estos huecos.` : '';
     const res = await this.modelRouter.generate(
-      `Analiza estos fallos del agente, agrupa patrones y propone skills correctivas provisionales seguras. No incluyas secrets. Español.\n${digestInput}`,
+      `Analiza estos fallos del agente, agrupa patrones y propone skills correctivas provisionales seguras. No incluyas secrets. Español.\n${digestInput}${gapSection}`,
       { orgId, requestType: 'response', budget: 'cheap', maxTokens: 1000, temperature: 0.2 },
     );
-    await this.saveArtifact(orgId, undefined, 'failure_digest', 'Digest semanal de self-improvement', res.text, { failed_runs: rows.length });
+    await this.saveArtifact(orgId, undefined, 'failure_digest', 'Digest semanal de self-improvement', res.text, { failed_runs: rows.length, gap_digest: gapDigest });
   }
 
   async heartbeat(orgId: string, userId: string): Promise<string | null> {
@@ -493,12 +511,18 @@ export class AgentIntelligenceService implements OnApplicationBootstrap, OnAppli
       .gte('created_at', `${today}T00:00:00.000Z`)
       .limit(1);
     if ((existing ?? []).length > 0) return null;
+
+    const gapDigest = await this.getCapabilityGapsDigest(orgId);
+    const gapHint = gapDigest
+      ? `\n\nADEMÁS: Esta semana bloqueé ${gapDigest}. Si el usuario conecta esas integraciones puedo resolver esas tareas — mencíonaselo si es relevante.`
+      : '';
+
     const task = await this.tasks.createTask({
       title: 'Heartbeat diario de EVA',
-      description: 'Revisa correo, agenda y pendientes; si hay algo accionable, propón 1-3 acciones concretas. No ejecutes acciones de escritura sin Approval Engine.',
+      description: `Revisa correo, agenda y pendientes; si hay algo accionable, propón 1-3 acciones concretas. No ejecutes acciones de escritura sin Approval Engine.${gapHint}`,
       metadata: { heartbeat: true },
     }, userId, orgId);
-    await this.saveArtifact(orgId, task.id, 'heartbeat_brief', 'Heartbeat diario creado', `Task ${task.id}`, { task_id: task.id });
+    await this.saveArtifact(orgId, task.id, 'heartbeat_brief', 'Heartbeat diario creado', `Task ${task.id}`, { task_id: task.id, gap_digest: gapDigest });
     return task.id;
   }
 
@@ -558,5 +582,125 @@ export class AgentIntelligenceService implements OnApplicationBootstrap, OnAppli
       metadata,
     });
     if (error) this.logger.debug(`runtime artifact skipped: ${error.message}`);
+  }
+
+  // ── R1: retry context ─────────────────────────────────────────────────────
+
+  async persistRetryContext(orgId: string, taskId: string, ctx: RetryContext): Promise<void> {
+    await this.saveArtifact(orgId, taskId, 'retry_context', `Retry context for task ${taskId}`, JSON.stringify(ctx), { retry_count: ctx.retry_count, root_task_id: ctx.root_task_id });
+  }
+
+  async loadRetryContext(orgId: string, userId: string): Promise<RetryContext | null> {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: tasks } = await this.db.admin
+      .from('tasks')
+      .select('id')
+      .eq('org_id', orgId)
+      .eq('created_by', userId)
+      .eq('status', 'failed')
+      .gte('updated_at', cutoff)
+      .order('updated_at', { ascending: false })
+      .limit(5);
+
+    if (!tasks || tasks.length === 0) return null;
+    const taskIds = (tasks as Array<{ id: string }>).map((t) => t.id);
+
+    const { data: artifacts } = await this.db.admin
+      .from('agent_runtime_artifacts')
+      .select('content, metadata')
+      .eq('org_id', orgId)
+      .eq('kind', 'retry_context')
+      .in('task_id', taskIds)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (!artifacts || artifacts.length === 0) return null;
+    try {
+      return JSON.parse((artifacts[0] as { content: string }).content) as RetryContext;
+    } catch {
+      return null;
+    }
+  }
+
+  async buildRetryContext(orgId: string, taskId: string, goal: string, steps: AgentLoopStep[], errorMsg: string, optionLines: string[], retryCount = 0): Promise<RetryContext> {
+    const trajectorySummary = steps
+      .filter((s) => s.observation.startsWith('ERROR:') || steps.indexOf(s) === steps.length - 1)
+      .slice(0, 8)
+      .map((s) => `[${s.tool}] ${s.observation.slice(0, 200)}`)
+      .join('\n');
+
+    let diagnosis = `Fallo principal: ${errorMsg.slice(0, 300)}`;
+    try {
+      const res = await this.modelRouter.generate(
+        `OBJETIVO: ${goal}\nTRAYECTORIA:\n${trajectorySummary}\nERROR: ${errorMsg.slice(0, 200)}\nEn 1 frase: ¿cuál fue la causa raíz del fallo?`,
+        { orgId, taskId, budget: 'cheap', maxTokens: 80, temperature: 0 },
+      );
+      if (res.text.trim()) diagnosis = res.text.trim();
+    } catch { /* keep default */ }
+
+    const suggestedStrategy = optionLines.length > 0
+      ? optionLines[0].replace(/^\d+\.\s*/, '').slice(0, 200)
+      : 'Intenta con otro enfoque o herramienta distinta.';
+
+    return { goal, trajectory_summary: trajectorySummary, diagnosis, options: optionLines, suggested_strategy: suggestedStrategy, retry_count: retryCount, root_task_id: taskId };
+  }
+
+  // ── R4: capability gaps ───────────────────────────────────────────────────
+
+  async registerCapabilityGap(orgId: string, taskId: string, capability: string, goal: string, ladderLevel: 3 | 4 | 5, missing?: Record<string, unknown>): Promise<void> {
+    const { error } = await this.db.admin.from('capability_gaps').insert({
+      org_id: orgId,
+      capability,
+      goal: goal.slice(0, 500),
+      ladder_level: ladderLevel,
+      missing: missing ?? null,
+      task_id: taskId,
+    });
+    if (error) this.logger.debug(`gap register skipped: ${error.message}`);
+  }
+
+  async getCapabilityGapsDigest(orgId: string): Promise<string | null> {
+    const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { data } = await this.db.admin
+      .from('capability_gaps')
+      .select('capability, missing, ladder_level')
+      .eq('org_id', orgId)
+      .is('resolved_at', null)
+      .gte('created_at', cutoff);
+
+    const rows = (data ?? []) as Array<{ capability: string; missing: Record<string, unknown> | null; ladder_level: number }>;
+    if (rows.length === 0) return null;
+
+    const counts = new Map<string, number>();
+    for (const r of rows) counts.set(r.capability, (counts.get(r.capability) ?? 0) + 1);
+    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+    return sorted.map(([cap, n]) => `${cap} (${n} tarea${n > 1 ? 's' : ''} bloqueada${n > 1 ? 's' : ''})`).join(', ');
+  }
+
+  // ── R4.5: failure anti-patterns ───────────────────────────────────────────
+
+  async replayFailureExample(orgId: string, goal: string): Promise<string | null> {
+    const { data } = await this.db.admin
+      .from('agent_trajectories')
+      .select('goal, steps, tools_used')
+      .eq('org_id', orgId)
+      .in('outcome', ['failed', 'degraded'])
+      .order('created_at', { ascending: false })
+      .limit(30);
+
+    const rows = (data ?? []) as Array<{ goal: string; steps: AgentLoopStep[]; tools_used?: string[] }>;
+    const best = rows
+      .map((row) => ({ row, score: this.lexicalSimilarity(goal, row.goal) }))
+      .filter((x) => x.score > 0.2)
+      .sort((a, b) => b.score - a.score)[0]?.row;
+
+    if (!best) return null;
+    const errorSteps = (best.steps ?? [])
+      .filter((s) => s.observation.startsWith('ERROR:'))
+      .slice(0, 3)
+      .map((s) => `${s.tool}: ${s.observation.slice(7, 160)}`)
+      .join('\n');
+    if (!errorSteps) return null;
+    return `ANTI-PATRÓN PREVIO para objetivo similar "${best.goal.slice(0, 80)}":\nEstas rutas fallaron antes — evítalas:\n${errorSteps}`;
   }
 }

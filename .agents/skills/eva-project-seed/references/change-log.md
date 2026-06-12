@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 21:58Z
+C: docs: restructured docs folder to a compact, new set of files, deleted old guides, and implemented a closed-loop living documentation system; files=docs/architecture.md,docs/process_flows.md,docs/implementation_guide.md,docs/project_sections.md,docs/improvement_loop.md,docs/backlog.md,.agents/skills/eva-project-seed/SKILL.md,.agents/skills/eva-project-seed/references/project-map.md; tests=manual review, git status
+P: pending/improve -> add a sanity check script to verify all links in the restructured markdown documentation remain valid
+
 ### 2026-06-12 20:43Z
 C: agent-loop: added explicit authorization instructions to system prompt and refinement layer to prevent false capability/privacy refusals on WhatsApp/Gmail tools; files=apps/eva-core/src/agent/agent-loop.service.ts; tests=npm test
 P: pending/improve -> verify if other model providers (like Claude or GPT) require similar system prompt overrides for capability verification

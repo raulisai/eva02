@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { AgentLoopService } from './agent-loop.service';
+import { AgentIntelligenceService } from './agent-intelligence.service';
 import { BehaviorPatternService } from './behavior-pattern.service';
 import { CapabilityGateService } from '../capability-gate/capability-gate.service';
 import { SetupRequiredPayload } from '../capability-gate/capability-gate.types';
@@ -166,6 +167,12 @@ const BULK_GUARD_SIGNALS = /\b(todos(?: mis)?|todas(?: mis)?|masiv[oa]|bulk|en m
 const APPROVE_KEYWORDS = /^\s*(aprovar|aprobar|aprobado|esta\s+bien|está\s+bien|sí|si|yes|dale|autorizado|aprueba|confirmado|confirmo|ok|okay|si,\s*dale|si\s+por\s*favor|sí\s+por\s*favor)\s*$/i;
 const REJECT_KEYWORDS = /^\s*(desaprovar|desaprobar|cancelar|no|rechazar|desaprueba|cancela|rechazo|denegar|denegado|no,\s*gracias)\s*$/i;
 
+// R1.2: signals that the user wants to retry a previously failed task
+const RETRY_INTENT_RE = /\b(reintenta|intenta\s+de\s+nuevo|vuelve\s+a\s+intentar|inténtalo?|prueba\s+de\s+nuevo|hazlo\s+de\s+nuevo|int[eé]ntalo\s+(?:de\s+nuevo|otra\s+vez)|opci[oó]n\s+(\d|uno|dos|tres|cuatro)|prueba\s+la\s+\d|elige\s+la\s+\d|la\s+opci[oó]n\s+\d|hazlo\s+as[ií])\b/i;
+
+// R2.1: extract the option number from "opción 2" / "la 1" / "prueba la 3"
+const OPTION_NUMBER_RE = /\b(?:opci[oó]n\s+|la\s+|prueba\s+la\s+)(\d)/i;
+
 // ── Scheduled job intent signals ─────────────────────────────────────────────
 // Detects requests to create / list / manage recurring or one-time scheduled jobs.
 const SCHEDULE_CREATE_SIGNALS =
@@ -278,6 +285,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly comms: CommunicationService,
     private readonly agentLoop: AgentLoopService,
     private readonly sandbox: SandboxService,
+    private readonly intelligence: AgentIntelligenceService,
   ) {
     this.initRoutes();
   }
@@ -599,9 +607,10 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
           await this.log(
             ctx.orgId, ctx.taskId,
-            `capability gate blocked: "${missingReq.capability}" not configured — setup required`,
+            `capability gate blocked: "${missingReq.capability}" not configured — soft gate: will try partial progress`,
             'gate',
           );
+          // R2.3: emit setup card (same as before) so user knows what to connect
           const setupPayload: SetupRequiredPayload = {
             capability: missingReq.capability,
             setup_type: missingReq.setup_type,
@@ -617,9 +626,30 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             payload: setupPayload,
           });
           await this.say(ctx.orgId, ctx.taskId, missingReq.ack_message);
-          await this.tasks.transition(ctx.taskId, ctx.orgId, 'waiting_for_approval', {
-            result: { text: missingReq.user_message, model: 'capability-gate' },
+          // R4.2: register capability gap
+          await this.intelligence.registerCapabilityGap(
+            ctx.orgId, ctx.taskId, missingReq.capability, ctx.input, 3,
+            { integration: missingReq.integrations?.[0]?.provider, kind: missingReq.integrations?.[0]?.kind },
+          ).catch(() => undefined);
+          // R2.3: instead of terminating, pass to loop with restriction context so it
+          // advances everything possible and leaves only the locked step pending
+          const restrictionCtx = `LIMITACIÓN: "${missingReq.capability}" no está configurado aún (${missingReq.user_message.slice(0, 120)}). Avanza TODO lo que no requiera esta integración. Prepara el resultado final. Para el paso que necesita ${missingReq.capability}, describe exactamente qué ejecutarías y deja la tarea en waiting_for_input con ask_user pidiendo al usuario que complete el setup. NO prometas usar ${missingReq.capability} hasta que esté disponible.`;
+          const outcome = await this.agentLoop.run(ctx.orgId, ctx.taskId, ctx.input, {
+            context: restrictionCtx,
+            userId: ctx.task.created_by,
+            log: (message, scope) => this.log(ctx.orgId, ctx.taskId, message, scope),
           });
+          if (outcome.ok && outcome.text) {
+            await this.deliver(ctx.orgId, ctx.taskId, outcome.text, 'agent-partial', Date.now() - ctx.startedAt);
+            await this.tasks.transition(ctx.taskId, ctx.orgId, 'completed', {
+              result: { text: outcome.text, model: 'agent-partial', latency_ms: Date.now() - ctx.startedAt },
+            });
+          } else {
+            // fallback: terminate with setup message if loop produced nothing
+            await this.tasks.transition(ctx.taskId, ctx.orgId, 'waiting_for_approval', {
+              result: { text: missingReq.user_message, model: 'capability-gate' },
+            });
+          }
           return true;
         }
       },
@@ -924,6 +954,33 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
     const answeredInput = await this.answerWaitingInputIfAny(orgId, task, rawInput);
     if (answeredInput) return;
+
+    // R1.2: retry handler — "reintenta" / "opción N" resumes with failure context injected
+    if (RETRY_INTENT_RE.test(inputForCheck)) {
+      const retryCtx = await this.intelligence.loadRetryContext(orgId, task.created_by).catch(() => null);
+      if (retryCtx && retryCtx.retry_count < 2) {
+        const optionMatch = rawInput.match(OPTION_NUMBER_RE);
+        const chosenIndex = optionMatch ? Math.max(0, parseInt(optionMatch[1], 10) - 1) : 0;
+        const chosenStrategy = retryCtx.options[chosenIndex] ?? retryCtx.suggested_strategy;
+        const augmentedCtx = { ...retryCtx, suggested_strategy: chosenStrategy, retry_count: retryCtx.retry_count + 1 };
+        await this.tasks.transition(taskId, orgId, 'planning');
+        await this.tasks.transition(taskId, orgId, 'running');
+        await this.log(orgId, taskId, `retry handler: reusing context from task ${retryCtx.root_task_id} (retry_count=${augmentedCtx.retry_count})`, 'retry');
+        const outcome = await this.agentLoop.run(orgId, taskId, retryCtx.goal, {
+          context: rawInput,
+          retryContext: augmentedCtx,
+          userId: task.created_by,
+          log: (message, scope) => this.log(orgId, taskId, message, scope),
+        });
+        if (outcome.ok) {
+          await this.deliver(orgId, taskId, outcome.text, 'agent-retry', 0);
+          await this.tasks.transition(taskId, orgId, 'completed', { result: { text: outcome.text, model: 'agent-retry', latency_ms: 0 } });
+        } else {
+          await this.failSafely(orgId, taskId, `Tercer intento agotado para: ${retryCtx.goal.slice(0, 200)}`);
+        }
+        return;
+      }
+    }
 
     // Detect cross-channel routing intent before any other processing.
     const crossChannel = this.extractCrossChannelTarget(rawInput);
@@ -2402,10 +2459,13 @@ Responde directamente al usuario en español, con un tono amable y natural.
         );
       }
       const context = contextParts.length > 0 ? contextParts.join('\n') : undefined;
+      // R2.1: build capability self-model once per run so the agent knows what's available BEFORE failing
+      const capabilityModel = await this.buildCapabilityModel(orgId).catch(() => undefined);
       const outcome = await this.agentLoop.run(orgId, taskId, input, {
         context,
         userId,
         maxSteps,
+        capabilityModel,
         log: (message, scope) => this.log(orgId, taskId, message, scope),
       });
       if (!outcome.ok || !outcome.text) return false;
@@ -2612,6 +2672,16 @@ Responde directamente al usuario en español, con un tono amable y natural.
           error: message,
           result: { text: failureText, model: 'failure-options', latency_ms: 0 },
         });
+
+        // R1.4: persist retry context so "reintenta" next time starts with full context
+        const optionLines = failureText.split('\n').filter((l) => /^\d+\./.test(l.trim()));
+        const goal = refreshed.description ?? refreshed.title ?? message.slice(0, 200);
+        const retryCtx = await this.intelligence.buildRetryContext(orgId, taskId, goal, [], message, optionLines, 0).catch(() => null);
+        if (retryCtx) {
+          await this.intelligence.persistRetryContext(orgId, taskId, retryCtx).catch(() => undefined);
+        }
+        // R4.2: register capability gap at L3 level
+        await this.intelligence.registerCapabilityGap(orgId, taskId, 'hard_failure', goal, 3, { error: message.slice(0, 200) }).catch(() => undefined);
       }
     } catch (transitionError) {
       this.logger.error(`Could not mark task ${taskId} as failed`, transitionError as Error);
@@ -3283,5 +3353,34 @@ Responde directamente al usuario en español, con un tono amable y natural.
     } catch {
       return dateStr;
     }
+  }
+
+  // ── R2.1: capability self-model ───────────────────────────────────────────
+
+  /**
+   * Builds a short CAPACIDADES block for the agent's system prompt.
+   * Cached per run (not across runs) to avoid extra RTTs per step.
+   */
+  private async buildCapabilityModel(orgId: string): Promise<string> {
+    const { data } = await this.db.admin
+      .from('integrations')
+      .select('provider, kind, status')
+      .eq('org_id', orgId)
+      .limit(50);
+
+    const rows = (data ?? []) as Array<{ provider: string; kind: string; status: string }>;
+    const active = rows.filter((r) => r.status === 'active').map((r) => r.provider.toLowerCase());
+    const inactive = rows.filter((r) => r.status !== 'active').map((r) => r.provider.toLowerCase());
+
+    const puedo = ['web_search', 'code_python', 'code_nodejs', 'code_bash', ...active].join(', ');
+    const noTengo = inactive.length > 0 ? inactive.join(', ') : null;
+
+    const lines = [
+      'CAPACIDADES:',
+      `PUEDO: ${puedo}`,
+    ];
+    if (noTengo) lines.push(`NO TENGO (no disponibles aún): ${noTengo}`);
+    lines.push('SI FALTA ALGO: propón la alternativa más cercana con lo que SÍ está en PUEDO; nunca prometas usar algo que no está en PUEDO.');
+    return lines.join('\n');
   }
 }
