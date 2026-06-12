@@ -2,6 +2,14 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 23:47Z
+C: agent/settings: added tier step budgets, Spanish suffix routing coverage, and curated active backlog; files=apps/eva-core/src/agent/tier.ts,apps/eva-core/src/agent/agent-intelligence.service.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-intelligence.service.spec.ts,apps/eva-dashboard/components/settings/agent-client.tsx,supabase/migrations/032_agent_tier_step_settings.sql,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/agent-intelligence.service.spec.ts --runInBand; cd apps/eva-core && npm test -- src/agent/__tests__/agent-runner.service.spec.ts --runInBand; cd apps/eva-dashboard && npm run build; npm run docs:check
+P: pending/improve -> apply migrations 031-032 to Supabase and run RLS_TEST=true npm run test:e2e before relying on private context and tier-step settings in production
+
+### 2026-06-12 23:42Z
+C: profile-hub: plan detallado (sin código) para extraer Mi Perfil de /soul a /profile, unificar con vault privado (auto-hide + masking), tablas profile_todos/notes/goals, auto-llenado via digester v2 + tools del loop, ProfileContextBuilder para prompts; files=docs/profile_hub_plan.md,docs/backlog.md; tests=n/a (solo planeación)
+P: pending/improve -> implementar Fase 1 del profile hub: migración 033_profile_hub.sql + SensitivityClassifierService + ProfileFactsService + ProfileController con tests RLS
+
 ### 2026-06-12 23:20Z
 C: dashboard/soul: redesigned Soul editor into separated Agente EVA, Mi perfil, and Privado sections with vault-style private context fields; files=apps/eva-dashboard/components/soul/soul-editor.tsx,apps/eva-dashboard/__tests__/soul-editor.test.tsx,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-dashboard && npm test -- --runInBand __tests__/soul-editor.test.tsx; cd apps/eva-dashboard && npm run build; npm run docs:check
 P: pending/improve -> verify Soul segmented workspace in a real browser session after migration 031 is applied

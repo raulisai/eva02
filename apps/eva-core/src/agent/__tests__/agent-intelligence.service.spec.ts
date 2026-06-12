@@ -93,6 +93,38 @@ describe('AgentIntelligenceService', () => {
     expect(denied).toContain('evil.test');
   });
 
+  it('normalizes org max step settings by tier with safe clamps', async () => {
+    builder.maybeSingle.mockResolvedValueOnce({
+      data: {
+        max_steps_by_tier: {
+          chat: 99,
+          quick: 0,
+          medium: 7,
+          long: 12,
+        },
+      },
+      error: null,
+    });
+
+    await expect(service.settings(ORG)).resolves.toMatchObject({
+      maxStepsByTier: {
+        chat: 4,
+        quick: 1,
+        medium: 7,
+        long: 10,
+      },
+    });
+  });
+
+  it('returns the configured max steps for a requested tier', async () => {
+    builder.maybeSingle.mockResolvedValueOnce({
+      data: { max_steps_by_tier: { medium: 6 } },
+      error: null,
+    });
+
+    await expect(service.maxStepsForTier(ORG, 'medium')).resolves.toBe(6);
+  });
+
   it('persists ask_user requests and emits waiting events', async () => {
     const result = await service.askUser(ORG, TASK, '¿Cuál archivo?', ['a.csv']);
 
