@@ -20,6 +20,7 @@ const KEEP_ALIVE_ROUTES = new Set([
   '/settings/models',
   '/settings/channels',
   '/settings/credentials',
+  '/settings/agent',
 ]);
 
 function keepAliveKey(pathname: string | null): string | null {

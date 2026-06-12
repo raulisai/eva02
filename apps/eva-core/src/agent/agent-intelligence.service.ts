@@ -294,30 +294,172 @@ export class AgentIntelligenceService implements OnApplicationBootstrap, OnAppli
     }
   }
 
+  private cosineSimilarity(a: number[], b: number[]): number {
+    let dot = 0;
+    let normA = 0;
+    let normB = 0;
+    const len = Math.min(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+      dot += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
+    }
+    if (normA === 0 || normB === 0) return 0;
+    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+  }
+
   async consolidateMemories(orgId: string): Promise<void> {
-    const { data } = await this.db.admin
+    const { data: memsData } = await this.db.admin
       .from('memories')
-      .select('id, summary, memory_type, importance, created_at, last_recalled_at')
-      .eq('org_id', orgId)
-      .order('created_at', { ascending: false })
-      .limit(200);
-    const rows = (data ?? []) as Array<Record<string, unknown>>;
-    const procedural = rows.filter((m) => String(m.memory_type ?? '') === 'procedural');
-    const stale = rows.filter((m) => Number(m.importance ?? 0) <= 2 && this.daysSince(String(m.last_recalled_at ?? m.created_at)) > 60);
+      .select('id, summary, content, memory_type, importance, created_at, last_recalled_at, metadata')
+      .eq('org_id', orgId);
+    
+    if (!memsData || memsData.length === 0) return;
+
+    // Filter out already archived memories
+    const activeMems = memsData.filter((m) => {
+      const meta = m.metadata as Record<string, unknown> | null;
+      return !meta?.archived_at;
+    });
+
+    if (activeMems.length === 0) return;
+
+    // Fetch embeddings
+    const { data: embedsData } = await this.db.admin
+      .from('memory_embeddings')
+      .select('memory_id, embedding')
+      .eq('org_id', orgId);
+
+    const embedMap = new Map<string, number[]>();
+    if (embedsData) {
+      for (const row of embedsData) {
+        if (!row.embedding) continue;
+        try {
+          const vector: number[] = typeof row.embedding === 'string'
+            ? JSON.parse(row.embedding)
+            : (Array.isArray(row.embedding) ? row.embedding : []);
+          if (vector.length > 0) {
+            embedMap.set(row.memory_id, vector);
+          }
+        } catch {
+          // ignore parsing error
+        }
+      }
+    }
+
+    // Cluster active memories based on cosine similarity
+    const clusters: Array<typeof activeMems> = [];
+    const visited = new Set<string>();
+    const SIMILARITY_THRESHOLD = 0.85;
+
+    for (const mem of activeMems) {
+      if (visited.has(mem.id)) continue;
+      const vec = embedMap.get(mem.id);
+      if (!vec) continue;
+
+      const cluster = [mem];
+      visited.add(mem.id);
+
+      for (const other of activeMems) {
+        if (visited.has(other.id)) continue;
+        const otherVec = embedMap.get(other.id);
+        if (!otherVec) continue;
+
+        const sim = this.cosineSimilarity(vec, otherVec);
+        if (sim >= SIMILARITY_THRESHOLD) {
+          cluster.push(other);
+          visited.add(other.id);
+        }
+      }
+
+      if (cluster.length > 1) {
+        clusters.push(cluster);
+      }
+    }
+
+    // Consolidate clusters
+    for (const cluster of clusters) {
+      // If we have 3 or more similar memories, let's upgrade them to a playbook
+      if (cluster.length >= 3) {
+        const summariesText = cluster.map((m) => `- [${m.memory_type}] ${m.summary}: ${m.content}`).join('\n');
+        
+        try {
+          const res = await this.modelRouter.generate(
+            `Analiza las siguientes memorias similares y compáctalas en un único playbook operativo detallado y de alta calidad (en español):\n\n${summariesText}\n\nDevuelve JSON con {"playbook_title": "Título del Playbook", "playbook_content": "Pasos detallados, reglas y mejores prácticas del playbook."}`,
+            {
+              orgId,
+              requestType: 'response',
+              budget: 'cheap',
+              responseFormat: 'json',
+              maxTokens: 1000,
+              temperature: 0.2
+            }
+          );
+
+          const parsed = JSON.parse(res.text) as { playbook_title?: string; playbook_content?: string };
+          if (parsed.playbook_title && parsed.playbook_content) {
+            // Save the playbook as a new high-importance procedural memory
+            const { data: newMemory } = await this.db.admin
+              .from('memories')
+              .insert({
+                org_id: orgId,
+                summary: parsed.playbook_title,
+                content: parsed.playbook_content,
+                importance: 0.9,
+                memory_type: 'procedural',
+                metadata: {
+                  is_playbook: true,
+                  source_memories: cluster.map((m) => m.id),
+                  consolidated_at: new Date().toISOString()
+                }
+              })
+              .select('id')
+              .single();
+
+            // Archive the source memories
+            const archivedMeta = {
+              archived_by: 'memory_consolidation_clustering',
+              archived_at: new Date().toISOString(),
+              playbook_memory_id: (newMemory as { id: string })?.id
+            };
+
+            await Promise.all(cluster.map((m) => this.db.admin
+              .from('memories')
+              .update({ metadata: { ...(m.metadata as Record<string, unknown> || {}), ...archivedMeta } })
+              .eq('org_id', orgId)
+              .eq('id', m.id)
+            ));
+
+            await this.saveArtifact(
+              orgId,
+              undefined,
+              'memory_playbook',
+              `Playbook consolidado: ${parsed.playbook_title}`,
+              parsed.playbook_content,
+              { source_count: cluster.length, playbook_memory_id: (newMemory as { id: string })?.id }
+            );
+          }
+        } catch (err) {
+          this.logger.warn(`Failed to consolidate memory cluster: ${(err as Error).message}`);
+        }
+      }
+    }
+
+    // Also do the original cleanup of unused/stale memories
+    const stale = activeMems.filter((m) => Number(m.importance ?? 0) <= 0.2 && this.daysSince(String(m.last_recalled_at ?? m.created_at)) > 60);
     if (stale.length > 0) {
       await Promise.all(stale.map((m) => this.db.admin
         .from('memories')
-        .update({ metadata: { archived_by: 'agent_memory_consolidation', archived_at: new Date().toISOString() } })
+        .update({
+          metadata: {
+            ...(m.metadata as Record<string, unknown> || {}),
+            archived_by: 'agent_memory_consolidation_stale',
+            archived_at: new Date().toISOString()
+          }
+        })
         .eq('org_id', orgId)
-        .eq('id', m.id)));
-    }
-    if (procedural.length >= 2) {
-      const text = procedural.slice(0, 20).map((m) => `- ${m.summary}`).join('\n');
-      const res = await this.modelRouter.generate(
-        `Agrupa estas memorias procedurales en playbooks reutilizables de alto nivel:\n${text}\nDevuelve una síntesis compacta en español.`,
-        { orgId, requestType: 'response', budget: 'cheap', maxTokens: 700, temperature: 0.2 },
-      );
-      await this.saveArtifact(orgId, undefined, 'memory_playbook', 'Playbook consolidado de memoria', res.text, { source_count: procedural.length });
+        .eq('id', m.id)
+      ));
     }
   }
 

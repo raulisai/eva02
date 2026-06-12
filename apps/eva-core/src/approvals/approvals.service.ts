@@ -64,28 +64,53 @@ export class ApprovalsService {
     return approval;
   }
 
-  async approve(approvalId: string, orgId: string, userId: string): Promise<ApprovalDecision> {
+  async approve(approvalId: string, orgId: string, userId: string, updatedPayload?: Record<string, unknown>): Promise<ApprovalDecision> {
     const approval = await this.repo.findByIdOrThrow(approvalId, orgId);
     this.assertPendingAndFresh(approval);
 
-    if (approval.level === 3) {
-      if (!approval.reviewed_by) {
-        const updated = await this.repo.update(approvalId, orgId, { reviewed_by: userId });
-        return { approval: updated, completed: false };
-      }
-      if (approval.reviewed_by === userId) {
+    let finalPayload = approval.payload;
+    let finalLevel = approval.level;
+    let finalHash = approval.action_hash;
+
+    if (updatedPayload) {
+      finalPayload = updatedPayload;
+      finalLevel = this.classifier.classify(approval.action_type, updatedPayload);
+      finalHash = hashApprovalAction({
+        actionType: approval.action_type,
+        payload: updatedPayload,
+        nonce: approval.nonce,
+        expiresAt: approval.expires_at,
+      });
+    }
+
+    if (finalLevel === 3) {
+      const reviewedBy = approval.reviewed_by || userId;
+      if (approval.reviewed_by && approval.reviewed_by === userId) {
         throw new ConflictException('Level 3 approvals require two distinct approvers');
       }
-      const updated = await this.repo.update(approvalId, orgId, {
-        reviewed_by_2: userId,
-        reviewed_at: new Date().toISOString(),
-        status: 'approved',
-      });
-      await this.publishResolved(updated, orgId);
-      return { approval: updated, completed: true };
+      const isCompleted = !!approval.reviewed_by && approval.reviewed_by !== userId;
+      const updateData: Partial<Approval> = {
+        payload: finalPayload,
+        level: finalLevel,
+        action_hash: finalHash,
+        reviewed_by: reviewedBy,
+      };
+      if (isCompleted) {
+        updateData.reviewed_by_2 = userId;
+        updateData.reviewed_at = new Date().toISOString();
+        updateData.status = 'approved';
+      }
+      const updated = await this.repo.update(approvalId, orgId, updateData);
+      if (isCompleted) {
+        await this.publishResolved(updated, orgId);
+      }
+      return { approval: updated, completed: isCompleted };
     }
 
     const updated = await this.repo.update(approvalId, orgId, {
+      payload: finalPayload,
+      level: finalLevel,
+      action_hash: finalHash,
       reviewed_by: userId,
       reviewed_at: new Date().toISOString(),
       status: 'approved',

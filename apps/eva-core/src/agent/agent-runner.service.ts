@@ -209,6 +209,37 @@ interface ConversationContextTurn {
   text: string;
 }
 
+export interface RouteContext {
+  orgId: string;
+  taskId: string;
+  task: Task;
+  rawInput: string;
+  input: string;
+  crossChannel: CommunicationChannel | null;
+  conversationContext: ConversationContextTurn[];
+  soulContext: AgentSoulContext;
+  calendarBlock: string | null;
+  patternBlock: string | null;
+  proactiveTriggers: any[];
+  recallResult: { isRecall: boolean; context: string | null; memories: any[] };
+  routingInput: string;
+  contextualInput: string;
+  startedAt: number;
+  freshness: { required: boolean; reason?: string };
+  tier: TierDecision;
+  wantsImage: boolean;
+  pureImageRequest: boolean;
+  ack: { say: string; hint: string };
+}
+
+export interface RunnerRoute {
+  name: string;
+  priority: number;
+  risk: 'low' | 'medium' | 'high';
+  matches: (ctx: RouteContext) => boolean | Promise<boolean>;
+  handler: (ctx: RouteContext) => Promise<boolean | void>;
+}
+
 @Injectable()
 export class AgentRunnerService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AgentRunnerService.name);
@@ -217,6 +248,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
   private readonly crossChannelCtx = new Map<string, { channel: CommunicationChannel; userId: string }>();
   private readonly activeToolSessions = new Map<string, { tool: string; details?: any; updatedAt: number }>();
   private readonly TOOL_SESSION_TTL_MS = 10 * 60 * 1000; // 10 minutes
+  private routes: RunnerRoute[] = [];
 
   constructor(
     private readonly db: DatabaseService,
@@ -246,7 +278,9 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly comms: CommunicationService,
     private readonly agentLoop: AgentLoopService,
     private readonly sandbox: SandboxService,
-  ) {}
+  ) {
+    this.initRoutes();
+  }
 
   onApplicationBootstrap() {
     if (typeof this.events.on !== 'function') return; // test stub without consumer
@@ -360,6 +394,452 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     return ACK_RULES.find(({ pattern }) => pattern.test(text)) ?? DEFAULT_ACK;
   }
 
+  private initRoutes() {
+    this.routes = [
+      {
+        name: 'pure-image',
+        priority: 100,
+        risk: 'low',
+        matches: (ctx) => ctx.pureImageRequest,
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.log(ctx.orgId, ctx.taskId, `tier=quick (${ctx.tier.reason}; media request) — image generation`, 'pipeline');
+          const url = await this.generateImageReply(ctx.orgId, ctx.taskId, ctx.input, ctx.startedAt);
+          if (url) {
+            await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+            return true;
+          }
+          throw new Error('No pude generar la imagen con los proveedores configurados. Revisa las credenciales/modelos de imagen o intenta de nuevo si el proveedor esta saturado.');
+        }
+      },
+      {
+        name: 'otp-submission',
+        priority: 95,
+        risk: 'low',
+        matches: (ctx) => this.isOtpSubmission(ctx.input, ctx.conversationContext),
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.handleOtpSubmission(ctx.orgId, ctx.taskId, ctx.input, ctx.startedAt, ctx.conversationContext);
+          return true;
+        }
+      },
+      {
+        name: 'rappi-login',
+        priority: 90,
+        risk: 'low',
+        matches: (ctx) => RAPPI_SIGNALS.test(ctx.input) && RAPPI_EMAIL_LOGIN_SIGNALS.test(ctx.input),
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.say(ctx.orgId, ctx.taskId, 'Abro Rappi e ingreso tu correo para iniciar sesión.');
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          if (loopHandled) return true;
+          await this.handleRappiEmailLogin(ctx.orgId, ctx.taskId, ctx.input, ctx.startedAt);
+          return true;
+        }
+      },
+      {
+        name: 'uber-login',
+        priority: 85,
+        risk: 'low',
+        matches: async (ctx) => UBER_EMAIL_LOGIN_SIGNALS.test(ctx.input) && !await this.isUberBrowserQuoteRequest(ctx.input, ctx.orgId, ctx.conversationContext, ctx.taskId),
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.say(ctx.orgId, ctx.taskId, 'Abro Uber e ingreso tu correo para iniciar sesión.');
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          if (loopHandled) return true;
+          await this.handleUberEmailLogin(ctx.orgId, ctx.taskId, ctx.input, ctx.startedAt);
+          return true;
+        }
+      },
+      {
+        name: 'google-manual-login',
+        priority: 80,
+        risk: 'low',
+        matches: (ctx) => GOOGLE_BLOCKED_LOGIN_SIGNALS.test(ctx.input),
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.handleGoogleManualLogin(ctx.orgId, ctx.taskId, ctx.startedAt);
+          return true;
+        }
+      },
+      {
+        name: 'uber-quote',
+        priority: 75,
+        risk: 'medium',
+        matches: (ctx) => this.isUberBrowserQuoteRequest(ctx.input, ctx.orgId, ctx.conversationContext, ctx.taskId),
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.say(ctx.orgId, ctx.taskId, 'Abro Uber Web solo para cotizar y te mando screenshot antes de cualquier acción.');
+          await this.log(ctx.orgId, ctx.taskId, 'uber quote request — opening Uber Web profile (quote-only)', 'tools');
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'uber');
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          if (loopHandled) return true;
+          await this.handleUberQuoteRequest(ctx.orgId, ctx.taskId, ctx.input, ctx.startedAt, ctx.conversationContext);
+          return true;
+        }
+      },
+      {
+        name: 'whatsapp',
+        priority: 70,
+        risk: 'medium',
+        matches: (ctx) => {
+          const isWhatsAppContext = this.checkActiveToolContext(ctx.orgId, ctx.task.created_by, 'whatsapp');
+          return (
+            WHATSAPP_SIGNALS.test(ctx.input) ||
+            this.isImplicitWhatsAppScreenshotRequest(ctx.input, ctx.conversationContext) ||
+            (isWhatsAppContext && this.isWhatsAppFollowUp(ctx.input, ctx.conversationContext))
+          );
+        },
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.say(ctx.orgId, ctx.taskId, 'Abro WhatsApp Web con tu perfil local. Si falta login, te paso el QR.');
+          await this.log(ctx.orgId, ctx.taskId, 'whatsapp request — opening WhatsApp Web profile', 'tools');
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          if (loopHandled) return true;
+          await this.handleWhatsAppRequest(ctx.orgId, ctx.taskId, ctx.task, ctx.input, ctx.startedAt, ctx.conversationContext);
+          return true;
+        }
+      },
+      {
+        name: 'scheduled-jobs',
+        priority: 65,
+        risk: 'low',
+        matches: (ctx) => this.isScheduleIntent(ctx.input),
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          if (loopHandled) return true;
+          await this.handleScheduleIntent(ctx.orgId, ctx.taskId, ctx.task, ctx.input, ctx.startedAt);
+          return true;
+        }
+      },
+      {
+        name: 'gmail-calendar-write',
+        priority: 60,
+        risk: 'medium',
+        matches: (ctx) => this.isGmailWriteIntent(ctx.input) || this.isCalendarWriteIntent(ctx.input),
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          if (BULK_GUARD_SIGNALS.test(ctx.input)) {
+            await this.deliver(ctx.orgId, ctx.taskId,
+              '🚫 No ejecuto operaciones masivas sobre correos ni eventos. Indícame exactamente el correo o evento específico y te pido confirmación antes de cualquier cambio.',
+              'safety', Date.now() - ctx.startedAt);
+            return true;
+          }
+          if (this.isGmailWriteIntent(ctx.input)) {
+            await this.say(ctx.orgId, ctx.taskId, 'Preparo la operación y te pido confirmación antes de ejecutarla 🛡️');
+            this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'gmail');
+          } else {
+            await this.say(ctx.orgId, ctx.taskId, 'Preparo el cambio en tu agenda y te pido confirmación 🗓️');
+            this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'calendar');
+          }
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          if (loopHandled) return true;
+          if (this.isGmailWriteIntent(ctx.input)) {
+            await this.handleGmailWriteIntent(ctx.orgId, ctx.taskId, ctx.task, ctx.input, ctx.startedAt);
+          } else {
+            await this.handleCalendarWriteIntent(ctx.orgId, ctx.taskId, ctx.task, ctx.input, ctx.startedAt);
+          }
+          return true;
+        }
+      },
+      {
+        name: 'chat-tier',
+        priority: 55,
+        risk: 'low',
+        matches: (ctx) => ctx.tier.tier === 'chat',
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.log(ctx.orgId, ctx.taskId, `tier=chat (${ctx.tier.reason}) — direct model, cheap tier`, 'pipeline');
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'chat');
+          if (this.isPersonalProfileQuestion(ctx.input)) {
+            const handled = await this.answerPersonalProfileQuestion(ctx.orgId, ctx.taskId, ctx.input, ctx.startedAt);
+            if (handled) return true;
+          }
+          const t0 = Date.now();
+          const chatInput = this.buildChatContextualInput(
+            ctx.input,
+            ctx.conversationContext,
+            ctx.soulContext,
+            ctx.proactiveTriggers.map(t => t.message),
+            ctx.recallResult.context,
+          );
+          const reply = await this.modelRouter.generate(chatInput, {
+            orgId: ctx.orgId,
+            taskId: ctx.taskId,
+            requestType: 'response',
+            budget: 'cheap',
+            maxTokens: 300,
+            systemPrompt: CHAT_PROMPT,
+          });
+          await this.deliver(ctx.orgId, ctx.taskId, reply.text, reply.model, Date.now() - t0);
+          await this.log(ctx.orgId, ctx.taskId, `chat answered in ${Date.now() - ctx.startedAt}ms`, 'pipeline');
+          return true;
+        }
+      },
+      {
+        name: 'capability-gate',
+        priority: 50,
+        risk: 'low',
+        matches: async (ctx) => !!(await this.capabilityGate.firstMissingRequirement(ctx.input, ctx.orgId)),
+        handler: async (ctx) => {
+          const missingReq = await this.capabilityGate.firstMissingRequirement(ctx.input, ctx.orgId);
+          if (!missingReq) return false;
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.log(
+            ctx.orgId, ctx.taskId,
+            `capability gate blocked: "${missingReq.capability}" not configured — setup required`,
+            'gate',
+          );
+          const setupPayload: SetupRequiredPayload = {
+            capability: missingReq.capability,
+            setup_type: missingReq.setup_type,
+            setup_label: missingReq.setup_label,
+            message: missingReq.user_message,
+            integrations: missingReq.integrations,
+            setup_meta: missingReq.setup_meta,
+          };
+          await this.events.publish({
+            type: 'task.setup_required',
+            orgId: ctx.orgId,
+            taskId: ctx.taskId,
+            payload: setupPayload,
+          });
+          await this.say(ctx.orgId, ctx.taskId, missingReq.ack_message);
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'waiting_for_approval', {
+            result: { text: missingReq.user_message, model: 'capability-gate' },
+          });
+          return true;
+        }
+      },
+      {
+        name: 'long-script',
+        priority: 45,
+        risk: 'medium',
+        matches: (ctx) => ctx.tier.tier === 'long' && this.forge.isScriptTask(ctx.input),
+        handler: async (ctx) => {
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'script');
+          const outcome = await this.forge.forge(ctx.orgId, ctx.taskId, ctx.contextualInput, (message, scope) => this.log(ctx.orgId, ctx.taskId, message, scope));
+          const summary = [
+            `Generé el script **${outcome.filename}** (${outcome.language}): ${outcome.description}`,
+            outcome.skillSlug ? `Quedó registrado como skill \`${outcome.skillSlug}\` y como artifact.` : 'Quedó guardado como artifact.',
+            outcome.executed
+              ? `Lo ejecuté en un sandbox Docker (sin red) y esta fue la salida:\n\n${outcome.output || '(sin salida)'}`
+              : outcome.note ?? '',
+          ].filter(Boolean).join('\n\n');
+          await this.deliver(ctx.orgId, ctx.taskId, summary, 'script-forge', Date.now() - ctx.startedAt);
+          await this.maybeAttachMedia(ctx.orgId, ctx.taskId, ctx.input, summary);
+          await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+          return true;
+        }
+      },
+      {
+        name: 'long-agent-loop',
+        priority: 40,
+        risk: 'high',
+        matches: (ctx) => ctx.tier.tier === 'long',
+        handler: async (ctx) => {
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'agent_loop');
+          const handled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          if (handled) return true;
+          await this.log(ctx.orgId, ctx.taskId, 'agent-loop no resolvió — usando pipeline clásico', 'loop');
+          return false;
+        }
+      },
+      {
+        name: 'email-read',
+        priority: 35,
+        risk: 'low',
+        matches: (ctx) => ctx.ack.hint === 'email' || EMAIL_SIGNALS.test(ctx.input),
+        handler: async (ctx) => {
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'gmail');
+          await this.log(ctx.orgId, ctx.taskId, 'email request — querying Gmail API', 'tools');
+
+          const searchQuery = this.extractEmailSearch(ctx.input);
+          let gmailResult: GmailFetchResult;
+
+          if (searchQuery) {
+            await this.log(ctx.orgId, ctx.taskId, `Gmail search: "${searchQuery}" (recent first, fallback to all-time)`, 'tools');
+            gmailResult = await this.gmail.fetchSearchWithFallback(ctx.orgId, searchQuery);
+            if (!gmailResult.ok && gmailResult.reason === 'empty') {
+              const sender = searchQuery.startsWith('from:') ? searchQuery.replace('from:', '') : searchQuery;
+              const notFound = `📬 No encontré correos de _${sender}_ ni en los últimos 3 meses ni en tu historial.`;
+              await this.deliver(ctx.orgId, ctx.taskId, notFound, 'gmail-api', 0);
+              await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+              return true;
+            }
+          } else {
+            const limit = this.emailRequestedLimit(ctx.input);
+            await this.log(ctx.orgId, ctx.taskId, `Gmail fetchLatest limit=${limit}`, 'tools');
+            gmailResult = await this.gmail.fetchLatest(ctx.orgId, limit);
+          }
+
+          if (gmailResult.ok) {
+            await this.deliver(ctx.orgId, ctx.taskId, gmailResult.text, 'gmail-api', 0);
+            await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+            this.digester.digestAsync({ orgId: ctx.orgId, taskId: ctx.taskId, userInput: ctx.input, evaReply: gmailResult.text, conversationContext: ctx.conversationContext });
+            return true;
+          }
+
+          const reply = this.gmailErrorMessage(gmailResult.reason, gmailResult.error);
+          await this.log(ctx.orgId, ctx.taskId, `Gmail: ${gmailResult.reason} — ${gmailResult.error ?? 'no detail'}`, 'tools');
+          await this.deliver(ctx.orgId, ctx.taskId, reply, 'gmail-api', 0);
+          await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+          return true;
+        }
+      },
+      {
+        name: 'calendar-read',
+        priority: 30,
+        risk: 'low',
+        matches: (ctx) => ctx.ack.hint === 'calendar' || CALENDAR_SIGNALS_PERSONAL.test(ctx.input),
+        handler: async (ctx) => {
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'calendar');
+          await this.log(ctx.orgId, ctx.taskId, 'calendar request — querying local schedule + Google Calendar', 'tools');
+          const [localBlock, gcalBlock] = await Promise.all([
+            this.schedule.formatUpcomingForSoul(ctx.orgId, 7).catch(() => null),
+            this.calendar.formatUpcomingForSoul(ctx.orgId, 7).catch(() => null),
+          ]);
+          const agendaText = this.mergeScheduleBlocks(localBlock, gcalBlock);
+          if (agendaText) {
+            const reply = `📅 Tu agenda próxima:\n\n${agendaText}`;
+            await this.deliver(ctx.orgId, ctx.taskId, reply, 'calendar-api', 0);
+            await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+            this.digester.digestAsync({ orgId: ctx.orgId, taskId: ctx.taskId, userInput: ctx.input, evaReply: reply, conversationContext: ctx.conversationContext });
+            return true;
+          }
+          await this.log(ctx.orgId, ctx.taskId, 'No calendar events found — falling to model', 'tools');
+          return false;
+        }
+      },
+      {
+        name: 'drive-read',
+        priority: 25,
+        risk: 'low',
+        matches: (ctx) => ctx.ack.hint === 'drive' || DRIVE_SIGNALS.test(ctx.input),
+        handler: async (ctx) => {
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'drive');
+          await this.log(ctx.orgId, ctx.taskId, 'drive request — querying Google Drive API', 'tools');
+          const driveResult = await this.drive.fetchForQuery(ctx.orgId, ctx.input);
+
+          if (driveResult.ok) {
+            await this.deliver(ctx.orgId, ctx.taskId, driveResult.text, 'drive-api', 0);
+            await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+            this.digester.digestAsync({ orgId: ctx.orgId, taskId: ctx.taskId, userInput: ctx.input, evaReply: driveResult.text, conversationContext: ctx.conversationContext });
+            return true;
+          }
+
+          const reply = this.driveErrorMessage(driveResult.reason, driveResult.error);
+          await this.log(ctx.orgId, ctx.taskId, `Drive: ${driveResult.reason} — ${driveResult.error ?? 'no detail'}`, 'tools');
+          await this.deliver(ctx.orgId, ctx.taskId, reply, 'drive-api', 0);
+          await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+          return true;
+        }
+      },
+      {
+        name: 'research',
+        priority: 20,
+        risk: 'low',
+        matches: (ctx) => this.shouldUseResearch(ctx.input, ctx.routingInput, ctx.ack.hint, ctx.freshness.required),
+        handler: async (ctx) => {
+          await this.logToolRouting(ctx);
+          const directPublicApi = this.shouldUsePublicApiDirect(ctx.input, ctx.ack.hint);
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, directPublicApi ? 'api' : 'search');
+          await this.log(
+            ctx.orgId,
+            ctx.taskId,
+            directPublicApi
+              ? 'consultando API pública directa (sin planificador LLM)'
+              : 'buscando en internet con Chromium… (web-search tool)',
+            directPublicApi ? 'api' : 'web',
+          );
+          const researchInput = directPublicApi
+            ? ctx.input
+            : await this.planResearchInput(ctx.orgId, ctx.taskId, ctx.contextualInput, ctx.input);
+          const t0 = Date.now();
+          const answer = await this.research.answer(researchInput, ctx.orgId);
+          const elapsed = Date.now() - t0;
+          await this.log(ctx.orgId, ctx.taskId, `tool ${answer.tool} answered in ${elapsed}ms`, 'tools');
+          await this.deliver(ctx.orgId, ctx.taskId, answer.text, answer.tool, elapsed);
+          await this.maybeAttachMedia(ctx.orgId, ctx.taskId, ctx.input, answer.text);
+          await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+          this.digester.digestAsync({ orgId: ctx.orgId, taskId: ctx.taskId, userInput: ctx.input, evaReply: answer.text, conversationContext: ctx.conversationContext });
+          return true;
+        }
+      },
+      {
+        name: 'model-call',
+        priority: 10,
+        risk: 'low',
+        matches: () => true,
+        handler: async (ctx) => {
+          await this.logToolRouting(ctx);
+          const budget = ctx.tier.tier === 'quick' ? 'cheap' : 'balanced';
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'model');
+          await this.log(ctx.orgId, ctx.taskId, `calling model (budget=${budget}, org keys first, env fallback)…`, 'model');
+          const t0 = Date.now();
+          const result = await this.modelRouter.generate(ctx.contextualInput, {
+            orgId: ctx.orgId,
+            taskId: ctx.taskId,
+            requestType: 'response',
+            budget,
+            systemPrompt: SYSTEM_PROMPT,
+            maxTokens: ctx.tier.tier === 'long' ? 1200 : 700,
+          });
+          const elapsed = Date.now() - t0;
+          await this.log(
+            ctx.orgId, ctx.taskId,
+            `model ${result.model} (${result.backend}) answered in ${elapsed}ms — ${result.usage.totalTokens} tokens`,
+            'model',
+          );
+
+          const staleReason = this.staleModelAnswerReason(ctx.routingInput, result.text, ctx.freshness.required);
+          if (this.isUselessAnswer(result.text) || staleReason) {
+            const reason = staleReason ?? 'non-actionable';
+            await this.log(ctx.orgId, ctx.taskId, `model answer rejected as ${reason}; trying project tools`, 'model');
+            const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+            if (loopHandled) return true;
+            const recovered = await this.recoverWithTools(ctx.orgId, ctx.taskId, ctx.contextualInput, ctx.startedAt, ctx.input);
+            if (recovered) return true;
+          }
+
+          await this.deliver(ctx.orgId, ctx.taskId, result.text, result.model, elapsed);
+          await this.maybeAttachMedia(ctx.orgId, ctx.taskId, ctx.input, result.text);
+          await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+          this.digester.digestAsync({ orgId: ctx.orgId, taskId: ctx.taskId, userInput: ctx.input, evaReply: result.text, conversationContext: ctx.conversationContext });
+          return true;
+        }
+      }
+    ];
+  }
+
+  private async logToolRouting(ctx: RouteContext): Promise<void> {
+    const directPublicApi = this.shouldUsePublicApiDirect(ctx.input, ctx.ack.hint);
+    const shouldUseResearch = this.shouldUseResearch(ctx.input, ctx.routingInput, ctx.ack.hint, ctx.freshness.required);
+    const capability = directPublicApi ? 'api' : shouldUseResearch ? 'search' : 'generate';
+    try {
+      const route = this.toolRouter.route(capability);
+      await this.log(
+        ctx.orgId, ctx.taskId,
+        `tool-router: capability "${capability}" → ${route.tool.name} (score ${route.score.toFixed(3)}, ~${route.tool.avgLatencyMs}ms)`,
+        'tools',
+      );
+    } catch {
+      await this.log(ctx.orgId, ctx.taskId, `tool-router: no tool for "${capability}", going straight to the model`, 'tools');
+    }
+  }
+
   async run(orgId: string, taskId: string): Promise<void> {
     let task: Task;
     try {
@@ -424,9 +904,6 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     if (answeredInput) return;
 
     // Detect cross-channel routing intent before any other processing.
-    // "dame el clima y mándamelo por telegram" → strips the routing clause,
-    // runs normally, and the task.result payload carries the cross-channel target
-    // so CommunicationService can deliver a copy there.
     const crossChannel = this.extractCrossChannelTarget(rawInput);
     const input = crossChannel ? this.stripCrossChannelClause(rawInput) : rawInput;
     if (crossChannel) {
@@ -480,392 +957,73 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     const tier = this.applyFreshnessToTier(classifyTier(input), freshness);
     const wantsImage = this.media.wantsImage(input);
     const pureImageRequest = wantsImage && this.isPureImageRequest(input);
+    const ack = tier.tier === 'long'
+      ? { say: LONG_TASK_ACK, hint: 'background' }
+      : this.pickAck(input);
+
+    const ctx: RouteContext = {
+      orgId,
+      taskId,
+      task,
+      rawInput,
+      input,
+      crossChannel,
+      conversationContext,
+      soulContext,
+      calendarBlock,
+      patternBlock,
+      proactiveTriggers,
+      recallResult,
+      routingInput,
+      contextualInput,
+      startedAt,
+      freshness,
+      tier,
+      wantsImage,
+      pureImageRequest,
+      ack,
+    };
 
     try {
-      if (pureImageRequest) {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        await this.log(orgId, taskId, `tier=quick (${tier.reason}; media request) — image generation`, 'pipeline');
-        const url = await this.generateImageReply(orgId, taskId, input, startedAt);
-        if (url) {
-          await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
-          return;
-        }
-        throw new Error('No pude generar la imagen con los proveedores configurados. Revisa las credenciales/modelos de imagen o intenta de nuevo si el proveedor esta saturado.');
-      }
+      let inStandardPipeline = false;
 
-      // ── OTP code submission — user replied with a code after email login ──
-      if (this.isOtpSubmission(input, conversationContext)) {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        await this.handleOtpSubmission(orgId, taskId, input, startedAt, conversationContext);
-        return;
-      }
+      for (const route of this.routes) {
+        const matches = await route.matches(ctx);
+        if (matches) {
+          if (route.priority <= 45 && !inStandardPipeline) {
+            inStandardPipeline = true;
+            await this.say(orgId, taskId, ack.say);
+            await this.log(
+              orgId, taskId,
+              `tier=${tier.tier} est ~${tier.estimateSec}s (${tier.reason}) — ack "${ack.hint}" in ${Date.now() - startedAt}ms`,
+              'pipeline',
+            );
 
-      // ── Rappi email login fast-path ───────────────────────────────────────
-      if (RAPPI_SIGNALS.test(input) && RAPPI_EMAIL_LOGIN_SIGNALS.test(input)) {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        await this.say(orgId, taskId, 'Abro Rappi e ingreso tu correo para iniciar sesión.');
-        await this.handleRappiEmailLogin(orgId, taskId, input, startedAt);
-        return;
-      }
+            await this.tasks.transition(taskId, orgId, 'planning');
+            const intent = await this.intentRouter.classify(routingInput, orgId, { taskId });
+            await this.log(
+              orgId, taskId,
+              `intent=${intent.intent} (${intent.classifier}, confidence ${intent.confidence.toFixed(2)}) — ${intent.reasons.join('; ') || 'no signals'}`,
+              'intent',
+            );
 
-      // ── Uber email login fast-path ────────────────────────────────────────
-      if (UBER_EMAIL_LOGIN_SIGNALS.test(input) && !await this.isUberBrowserQuoteRequest(input, orgId, conversationContext, taskId)) {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        await this.say(orgId, taskId, 'Abro Uber e ingreso tu correo para iniciar sesión.');
-        await this.handleUberEmailLogin(orgId, taskId, input, startedAt);
-        return;
-      }
+            await this.tasks.transition(taskId, orgId, 'running');
 
-      // ── Google manual login fast-path (when automatic is blocked) ─────────
-      if (GOOGLE_BLOCKED_LOGIN_SIGNALS.test(input)) {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        await this.handleGoogleManualLogin(orgId, taskId, startedAt);
-        return;
-      }
+            // Sensitive orders stop at the approval gate — never auto-executed.
+            if (intent.intent === 'core_path_approval') {
+              await this.tasks.transition(taskId, orgId, 'waiting_for_approval');
+              await this.say(orgId, taskId, 'Necesito tu aprobación para continuar — revisa la bandeja de Approvals 🛡️');
+              await this.log(orgId, taskId, 'parked at approval gate (L2 action)', 'approval');
+              return;
+            }
+          }
 
-      // ── Uber Web quote fast-path — browser profile, screenshot, no ride order ──
-      if (await this.isUberBrowserQuoteRequest(input, orgId, conversationContext, taskId)) {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        await this.say(orgId, taskId, 'Abro Uber Web solo para cotizar y te mando screenshot antes de cualquier acción.');
-        await this.log(orgId, taskId, 'uber quote request — opening Uber Web profile (quote-only)', 'tools');
-        this.updateActiveToolSession(orgId, task.created_by, 'uber');
-        await this.handleUberQuoteRequest(orgId, taskId, input, startedAt, conversationContext);
-        return;
-      }
-
-      // ── WhatsApp Web fast-path — browser profile + QR handoff ─────────────
-      // Runs before chat triage so short prompts like "abre watsap" never fall
-      // into a generic model answer.
-      const isWhatsAppContext = this.checkActiveToolContext(orgId, task.created_by, 'whatsapp');
-      if (
-        WHATSAPP_SIGNALS.test(input) ||
-        this.isImplicitWhatsAppScreenshotRequest(input, conversationContext) ||
-        (isWhatsAppContext && this.isWhatsAppFollowUp(input, conversationContext))
-      ) {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        await this.say(orgId, taskId, 'Abro WhatsApp Web con tu perfil local. Si falta login, te paso el QR.');
-        await this.log(orgId, taskId, 'whatsapp request — opening WhatsApp Web profile', 'tools');
-        await this.handleWhatsAppRequest(orgId, taskId, task, input, startedAt, conversationContext);
-        return;
-      }
-
-      // ── Scheduled jobs — create / list / manage recurring tasks ───────────
-      if (this.isScheduleIntent(input)) {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        await this.handleScheduleIntent(orgId, taskId, task, input, startedAt);
-        return;
-      }
-
-      // ── Gmail / Calendar write operations — require human approval ─────────
-      // Must run BEFORE the email read fast-path to avoid treating writes as reads.
-      if (this.isGmailWriteIntent(input) || this.isCalendarWriteIntent(input)) {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        if (BULK_GUARD_SIGNALS.test(input)) {
-          await this.deliver(orgId, taskId,
-            '🚫 No ejecuto operaciones masivas sobre correos ni eventos. Indícame exactamente el correo o evento específico y te pido confirmación antes de cualquier cambio.',
-            'safety', Date.now() - startedAt);
-          return;
-        }
-        if (this.isGmailWriteIntent(input)) {
-          await this.say(orgId, taskId, 'Preparo la operación y te pido confirmación antes de ejecutarla 🛡️');
-          this.updateActiveToolSession(orgId, task.created_by, 'gmail');
-          await this.handleGmailWriteIntent(orgId, taskId, task, input, startedAt);
-        } else {
-          await this.say(orgId, taskId, 'Preparo el cambio en tu agenda y te pido confirmación 🗓️');
-          this.updateActiveToolSession(orgId, task.created_by, 'calendar');
-          await this.handleCalendarWriteIntent(orgId, taskId, task, input, startedAt);
-        }
-        return;
-      }
-
-      // ── Tier: chat — straight to the model, no pipeline overhead ──
-      if (tier.tier === 'chat') {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        await this.log(orgId, taskId, `tier=chat (${tier.reason}) — direct model, cheap tier`, 'pipeline');
-        this.updateActiveToolSession(orgId, task.created_by, 'chat');
-        if (this.isPersonalProfileQuestion(input)) {
-          const handled = await this.answerPersonalProfileQuestion(orgId, taskId, input, startedAt);
-          if (handled) return;
-        }
-        const t0 = Date.now();
-        // Contexto slim: el bloque completo (agenda, patrones, metas) cuesta
-        // ~1.3k tokens por mensaje y un saludo no lo necesita.
-        const chatInput = this.buildChatContextualInput(
-          input, conversationContext, soulContext,
-          proactiveTriggers.map(t => t.message), recallResult.context,
-        );
-        const reply = await this.modelRouter.generate(chatInput, {
-          orgId,
-          taskId,
-          requestType: 'response',
-          budget: 'cheap',
-          maxTokens: 300,
-          systemPrompt: CHAT_PROMPT,
-        });
-        await this.deliver(orgId, taskId, reply.text, reply.model, Date.now() - t0);
-        await this.log(orgId, taskId, `chat answered in ${Date.now() - startedAt}ms`, 'pipeline');
-        return;
-      }
-
-      // ── Capability gate — must run before the ACK so we never promise ──
-      // ── something EVA can't actually do yet. ──────────────────────────
-      const missingReq = await this.capabilityGate.firstMissingRequirement(input, orgId);
-      if (missingReq) {
-        await this.tasks.transition(taskId, orgId, 'planning');
-        await this.tasks.transition(taskId, orgId, 'running');
-        await this.log(
-          orgId, taskId,
-          `capability gate blocked: "${missingReq.capability}" not configured — setup required`,
-          'gate',
-        );
-        const setupPayload: SetupRequiredPayload = {
-          capability: missingReq.capability,
-          setup_type: missingReq.setup_type,
-          setup_label: missingReq.setup_label,
-          message: missingReq.user_message,
-          integrations: missingReq.integrations,
-          setup_meta: missingReq.setup_meta,
-        };
-        await this.events.publish({
-          type: 'task.setup_required',
-          orgId,
-          taskId,
-          payload: setupPayload,
-        });
-        await this.say(orgId, taskId, missingReq.ack_message);
-        await this.tasks.transition(taskId, orgId, 'waiting_for_approval', {
-          result: { text: missingReq.user_message, model: 'capability-gate' },
-        });
-        return;
-      }
-
-      // ── Tier: quick (<1 min) — short "espera" + do it ──
-      // ── Tier: long (>1 min) — background notice, chat stays free ──
-      // Always pick ack from raw input — routingInput includes conversation history
-      // which can contaminate the hint (e.g., prior "correo" turn misfiring as email).
-      const ack = tier.tier === 'long'
-        ? { say: LONG_TASK_ACK, hint: 'background' }
-        : this.pickAck(input);
-      await this.say(orgId, taskId, ack.say);
-      await this.log(
-        orgId, taskId,
-        `tier=${tier.tier} est ~${tier.estimateSec}s (${tier.reason}) — ack "${ack.hint}" in ${Date.now() - startedAt}ms`,
-        'pipeline',
-      );
-
-      await this.tasks.transition(taskId, orgId, 'planning');
-      const intent = await this.intentRouter.classify(routingInput, orgId, { taskId });
-      await this.log(
-        orgId, taskId,
-        `intent=${intent.intent} (${intent.classifier}, confidence ${intent.confidence.toFixed(2)}) — ${intent.reasons.join('; ') || 'no signals'}`,
-        'intent',
-      );
-
-      await this.tasks.transition(taskId, orgId, 'running');
-
-      // Sensitive orders stop at the approval gate — never auto-executed.
-      if (intent.intent === 'core_path_approval') {
-        await this.tasks.transition(taskId, orgId, 'waiting_for_approval');
-        await this.say(orgId, taskId, 'Necesito tu aprobación para continuar — revisa la bandeja de Approvals 🛡️');
-        await this.log(orgId, taskId, 'parked at approval gate (L2 action)', 'approval');
-        return;
-      }
-
-      // Long + code/automation → EVA writes and sandboxes her own script
-      if (tier.tier === 'long' && this.forge.isScriptTask(input)) {
-        this.updateActiveToolSession(orgId, task.created_by, 'script');
-        const outcome = await this.forge.forge(orgId, taskId, contextualInput, (message, scope) => this.log(orgId, taskId, message, scope));
-        const summary = [
-          `Generé el script **${outcome.filename}** (${outcome.language}): ${outcome.description}`,
-          outcome.skillSlug ? `Quedó registrado como skill \`${outcome.skillSlug}\` y como artifact.` : 'Quedó guardado como artifact.',
-          outcome.executed
-            ? `Lo ejecuté en un sandbox Docker (sin red) y esta fue la salida:\n\n${outcome.output || '(sin salida)'}`
-            : outcome.note ?? '',
-        ].filter(Boolean).join('\n\n');
-        await this.deliver(orgId, taskId, summary, 'script-forge', Date.now() - startedAt);
-        await this.maybeAttachMedia(orgId, taskId, input, summary);
-        await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
-        return;
-      }
-
-      // ── Long sin script → bucle agéntico (estilo agent-zero) ─────────────
-      // El modelo itera herramientas (web/gmail/calendar/drive/memoria/forge,
-      // delegación a sub-agente) hasta resolver. Si el bucle no puede
-      // (sin keys, sin decisiones válidas), cae al pipeline clásico.
-      if (tier.tier === 'long') {
-        this.updateActiveToolSession(orgId, task.created_by, 'agent_loop');
-        const handled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt, task.created_by, soulContext);
-        if (handled) return;
-        await this.log(orgId, taskId, 'agent-loop no resolvió — usando pipeline clásico', 'loop');
-      }
-
-      // ── Email fast-path — use Gmail API when configured ───────────────────
-      // NOTE: always test raw `input`, never routingInput — routingInput
-      // includes conversation history that may contain "correo" from prior turns.
-      if (ack.hint === 'email' || EMAIL_SIGNALS.test(input)) {
-        this.updateActiveToolSession(orgId, task.created_by, 'gmail');
-        await this.log(orgId, taskId, 'email request — querying Gmail API', 'tools');
-
-        const searchQuery = this.extractEmailSearch(input);
-        let gmailResult: GmailFetchResult;
-
-        if (searchQuery) {
-          await this.log(orgId, taskId, `Gmail search: "${searchQuery}" (recent first, fallback to all-time)`, 'tools');
-          gmailResult = await this.gmail.fetchSearchWithFallback(orgId, searchQuery);
-          // Empty across both stages → clear message, don't fall to model
-          if (!gmailResult.ok && gmailResult.reason === 'empty') {
-            const sender = searchQuery.startsWith('from:') ? searchQuery.replace('from:', '') : searchQuery;
-            const notFound = `📬 No encontré correos de _${sender}_ ni en los últimos 3 meses ni en tu historial.`;
-            await this.deliver(orgId, taskId, notFound, 'gmail-api', 0);
-            await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
+          const handled = await route.handler(ctx);
+          if (handled !== false) {
             return;
           }
-        } else {
-          const limit = this.emailRequestedLimit(input);
-          await this.log(orgId, taskId, `Gmail fetchLatest limit=${limit}`, 'tools');
-          gmailResult = await this.gmail.fetchLatest(orgId, limit);
         }
-
-        if (gmailResult.ok) {
-          await this.deliver(orgId, taskId, gmailResult.text, 'gmail-api', 0);
-          await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
-          this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: gmailResult.text, conversationContext });
-          return;
-        }
-
-        // Always answer directly — never fall to model or recovery for email
-        const reply = this.gmailErrorMessage(gmailResult.reason, gmailResult.error);
-        await this.log(orgId, taskId, `Gmail: ${gmailResult.reason} — ${gmailResult.error ?? 'no detail'}`, 'tools');
-        await this.deliver(orgId, taskId, reply, 'gmail-api', 0);
-        await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
-        return;
       }
-
-      // ── Calendar fast-path — use local schedule + GCal when configured ────
-      if (ack.hint === 'calendar' || CALENDAR_SIGNALS_PERSONAL.test(input)) {
-        this.updateActiveToolSession(orgId, task.created_by, 'calendar');
-        await this.log(orgId, taskId, 'calendar request — querying local schedule + Google Calendar', 'tools');
-        const [localBlock, gcalBlock] = await Promise.all([
-          this.schedule.formatUpcomingForSoul(orgId, 7).catch(() => null),
-          this.calendar.formatUpcomingForSoul(orgId, 7).catch(() => null),
-        ]);
-        const agendaText = this.mergeScheduleBlocks(localBlock, gcalBlock);
-        if (agendaText) {
-          const reply = `📅 Tu agenda próxima:\n\n${agendaText}`;
-          await this.deliver(orgId, taskId, reply, 'calendar-api', 0);
-          await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
-          this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: reply, conversationContext });
-          return;
-        }
-        await this.log(orgId, taskId, 'No calendar events found — falling to model', 'tools');
-      }
-
-      // ── Drive fast-path — use Drive API when configured ───────────────────
-      // NOTE: always test raw `input`, never routingInput — history contamination.
-      if (ack.hint === 'drive' || DRIVE_SIGNALS.test(input)) {
-        this.updateActiveToolSession(orgId, task.created_by, 'drive');
-        await this.log(orgId, taskId, 'drive request — querying Google Drive API', 'tools');
-        const driveResult = await this.drive.fetchForQuery(orgId, input);
-
-        if (driveResult.ok) {
-          await this.deliver(orgId, taskId, driveResult.text, 'drive-api', 0);
-          await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
-          this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: driveResult.text, conversationContext });
-          return;
-        }
-
-        // Always answer directly — never fall to model or recovery for Drive requests
-        const reply = this.driveErrorMessage(driveResult.reason, driveResult.error);
-        await this.log(orgId, taskId, `Drive: ${driveResult.reason} — ${driveResult.error ?? 'no detail'}`, 'tools');
-        await this.deliver(orgId, taskId, reply, 'drive-api', 0);
-        await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
-        return;
-      }
-
-      // Tool routing (transparent dry-run of what executes this)
-      const shouldUseResearch = this.shouldUseResearch(input, routingInput, ack.hint, freshness.required);
-      const directPublicApi = this.shouldUsePublicApiDirect(input, ack.hint);
-      const capability = directPublicApi ? 'api' : shouldUseResearch ? 'search' : 'generate';
-      try {
-        const route = this.toolRouter.route(capability);
-        await this.log(
-          orgId, taskId,
-          `tool-router: capability "${capability}" → ${route.tool.name} (score ${route.score.toFixed(3)}, ~${route.tool.avgLatencyMs}ms)`,
-          'tools',
-        );
-      } catch {
-        await this.log(orgId, taskId, `tool-router: no tool for "${capability}", going straight to the model`, 'tools');
-      }
-
-      if (shouldUseResearch) {
-        this.updateActiveToolSession(orgId, task.created_by, directPublicApi ? 'api' : 'search');
-        await this.log(
-          orgId,
-          taskId,
-          directPublicApi
-            ? 'consultando API pública directa (sin planificador LLM)'
-            : 'buscando en internet con Chromium… (web-search tool)',
-          directPublicApi ? 'api' : 'web',
-        );
-        const researchInput = directPublicApi
-          ? input
-          : await this.planResearchInput(orgId, taskId, contextualInput, input);
-        const t0 = Date.now();
-        const answer = await this.research.answer(researchInput, orgId);
-        const elapsed = Date.now() - t0;
-        await this.log(orgId, taskId, `tool ${answer.tool} answered in ${elapsed}ms`, 'tools');
-        await this.deliver(orgId, taskId, answer.text, answer.tool, elapsed);
-        await this.maybeAttachMedia(orgId, taskId, input, answer.text);
-        await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
-        this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: answer.text, conversationContext });
-        return;
-      }
-
-      // Model call — quick rides the cheap tier for speed
-      const budget = tier.tier === 'quick' ? 'cheap' : 'balanced';
-      this.updateActiveToolSession(orgId, task.created_by, 'model');
-      await this.log(orgId, taskId, `calling model (budget=${budget}, org keys first, env fallback)…`, 'model');
-      const t0 = Date.now();
-      const result = await this.modelRouter.generate(contextualInput, {
-        orgId,
-        taskId,
-        requestType: 'response',
-        budget,
-        systemPrompt: SYSTEM_PROMPT,
-        maxTokens: tier.tier === 'long' ? 1200 : 700,
-      });
-      const elapsed = Date.now() - t0;
-      await this.log(
-        orgId, taskId,
-        `model ${result.model} (${result.backend}) answered in ${elapsed}ms — ${result.usage.totalTokens} tokens`,
-        'model',
-      );
-
-      const staleReason = this.staleModelAnswerReason(routingInput, result.text, freshness.required);
-      if (this.isUselessAnswer(result.text) || staleReason) {
-        const reason = staleReason ?? 'non-actionable';
-        await this.log(orgId, taskId, `model answer rejected as ${reason}; trying project tools`, 'model');
-        // El bucle agéntico tiene más herramientas e itera; es la primera opción.
-        const loopHandled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt, task.created_by, soulContext);
-        if (loopHandled) return;
-        const recovered = await this.recoverWithTools(orgId, taskId, contextualInput, startedAt, input);
-        if (recovered) return;
-      }
-
-      await this.deliver(orgId, taskId, result.text, result.model, elapsed);
-      await this.maybeAttachMedia(orgId, taskId, input, result.text);
-      await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
-      this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: result.text, conversationContext });
     } catch (error) {
       if (error instanceof TaskCancelledError) {
         await this.log(orgId, taskId, 'Ejecución abortada: la tarea fue cancelada por el usuario.', 'pipeline');

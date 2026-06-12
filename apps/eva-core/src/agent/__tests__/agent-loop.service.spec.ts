@@ -15,6 +15,10 @@ import { ScriptForgeService } from '../script-forge.service';
 import { SkillLibraryService } from '../skill-library.service';
 import { TelegramAdapter } from '../../communication/telegram.adapter';
 import { AgentTrajectoryService } from '../agent-trajectory.service';
+import { WhatsAppWebService } from '../../integrations/whatsapp-web.service';
+import { UberWebService } from '../../integrations/uber-web.service';
+import { RappiWebService } from '../../integrations/rappi-web.service';
+import { ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -54,6 +58,10 @@ describe('AgentLoopService', () => {
   let drive: jest.Mocked<GoogleDriveService>;
   let telegram: jest.Mocked<TelegramAdapter>;
   let trajectories: jest.Mocked<AgentTrajectoryService>;
+  let whatsapp: jest.Mocked<WhatsAppWebService>;
+  let uber: jest.Mocked<UberWebService>;
+  let rappi: jest.Mocked<RappiWebService>;
+  let scheduledJobs: jest.Mocked<ScheduledJobsService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -162,6 +170,39 @@ describe('AgentLoopService', () => {
           provide: IntegrationsService,
           useValue: { list: jest.fn().mockResolvedValue([]), getSecret: jest.fn().mockResolvedValue(null) },
         },
+        {
+          provide: WhatsAppWebService,
+          useValue: {
+            startSession: jest.fn().mockResolvedValue({ session_id: 'browser-session-1', state: 'logged_in' }),
+            fetchLatestMessage: jest.fn().mockResolvedValue({ ok: true, text: 'WhatsApp message' }),
+            fetchUnreadMessages: jest.fn().mockResolvedValue({ ok: true, text: 'WhatsApp messages' }),
+            fetchUnansweredMessages: jest.fn().mockResolvedValue({ ok: true, text: 'WhatsApp messages' }),
+            fetchContactMessages: jest.fn().mockResolvedValue({ ok: true, text: 'WhatsApp messages' }),
+          },
+        },
+        {
+          provide: UberWebService,
+          useValue: {
+            estimateRide: jest.fn().mockResolvedValue({ ok: true, text: 'Uber quote' }),
+            startEmailLogin: jest.fn().mockResolvedValue({ ok: true, text: 'Uber login' }),
+          },
+        },
+        {
+          provide: RappiWebService,
+          useValue: {
+            startEmailLogin: jest.fn().mockResolvedValue({ ok: true, text: 'Rappi login' }),
+          },
+        },
+        {
+          provide: ScheduledJobsService,
+          useValue: {
+            create: jest.fn().mockResolvedValue({ id: 'job-1', cron_expr: '0 7 * * *' }),
+            list: jest.fn().mockResolvedValue([]),
+            pause: jest.fn().mockResolvedValue({ id: 'job-1' }),
+            resume: jest.fn().mockResolvedValue({ id: 'job-1' }),
+            delete: jest.fn().mockResolvedValue(undefined),
+          },
+        },
       ],
     }).compile();
 
@@ -177,6 +218,10 @@ describe('AgentLoopService', () => {
     drive = module.get(GoogleDriveService);
     telegram = module.get(TelegramAdapter);
     trajectories = module.get(AgentTrajectoryService);
+    whatsapp = module.get(WhatsAppWebService);
+    uber = module.get(UberWebService);
+    rappi = module.get(RappiWebService);
+    scheduledJobs = module.get(ScheduledJobsService);
   });
 
   it('returns the final answer when the model answers directly', async () => {
@@ -942,6 +987,28 @@ describe('AgentLoopService', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('generates DoD criteria for long tasks and audits final_answer against them', async () => {
+    modelRouter.generate
+      // 1. DoD criteria generation
+      .mockResolvedValueOnce(modelReply('{"criteria": ["el archivo de salida existe"]}'))
+      // 2. Step 1: Tool call
+      .mockResolvedValueOnce(modelReply('{"thought":"busco","tool":"web_search","args":{"query":"clima"}}'))
+      // 3. Step 2: final_answer
+      .mockResolvedValueOnce(modelReply('{"thought":"termine","tool":"final_answer","args":{"text":"Procesado."}}'))
+      // 4. DoD audit verification
+      .mockResolvedValueOnce(modelReply('El archivo de salida no existe en el workspace.'));
+
+    const result = await service.run(ORG, TASK, 'un objetivo largo', {
+      maxSteps: 6,
+      forceDodCriteria: true,
+    });
+
+    const dodStep = result.steps.find((s) => s.observation.includes('VERIFICACIÓN FALLIDA'));
+    expect(dodStep).toBeDefined();
+    expect(dodStep!.observation).toContain('Criterios no satisfechos según auditoría de calidad');
+    expect(dodStep!.observation).toContain('El archivo de salida no existe');
+  });
+
   // ── image_analyze tool ─────────────────────────────────────────────────────
 
   describe('image_analyze tool', () => {
@@ -1020,6 +1087,67 @@ describe('AgentLoopService', () => {
 
       await fs.rm(testFile, { force: true }).catch(() => undefined);
       fromSpy.mockRestore();
+    });
+
+    it('blocks execution when arguments do not match Zod schema and returns validation error as observation', async () => {
+      modelRouter.generate
+        .mockResolvedValueOnce(modelReply('{"thought":"buscar vacio","tool":"web_search","args":{"query":""}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"Falló por validación."}}'));
+
+      const result = await service.run(ORG, TASK, 'busca nada');
+
+      expect(result.steps[0].observation).toContain('ERROR: Argumentos inválidos. Detalles: query:');
+      expect(result.ok).toBe(true);
+    });
+
+    it('supports parallel delegation and blackboard propagation', async () => {
+      modelRouter.generate
+        .mockResolvedValueOnce({
+          ...modelReply('', 50),
+          toolCalls: [
+            { id: 'tc_1', name: 'delegate', input: { goal: 'busca ventas', role: 'investigador' } },
+            { id: 'tc_2', name: 'delegate', input: { goal: 'busca stock', role: 'investigador' } },
+          ],
+          stopReason: 'tool_use' as const,
+        })
+        .mockResolvedValueOnce(modelReply('{"thought":"sub1","tool":"final_answer","args":{"text":"Ventas: 100"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"sub2","tool":"final_answer","args":{"text":"Stock: 50"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"root_fin","tool":"final_answer","args":{"text":"Ventas 100 y Stock 50"}}'));
+
+      const blackboard: Record<string, string> = {};
+      const result = await service.run(ORG, TASK, 'obten estado de ventas y stock', { blackboard });
+      expect(result.ok).toBe(true);
+      expect(result.text).toBe('Ventas 100 y Stock 50');
+      expect(blackboard['investigador: busca ventas']).toBe('Ventas: 100');
+      expect(blackboard['investigador: busca stock']).toBe('Stock: 50');
+
+      const lastPrompt = modelRouter.generate.mock.calls[3][0] as string;
+      expect(lastPrompt).toContain('PIZARRÓN DE TRABAJO (BLACKBOARD):');
+      expect(lastPrompt).toContain('- Sub-tarea [investigador: busca ventas]: Ventas: 100');
+      expect(lastPrompt).toContain('- Sub-tarea [investigador: busca stock]: Stock: 50');
+    });
+
+    it('applies semantic history compression for older turns', async () => {
+      modelRouter.generate
+        .mockResolvedValueOnce(modelReply('{"thought":"buscar 1","tool":"web_search","args":{"query":"ventas"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"buscar 2","tool":"web_search","args":{"query":"stock"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"buscar 3","tool":"web_search","args":{"query":"precios"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"fin","tool":"final_answer","args":{"text":"Todo listo."}}'));
+
+      research.answer
+        .mockResolvedValueOnce({ text: 'Linea1\nLinea2\nLinea3\nLinea4', tool: 'api', sources: [] })
+        .mockRejectedValueOnce(new Error('API caída'))
+        .mockResolvedValueOnce({ text: 'Precios estables', tool: 'api', sources: [] });
+
+      await service.run(ORG, TASK, 'resumen ejecutivo', { maxSteps: 4 });
+
+      const finalPrompt = modelRouter.generate.mock.calls[3][0] as string;
+      
+      expect(finalPrompt).toContain('[Paso previo resumido] web_search');
+      expect(finalPrompt).toContain('Linea1 ... Linea4 (4 líneas)');
+      expect(finalPrompt).toContain('ERROR: API caída');
+      expect(finalPrompt).toContain('Precios estables');
+      expect(finalPrompt).not.toContain('[Paso previo resumido] web_search({"query":"precios"})');
     });
   });
 });

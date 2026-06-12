@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 20:03Z
+C: Refactored EVA Agentic Platform: declarative router, unified loop tools with Zod schemas, DoD acceptance criteria, editable approvals, parallel sub-agents with blackboard, semantic history compression, memory similarity clustering, and dashboard autonomy boundaries + telemetry metrics; files=agent-loop.service.ts, agent-intelligence.service.ts, agent-runner.service.ts, approvals.service.ts, approval-classifier.service.ts, sidebar.tsx, page.tsx, agent-client.tsx, dashboard-view-cache.tsx; tests=npm test in apps/eva-core, npm test in apps/eva-dashboard
+P: pending/improve -> Verify next dashboard integration under real organization traffic, audit RLS logs for memory consolidator batch runs
+
 ### 2026-06-12 19:37Z
 C: agent intelligence: implemented remaining roadmap flywheels (plan state, ask_user resume/timeout, replay, skill embeddings/dedupe, safety limits, security gate, memory/self-improvement/heartbeat tick); files=apps/eva-core/src/agent/agent-intelligence.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/skill-library.service.ts,supabase/migrations/029_agent_intelligence_flywheels.sql,supabase/migrations/014_rls_policies.sql; tests=cd apps/eva-core && npm run eval:agent && npm test -- --runInBand && npm run lint && npm run build
 P: pending/improve -> move AgentIntelligenceService in-process autonomy tick to explicit scheduled_jobs rows for easier dashboard inspection and operational control

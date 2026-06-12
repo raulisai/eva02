@@ -40,6 +40,22 @@ const LEVEL_1 = [
 @Injectable()
 export class ApprovalClassifierService {
   classify(actionType: string, payload: Record<string, unknown>): 0 | 1 | 2 | 3 {
+    // 1. Direct effect-based calculations first
+    const amount = Number(payload.amount ?? payload.price ?? payload.total ?? payload.cost ?? 0);
+    if (amount > 10000) return 3;
+    if (amount > 1000) return 2;
+
+    const recipients = payload.to ?? payload.recipients ?? payload.contacts;
+    if (Array.isArray(recipients)) {
+      if (recipients.length > 20) return 3;
+      if (recipients.length > 5) return 2;
+    } else if (typeof recipients === 'string') {
+      const count = recipients.split(',').map((s) => s.trim()).filter(Boolean).length;
+      if (count > 20) return 3;
+      if (count > 5) return 2;
+    }
+
+    // 2. Fall back to regex classification
     const haystack = `${actionType} ${JSON.stringify(payload)}`;
     if (LEVEL_3.some((pattern) => pattern.test(haystack))) return 3;
     if (LEVEL_2.some((pattern) => pattern.test(haystack))) return 2;

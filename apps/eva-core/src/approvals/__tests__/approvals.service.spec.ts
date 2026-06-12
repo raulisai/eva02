@@ -167,4 +167,37 @@ describe('ApprovalsService', () => {
     repo.findByIdOrThrow.mockResolvedValue(makeApproval({ status: 'approved' }));
     await expect(service.reject(APPROVAL, ORG, USER_A)).rejects.toThrow(BadRequestException);
   });
+
+  it('supports editable approvals: updates payload and recomputes action_hash', async () => {
+    const pending = makeApproval({ level: 1 });
+    repo.findByIdOrThrow.mockResolvedValueOnce(pending);
+    repo.update.mockImplementationOnce((id, org, update) => Promise.resolve({
+      ...pending,
+      ...update,
+    }) as any);
+
+    const updatedPayload = { amount: 50, currency: 'USD' };
+    const res = await service.approve(APPROVAL, ORG, USER_A, updatedPayload);
+
+    expect(res.completed).toBe(true);
+    expect(res.approval.payload).toEqual(updatedPayload);
+    expect(res.approval.action_hash).not.toBe(pending.action_hash);
+  });
+
+  it('escalates level and requires Level 3 multi-approver workflow if updatedPayload increases risk', async () => {
+    const pending = makeApproval({ level: 1, action_type: 'payment.charge', payload: { amount: 10 } });
+    repo.findByIdOrThrow.mockResolvedValueOnce(pending);
+    repo.update.mockImplementationOnce((id, org, update) => Promise.resolve({
+      ...pending,
+      ...update,
+    }) as any);
+
+    // Escalates from amount=10 (level 1) to amount=25000 (level 3)
+    const escalatedPayload = { amount: 25000 };
+    const res = await service.approve(APPROVAL, ORG, USER_A, escalatedPayload);
+
+    expect(res.completed).toBe(false); // level 3 needs 2 approvers
+    expect(res.approval.level).toBe(3);
+    expect(res.approval.payload).toEqual(escalatedPayload);
+  });
 });

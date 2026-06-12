@@ -21,6 +21,11 @@ import { TelegramAdapter } from '../communication/telegram.adapter';
 import { AgentProfile, DELEGATE_ROLE_CATALOG, resolveAgentProfile } from './agent-profiles';
 import { AgentTrajectoryService, ModelBudgetStep } from './agent-trajectory.service';
 import { AgentIntelligenceService, AgentPlanItem } from './agent-intelligence.service';
+import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
+import { UberWebService } from '../integrations/uber-web.service';
+import { RappiWebService } from '../integrations/rappi-web.service';
+import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
+import { z } from 'zod';
 
 
 /** One executed cycle of the loop: what the model decided + what the tool observed. */
@@ -55,6 +60,8 @@ export interface AgentLoopOptions {
   userId?: string;
   /** Step-by-step transparency log, same shape agent-runner uses everywhere. */
   log?: (message: string, scope: string) => Promise<unknown>;
+  forceDodCriteria?: boolean;
+  blackboard?: Record<string, string>;
 }
 
 type ToolExecutor = (orgId: string, taskId: string, args: Record<string, unknown>) => Promise<string>;
@@ -67,6 +74,7 @@ interface ToolSpec {
   /** JSON Schema for native tool-use (Claude tool_use / OpenAI function calling). */
   inputSchema: Record<string, unknown>;
   execute: ToolExecutor;
+  zodSchema?: z.ZodSchema;
   /** Tools hidden from delegated sub-agents (depth ≥ 1). */
   rootOnly?: boolean;
 }
@@ -104,6 +112,15 @@ const HONEST_FAILURE_RE = /\b(no se pudo|no pude|no fue posible|bloqueado|error|
 /** Herramientas de solo lectura que se pueden ejecutar en paralelo sin carreras sobre /work. */
 const PARALLEL_READ_ONLY_TOOLS = new Set(['web_search', 'gmail_read', 'calendar_read', 'drive_read', 'memory_recall', 'sandbox_ls']);
 
+const isParallelizable = (toolName: string, args: Record<string, unknown>): boolean => {
+  if (PARALLEL_READ_ONLY_TOOLS.has(toolName)) return true;
+  if (toolName === 'delegate') {
+    const role = String(args.role ?? '').trim().toLowerCase();
+    return role === 'investigador' || role === 'planeador';
+  }
+  return false;
+};
+
 /**
  * AgentLoopService — bucle agéntico genérico (estilo agent-zero):
  * el modelo ve el objetivo + catálogo de herramientas, decide UNA acción por
@@ -132,6 +149,10 @@ export class AgentLoopService {
     private readonly forge: ScriptForgeService,
     private readonly sandbox: SandboxService,
     private readonly skillLibrary: SkillLibraryService,
+    private readonly whatsapp: WhatsAppWebService,
+    private readonly uber: UberWebService,
+    private readonly rappi: RappiWebService,
+    private readonly scheduledJobs: ScheduledJobsService,
     @Optional() private readonly approvals?: ApprovalsService,
     @Optional() private readonly integrations?: IntegrationsService,
     @Optional() private readonly events?: EventBusService,
@@ -140,9 +161,13 @@ export class AgentLoopService {
     @Optional() private readonly intelligence?: AgentIntelligenceService,
   ) {
     this.tools = this.buildToolCatalog();
+    this.attachZodSchemas();
   }
 
   async run(orgId: string, taskId: string, goal: string, opts: AgentLoopOptions = {}): Promise<AgentLoopOutcome> {
+    if (!opts.blackboard) {
+      opts.blackboard = {};
+    }
     const depth = Math.min(Math.max(opts.depth ?? 0, 0), MAX_DEPTH);
     const profile = depth > 0 ? resolveAgentProfile(opts.role) : null;
     const defaultSteps = depth === 0 ? DEFAULT_ROOT_STEPS : profile?.maxSteps ?? DEFAULT_SUB_STEPS;
@@ -174,6 +199,30 @@ export class AgentLoopService {
     const dynamicContext = [opts.context, replayContext, inputContext].filter(Boolean).join('\n\n') || undefined;
     if (depth === 0 && maxSteps >= DEFAULT_ROOT_STEPS && this.intelligence) {
       plan = await this.intelligence.createInitialPlan(orgId, taskId, goal);
+    }
+
+    let dodCriteria: string[] = [];
+    const shouldGenDod = (depth === 0 && maxSteps >= DEFAULT_ROOT_STEPS) &&
+      (process.env.NODE_ENV !== 'test' || opts.forceDodCriteria === true);
+    if (shouldGenDod) {
+      try {
+        const dodGenRes = await this.modelRouter.generate(
+          `Meta: "${goal}"\n\nGenera de 2 a 4 criterios de aceptación concretos para verificar el éxito. Responde SOLO en formato JSON: {"criteria": ["criterio 1", "criterio 2"]}`,
+          {
+            orgId,
+            taskId,
+            budget: 'cheap',
+            systemPrompt: 'Eres EVA. Genera criterios de aceptación técnicos y verificables para la meta en formato JSON.',
+          }
+        );
+        const parsed = JSON.parse(dodGenRes.text.trim());
+        if (parsed && Array.isArray(parsed.criteria)) {
+          dodCriteria = parsed.criteria.map((c: any) => String(c));
+          await log(`agent-loop: DoD Criterios generados: [${dodCriteria.join(' | ')}]`, 'loop');
+        }
+      } catch (err) {
+        this.logger.debug(`Failed to generate DoD criteria: ${(err as Error).message}`);
+      }
     }
 
     await log(`agent-loop${depth > 0 ? ` (sub-agente d${depth})` : ''}: objetivo "${goal.slice(0, 120)}" — máx ${maxSteps} pasos`, 'loop');
@@ -214,7 +263,7 @@ export class AgentLoopService {
       let res: GenerateResult | undefined = undefined;
       try {
         res = await this.modelRouter.generate(
-          this.buildUserPrompt(goal, dynamicContext, steps, maxSteps - i, formatHint, plan),
+          this.buildUserPrompt(goal, dynamicContext, steps, maxSteps - i, formatHint, plan, opts.blackboard),
           {
             orgId,
             taskId,
@@ -240,7 +289,7 @@ export class AgentLoopService {
             tool: tc.name,
             args: tc.input,
           }));
-          if (nativeDecisions.length > 1 && nativeDecisions.every((d) => PARALLEL_READ_ONLY_TOOLS.has(d.tool))) {
+          if (nativeDecisions.length > 1 && nativeDecisions.every((d) => isParallelizable(d.tool, d.args))) {
             parallelDecisions = nativeDecisions;
             decision = nativeDecisions[0];
           } else {
@@ -279,7 +328,7 @@ export class AgentLoopService {
         }
 
         const dodViolation = dodRejections < MAX_DOD_REJECTIONS && depth === 0
-          ? this.validateFinalAnswer(text, steps)
+          ? await this.validateFinalAnswer(text, steps, dodCriteria, orgId, taskId)
           : null;
 
         if (dodViolation) {
@@ -383,7 +432,7 @@ export class AgentLoopService {
       if (parallelDecisions.length > 1) {
         const runnable = parallelDecisions
           .map((d) => ({ decision: d, spec: available.find((t) => t.name === d.tool) }))
-          .filter((item): item is { decision: AgentDecision; spec: ToolSpec } => !!item.spec && PARALLEL_READ_ONLY_TOOLS.has(item.spec.name));
+          .filter((item): item is { decision: AgentDecision; spec: ToolSpec } => !!item.spec && isParallelizable(item.spec.name, item.decision.args));
 
         if (runnable.length === parallelDecisions.length) {
           await log(`agent-loop paso ${i + 1}/${maxSteps}: ${runnable.length} lecturas en paralelo (${runnable.map((r) => r.spec.name).join(', ')})`, 'loop');
@@ -392,7 +441,17 @@ export class AgentLoopService {
             try {
               const rateLimit = depth === 0 && this.intelligence ? await this.intelligence.enforceToolRateLimit(orgId, tool.name) : null;
               if (rateLimit) return { tool, decision: d, observation: `ERROR: ${rateLimit}` };
-              const observation = await tool.execute(orgId, taskId, d.args);
+              const validationError = this.validateToolArgs(tool, d.args);
+              if (validationError) return { tool, decision: d, observation: validationError };
+              
+              let observation: string;
+              if (tool.name === 'delegate') {
+                observation = await this.runDelegate(orgId, taskId, d.args, depth, opts, log, steps);
+              } else if (tool.name === 'code_execute') {
+                observation = await this.runCodeExecute(orgId, taskId, d.args, opts);
+              } else {
+                observation = await tool.execute(orgId, taskId, d.args);
+              }
               return { tool, decision: d, observation };
             } catch (error) {
               if (error instanceof MissingInformationError) throw error;
@@ -424,8 +483,11 @@ export class AgentLoopService {
       let observation: string;
       try {
         const rateLimit = depth === 0 && this.intelligence ? await this.intelligence.enforceToolRateLimit(orgId, spec.name) : null;
+        const validationError = this.validateToolArgs(spec, decision.args);
         if (rateLimit) {
           observation = `ERROR: ${rateLimit}`;
+        } else if (validationError) {
+          observation = validationError;
         } else
         if (spec.name === 'delegate') {
           observation = await this.runDelegate(orgId, taskId, decision.args, depth, opts, log, steps);
@@ -559,9 +621,23 @@ export class AgentLoopService {
     return blocks.join('\n');
   }
 
-  private buildUserPrompt(goal: string, context: string | undefined, steps: AgentLoopStep[], stepsLeft: number, formatHint?: string, plan: AgentPlanItem[] = []): string {
+  private buildUserPrompt(
+    goal: string,
+    context: string | undefined,
+    steps: AgentLoopStep[],
+    stepsLeft: number,
+    formatHint?: string,
+    plan: AgentPlanItem[] = [],
+    blackboard?: Record<string, string>,
+  ): string {
     const blocks: string[] = [`OBJETIVO: ${goal}`];
     if (context) blocks.push('', `CONTEXTO:\n${context}`);
+    if (blackboard && Object.keys(blackboard).length > 0) {
+      const entries = Object.entries(blackboard)
+        .map(([task, result]) => `- Sub-tarea [${task}]: ${result}`)
+        .join('\n');
+      blocks.push('', `PIZARRÓN DE TRABAJO (BLACKBOARD):\n${entries}`);
+    }
     if (plan.length > 0) blocks.push('', `PLAN:\n${this.renderPlan(plan)}`);
     if (steps.length > 0) {
       blocks.push('', 'PASOS PREVIOS:', ...this.renderHistory(steps));
@@ -581,9 +657,28 @@ export class AgentLoopService {
   private renderHistory(steps: AgentLoopStep[]): string[] {
     return steps.map((s, idx) => {
       const recent = idx >= steps.length - RECENT_FULL_STEPS;
-      const args = this.truncate(JSON.stringify(s.args), recent ? ARGS_HISTORY_LIMIT : 100);
-      const obs = recent ? s.observation : this.compactObservation(s.observation);
-      return `→ ${s.tool}(${args}) ⇒ ${obs}`;
+      if (recent) {
+        const args = this.truncate(JSON.stringify(s.args), ARGS_HISTORY_LIMIT);
+        return `→ ${s.tool}(${args}) ⇒ ${s.observation}`;
+      } else {
+        // Semantic history compression for older turns:
+        // We summarize what the tool did and the outcome.
+        const argsSummary = this.truncate(JSON.stringify(s.args), 60);
+        let obsSummary = s.observation;
+        if (s.observation.startsWith('ERROR:') || s.observation.startsWith('VERIFICACIÓN')) {
+          obsSummary = s.observation.trim(); // Keep errors in full detail
+        } else {
+          // Keep key summary details from observation: e.g. first and last lines or a computed summary
+          const lines = s.observation.split('\n').map((l) => l.trim()).filter(Boolean);
+          if (lines.length > 2) {
+            obsSummary = `${lines[0]} ... ${lines[lines.length - 1]} (${lines.length} líneas)`;
+          } else {
+            obsSummary = lines.join('; ');
+          }
+          obsSummary = this.truncate(obsSummary, 160);
+        }
+        return `→ [Paso previo resumido] ${s.tool}(${argsSummary}) ⇒ ${obsSummary}`;
+      }
     });
   }
 
@@ -653,7 +748,13 @@ export class AgentLoopService {
    * Retorna string con la violación, o null si todo está bien.
    * Solo aplica a code_execute / terminal_run (código que el agente escribió).
    */
-  private validateFinalAnswer(text: string, steps: AgentLoopStep[]): string | null {
+  private async validateFinalAnswer(
+    text: string,
+    steps: AgentLoopStep[],
+    criteria: string[],
+    orgId: string,
+    taskId: string,
+  ): Promise<string | null> {
     // Si la respuesta es un reporte honesto de fallo, no bloquear.
     if (HONEST_FAILURE_RE.test(text)) return null;
 
@@ -664,6 +765,38 @@ export class AgentLoopService {
 
     if (lastCodeStep && lastCodeStep.observation.startsWith('ERROR:')) {
       return `El último código falló: "${lastCodeStep.observation.slice(7, 120)}". Verifica y corrige antes de declarar éxito, o reporta el estado real en tu respuesta.`;
+    }
+
+    if (criteria.length > 0) {
+      try {
+        const verificationInput = `
+Criterios de Aceptación a verificar:
+${criteria.map((c, idx) => `${idx + 1}. ${c}`).join('\n')}
+
+Pasos de ejecución del agente:
+${steps.map((s, idx) => `Paso ${idx + 1}: Tool "${s.tool}" con args ${JSON.stringify(s.args)}\nObservación: ${s.observation.slice(0, 300)}`).join('\n\n')}
+
+Respuesta final del agente:
+${text}
+
+Determina si todos los criterios se cumplieron de forma exitosa según las observaciones y el resultado.
+Si todo se cumple, responde únicamente "OK".
+Si alguno no se cumple o falta verificar, responde con una explicación de qué falló o falta.
+`;
+        const verifyRes = await this.modelRouter.generate(verificationInput, {
+          orgId,
+          taskId,
+          budget: 'cheap',
+          systemPrompt: 'Eres un auditor de calidad. Valida el cumplimiento de los criterios. Responde "OK" o describe el fallo.',
+        });
+
+        const reply = verifyRes.text.trim();
+        if (reply !== 'OK' && !reply.startsWith('OK')) {
+          return `Criterios no satisfechos según auditoría de calidad: ${reply}`;
+        }
+      } catch (err) {
+        this.logger.warn(`Failed to verify DoD criteria via model: ${(err as Error).message}`);
+      }
     }
 
     return null;
@@ -1144,7 +1277,465 @@ export class AgentLoopService {
           return `✅ Archivo "${filename}" (${sizeMb} MB) enviado a Telegram (chat ${chatId}, message_id=${result.externalMessageId ?? 'N/A'})`;
         },
       },
+      {
+        name: 'whatsapp_send',
+        usage: 'whatsapp_send{"contact","text"}: prepara y envía un mensaje de WhatsApp. El envío real requiere aprobación humana.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            contact: { type: 'string', description: 'Nombre del contacto o grupo.' },
+            text: { type: 'string', description: 'Mensaje de texto a enviar.' },
+          },
+          required: ['contact', 'text'],
+        },
+        execute: async (orgId, taskId, args) => {
+          if (!this.approvals) return 'ERROR: ApprovalsService no disponible.';
+          const contact = String(args.contact ?? '').trim();
+          const text = String(args.text ?? '').trim();
+          if (!contact || !text) return 'ERROR: whatsapp_send requiere contact y text.';
+
+          const session = await this.whatsapp.startSession(orgId, taskId);
+          if (session.state === 'qr_required') {
+            return 'ERROR: WhatsApp Web requiere vinculación QR. Primero dile al usuario que escanee el QR desde el dashboard.';
+          }
+
+          const { data: task } = await this.db.admin
+            .from('tasks')
+            .select('created_by')
+            .eq('id', taskId)
+            .eq('org_id', orgId)
+            .maybeSingle();
+          const userId = task?.created_by ?? 'system';
+
+          const approval = await this.approvals.requestForPreparedAction({
+            orgId,
+            userId,
+            taskId,
+            actionType: 'whatsapp.message.send',
+            source: 'browser',
+            payload: {
+              session_id: session.session_id,
+              contact,
+              text,
+            },
+            summary: `Enviar WhatsApp a ${contact}: ${text.slice(0, 160)}`,
+          });
+
+          return `Petición de envío de WhatsApp creada para "${contact}" con el mensaje: "${text}". Estado: PENDIENTE DE APROBACIÓN (Hash: ${approval.action_hash})`;
+        }
+      },
+      {
+        name: 'whatsapp_read',
+        usage: 'whatsapp_read{"contact"?,"unread_only"?,"unanswered_only"?}: lee mensajes recientes de WhatsApp. contact: nombre de contacto opcional. unread_only: solo mensajes sin leer. unanswered_only: solo chats pendientes de responder.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            contact: { type: 'string', description: 'Nombre de contacto para leer su historial específico (opcional).' },
+            unread_only: { type: 'boolean', description: 'true: solo lee mensajes sin leer de todos los chats.' },
+            unanswered_only: { type: 'boolean', description: 'true: solo lee chats pendientes de respuesta.' },
+          },
+        },
+        execute: async (orgId, taskId, args) => {
+          const contact = String(args.contact ?? '').trim();
+          const unreadOnly = !!args.unread_only;
+          const unansweredOnly = !!args.unanswered_only;
+
+          const session = await this.whatsapp.startSession(orgId, taskId);
+          if (session.state === 'qr_required') {
+            return 'ERROR: WhatsApp Web requiere vinculación QR. Escanea el QR desde el dashboard.';
+          }
+
+          const result = unansweredOnly
+            ? await this.whatsapp.fetchUnansweredMessages(orgId, taskId)
+            : contact
+              ? await this.whatsapp.fetchContactMessages(orgId, contact, taskId)
+              : unreadOnly
+                ? await this.whatsapp.fetchUnreadMessages(orgId, taskId)
+                : await this.whatsapp.fetchLatestMessage(orgId, taskId);
+
+          let replyText = result.text;
+          if (result.session.screenshot?.image_base64 && (contact || !unansweredOnly)) {
+            try {
+              const visionPrompt = `
+Aquí tienes la lista de mensajes extraídos por DOM:
+${('messages' in result && result.messages) ? result.messages.join('\n') : '(Ninguno extraído por DOM)'}
+
+Analiza la captura de pantalla de WhatsApp Web provista para complementar la lista de mensajes si falta alguno, y responder con precisión a lo que se ve en la captura.
+`;
+              const visionRes = await this.modelRouter.generate(visionPrompt, {
+                orgId,
+                taskId,
+                imageBase64: result.session.screenshot.image_base64,
+                imageMimeType: result.session.screenshot.mime_type || 'image/png',
+                systemPrompt: 'Eres EVA, una asistente capaz de analizar capturas de pantalla de WhatsApp Web.',
+              });
+              if (visionRes?.text) {
+                replyText = visionRes.text;
+              }
+            } catch (err) {
+              this.logger.warn(`Failed to analyze screenshot in loop tool: ${(err as Error).message}`);
+            }
+          }
+          return replyText;
+        }
+      },
+      {
+        name: 'uber_quote',
+        usage: 'uber_quote{"origin","destination"}: obtiene una cotización/tarifa estimada de Uber para una ruta.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            origin: { type: 'string', description: 'Dirección o lugar de salida.' },
+            destination: { type: 'string', description: 'Dirección o lugar de destino.' },
+          },
+          required: ['origin', 'destination'],
+        },
+        execute: async (orgId, taskId, args) => {
+          const origin = String(args.origin ?? '').trim();
+          const destination = String(args.destination ?? '').trim();
+          if (!origin || !destination) return 'ERROR: uber_quote requiere origin y destination.';
+
+          const result = await this.uber.estimateRide(orgId, {
+            origin,
+            destination,
+            taskId,
+          });
+          return result.text;
+        }
+      },
+      {
+        name: 'uber_login',
+        usage: 'uber_login{"email","password"?}: inicia el flujo de login por correo en Uber. Enviará un OTP al correo del usuario y después tendrás que pedirle al usuario el código usando ask_user.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            email: { type: 'string', description: 'Correo electrónico del usuario.' },
+            password: { type: 'string', description: 'Contraseña (opcional).' },
+          },
+          required: ['email'],
+        },
+        execute: async (orgId, taskId, args) => {
+          const email = String(args.email ?? '').trim();
+          const password = String(args.password ?? '').trim() || undefined;
+          if (!email) return 'ERROR: email requerido.';
+          const result = await this.uber.startEmailLogin(orgId, email, password, taskId);
+          return result.text;
+        }
+      },
+      {
+        name: 'rappi_login',
+        usage: 'rappi_login{"email"}: inicia el flujo de login por correo en Rappi. Enviará un OTP y tendrás que pedirle al usuario el código usando ask_user.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            email: { type: 'string', description: 'Correo electrónico del usuario.' },
+          },
+          required: ['email'],
+        },
+        execute: async (orgId, taskId, args) => {
+          const email = String(args.email ?? '').trim();
+          if (!email) return 'ERROR: email requerido.';
+          const result = await this.rappi.startEmailLogin(orgId, email, taskId);
+          return result.text;
+        }
+      },
+      {
+        name: 'gmail_write',
+        usage: 'gmail_write{"action":"send|reply|trash|archive|mark_read|mark_unread","to"?,"subject"?,"body"?,"message_id"?}: realiza operaciones de escritura en Gmail. to, subject, body son requeridos para "send". body, message_id son requeridos para "reply". message_id es requerido para "trash|archive|mark_read|mark_unread". Todo cambio requiere aprobación humana.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['send', 'reply', 'trash', 'archive', 'mark_read', 'mark_unread'], description: 'Acción a realizar.' },
+            to: { type: 'string', description: 'Destinatario (para send).' },
+            subject: { type: 'string', description: 'Asunto (para send).' },
+            body: { type: 'string', description: 'Cuerpo del mensaje (para send/reply).' },
+            message_id: { type: 'string', description: 'ID del correo a responder, borrar, archivar o marcar.' },
+          },
+          required: ['action'],
+        },
+        execute: async (orgId, taskId, args) => {
+          if (!this.approvals) return 'ERROR: ApprovalsService no disponible.';
+          const action = String(args.action ?? '');
+          const to = String(args.to ?? '').trim();
+          const subject = String(args.subject ?? '').trim();
+          const body = String(args.body ?? '').trim();
+          const messageId = String(args.message_id ?? '').trim();
+
+          const { data: task } = await this.db.admin
+            .from('tasks')
+            .select('created_by')
+            .eq('id', taskId)
+            .eq('org_id', orgId)
+            .maybeSingle();
+          const userId = task?.created_by ?? 'system';
+
+          let summary = '';
+          let payload: Record<string, unknown> = {};
+
+          if (action === 'send') {
+            if (!to || !body) return 'ERROR: to y body requeridos para send.';
+            summary = `Enviar correo a ${to}: ${subject || '(sin asunto)'}`;
+            payload = { to, subject, body };
+          } else if (action === 'reply') {
+            if (!messageId || !body) return 'ERROR: message_id y body requeridos para reply.';
+            summary = `Responder correo ID ${messageId}: ${body.slice(0, 100)}`;
+            payload = { message_id: messageId, body };
+          } else if (action === 'trash') {
+            if (!messageId) return 'ERROR: message_id requerido para trash.';
+            summary = `Mover correo ID ${messageId} a la papelera`;
+            payload = { message_id: messageId };
+          } else if (action === 'archive') {
+            if (!messageId) return 'ERROR: message_id requerido para archive.';
+            summary = `Archivar correo ID ${messageId}`;
+            payload = { message_id: messageId };
+          } else if (action === 'mark_read') {
+            if (!messageId) return 'ERROR: message_id requerido para mark_read.';
+            summary = `Marcar correo ID ${messageId} como leído`;
+            payload = { message_id: messageId };
+          } else if (action === 'mark_unread') {
+            if (!messageId) return 'ERROR: message_id requerido para mark_unread.';
+            summary = `Marcar correo ID ${messageId} como no leído`;
+            payload = { message_id: messageId };
+          }
+
+          const approval = await this.approvals.requestForPreparedAction({
+            orgId,
+            userId,
+            taskId,
+            actionType: `gmail.${action}`,
+            source: 'system',
+            payload,
+            summary,
+          });
+
+          return `Operación gmail.${action} preparada. Estado: PENDIENTE DE APROBACIÓN (Hash: ${approval.action_hash})`;
+        }
+      },
+      {
+        name: 'calendar_write',
+        usage: 'calendar_write{"action":"create|delete","summary"?,"start_time"?,"end_time"?,"description"?,"event_id"?}: realiza operaciones de escritura en Google Calendar. requiere aprobación humana.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['create', 'delete'], description: 'Acción a realizar.' },
+            summary: { type: 'string', description: 'Título del evento.' },
+            start_time: { type: 'string', description: 'Fecha y hora de inicio (ISO 8601, ej. 2026-06-12T15:00:00Z).' },
+            end_time: { type: 'string', description: 'Fecha y hora de fin (ISO 8601, ej. 2026-06-12T16:00:00Z).' },
+            description: { type: 'string', description: 'Descripción o notas del evento.' },
+            event_id: { type: 'string', description: 'ID del evento a modificar o eliminar.' },
+          },
+          required: ['action'],
+        },
+        execute: async (orgId, taskId, args) => {
+          if (!this.approvals) return 'ERROR: ApprovalsService no disponible.';
+          const action = String(args.action ?? '');
+          const summaryParam = String(args.summary ?? '').trim();
+          const startTime = String(args.start_time ?? '').trim();
+          const endTime = String(args.end_time ?? '').trim();
+          const description = String(args.description ?? '').trim();
+          const eventId = String(args.event_id ?? '').trim();
+
+          const { data: task } = await this.db.admin
+            .from('tasks')
+            .select('created_by')
+            .eq('id', taskId)
+            .eq('org_id', orgId)
+            .maybeSingle();
+          const userId = task?.created_by ?? 'system';
+
+          let summary = '';
+          let payload: Record<string, unknown> = {};
+
+          if (action === 'create') {
+            if (!summaryParam || !startTime || !endTime) return 'ERROR: summary, start_time y end_time requeridos para create.';
+            summary = `Crear evento "${summaryParam}" en Google Calendar (${startTime})`;
+            payload = { summary: summaryParam, start_time: startTime, end_time: endTime, description };
+          } else if (action === 'delete') {
+            if (!eventId) return 'ERROR: event_id requerido para delete.';
+            summary = `Eliminar evento ID ${eventId} de Google Calendar`;
+            payload = { event_id: eventId };
+          }
+
+          const approval = await this.approvals.requestForPreparedAction({
+            orgId,
+            userId,
+            taskId,
+            actionType: `calendar.${action}`,
+            source: 'system',
+            payload,
+            summary,
+          });
+
+          return `Operación calendar.${action} preparada. Estado: PENDIENTE DE APROBACIÓN (Hash: ${approval.action_hash})`;
+        }
+      },
+      {
+        name: 'schedule_job_manage',
+        usage: 'schedule_job_manage{"action":"create|list|pause|resume|delete","title"?,"cron_expression"?,"description"?,"job_id"?}: programa o gestiona tareas recurrentes o recordatorios en background.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['create', 'list', 'pause', 'resume', 'delete'] },
+            title: { type: 'string', description: 'Título del job recurrente.' },
+            cron_expression: { type: 'string', description: 'Expresión cron estándar (ej. "0 9 * * *" para diario a las 9am).' },
+            description: { type: 'string', description: 'Qué debe hacer el job (instrucciones para el agente).' },
+            job_id: { type: 'string', description: 'ID del job a pausar/reanudar/borrar.' },
+          },
+          required: ['action'],
+        },
+        execute: async (orgId, taskId, args) => {
+          const action = String(args.action ?? '');
+          const title = String(args.title ?? '').trim();
+          const cron = String(args.cron_expression ?? '').trim();
+          const description = String(args.description ?? '').trim();
+          const jobId = String(args.job_id ?? '').trim();
+
+          const { data: task } = await this.db.admin
+            .from('tasks')
+            .select('created_by')
+            .eq('id', taskId)
+            .eq('org_id', orgId)
+            .maybeSingle();
+          const userId = task?.created_by ?? 'system';
+
+          if (action === 'create') {
+            if (!title || !cron || !description) return 'ERROR: title, cron_expression y description requeridos para crear.';
+            const job = await this.scheduledJobs.create(
+              {
+                name: title,
+                schedule_type: 'cron',
+                cron_expr: cron,
+                task_input: description,
+                job_type: 'custom',
+              },
+              orgId,
+              userId,
+            );
+            return `✅ Job recurrente creado exitosamente con ID ${job.id} y cron "${job.cron_expr}"`;
+          } else if (action === 'list') {
+            const list = await this.scheduledJobs.list(orgId);
+            if (list.length === 0) return 'No tienes tareas programadas activas.';
+            return list.map((j: any) => `[ID: ${j.id}] "${j.name}" — cron "${j.cron_expr}" (estado: ${j.status})`).join('\n');
+          } else if (action === 'pause') {
+            if (!jobId) return 'ERROR: job_id requerido.';
+            await this.scheduledJobs.pause(jobId, orgId);
+            return `✅ Job ${jobId} pausado.`;
+          } else if (action === 'resume') {
+            if (!jobId) return 'ERROR: job_id requerido.';
+            await this.scheduledJobs.resume(jobId, orgId);
+            return `✅ Job ${jobId} reanudado.`;
+          } else if (action === 'delete') {
+            if (!jobId) return 'ERROR: job_id requerido.';
+            await this.scheduledJobs.delete(jobId, orgId);
+            return `✅ Job ${jobId} eliminado de forma permanente.`;
+          }
+          return 'ERROR: acción desconocida.';
+        }
+      },
     ];
+  }
+
+  private attachZodSchemas() {
+    const schemas: Record<string, z.ZodSchema> = {
+      web_search: z.object({ query: z.string().min(1, 'El query no puede estar vacío') }),
+      gmail_read: z.object({ query: z.string().optional() }),
+      calendar_read: z.object({ days: z.number().min(1).max(30).optional() }),
+      drive_read: z.object({ query: z.string().min(1, 'El query no puede estar vacío') }),
+      memory_recall: z.object({ query: z.string().min(1, 'El query no puede estar vacío') }),
+      ask_user: z.object({
+        question: z.string().min(1, 'La pregunta no puede estar vacía'),
+        options: z.array(z.string()).optional(),
+      }),
+      code_execute: z.object({
+        language: z.enum(['python', 'node', 'bash']).optional(),
+        code: z.string().min(1, 'El código no puede estar vacío'),
+        network: z.boolean().optional(),
+      }),
+      terminal_run: z.object({
+        cmd: z.string().min(1, 'El comando no puede estar vacío'),
+        background: z.boolean().optional(),
+      }),
+      terminal_output: z.object({}),
+      skill_run: z.object({ slug: z.string().min(1, 'El slug no puede estar vacío') }),
+      skill_save: z.object({
+        name: z.string().min(1, 'El nombre no puede estar vacío'),
+        description: z.string().min(1, 'La descripción no puede estar vacía'),
+        language: z.enum(['python', 'node', 'bash']).optional(),
+        code: z.string().min(1, 'El código no puede estar vacío'),
+      }),
+      script_forge: z.object({ spec: z.string().min(1, 'El spec no puede estar vacío') }),
+      delegate: z.object({
+        goal: z.string().min(1, 'El objetivo no puede estar vacío'),
+        role: z.string().optional(),
+      }),
+      image_analyze: z.object({
+        path: z.string().min(1, 'La ruta de la imagen no puede estar vacía'),
+        prompt: z.string().optional(),
+      }),
+      sandbox_ls: z.object({ path: z.string().optional() }),
+      telegram_send_file: z.object({
+        file: z.string().min(1, 'El archivo no puede estar vacío'),
+        caption: z.string().optional(),
+        chat_id: z.string().optional(),
+      }),
+      whatsapp_send: z.object({
+        contact: z.string().min(1, 'El contacto no puede estar vacío'),
+        text: z.string().min(1, 'El texto no puede estar vacío'),
+      }),
+      whatsapp_read: z.object({
+        contact: z.string().optional(),
+        unread_only: z.boolean().optional(),
+        unanswered_only: z.boolean().optional(),
+      }),
+      uber_quote: z.object({
+        origin: z.string().min(1, 'El origen no puede estar vacío'),
+        destination: z.string().min(1, 'El destino no puede estar vacío'),
+      }),
+      uber_login: z.object({
+        email: z.string().email('Debe ser un correo válido'),
+        password: z.string().optional(),
+      }),
+      rappi_login: z.object({
+        email: z.string().email('Debe ser un correo válido'),
+      }),
+      gmail_write: z.object({
+        action: z.enum(['send', 'reply', 'trash', 'archive', 'mark_read', 'mark_unread']),
+        to: z.string().optional(),
+        subject: z.string().optional(),
+        body: z.string().optional(),
+        message_id: z.string().optional(),
+      }),
+      calendar_write: z.object({
+        action: z.enum(['create', 'delete']),
+        summary: z.string().optional(),
+        start_time: z.string().optional(),
+        end_time: z.string().optional(),
+        description: z.string().optional(),
+        event_id: z.string().optional(),
+      }),
+      schedule_job_manage: z.object({
+        action: z.enum(['create', 'list', 'pause', 'resume', 'delete']),
+        title: z.string().optional(),
+        cron_expression: z.string().optional(),
+        description: z.string().optional(),
+        job_id: z.string().optional(),
+      }),
+    };
+    for (const tool of this.tools) {
+      if (schemas[tool.name]) {
+        tool.zodSchema = schemas[tool.name];
+      }
+    }
+  }
+
+  private validateToolArgs(spec: ToolSpec, args: Record<string, unknown>): string | null {
+    if (!spec.zodSchema) return null;
+    const parseResult = spec.zodSchema.safeParse(args);
+    if (!parseResult.success) {
+      const errMsg = parseResult.error.issues.map((e) => `${e.path.join('.') || 'args'}: ${e.message}`).join(', ');
+      return `ERROR: Argumentos inválidos. Detalles: ${errMsg}`;
+    }
+    return null;
   }
 
   /** code_execute con manejo de red: sin red ejecuta directo; con red crea approval. */
@@ -1208,9 +1799,20 @@ export class AgentLoopService {
       ? `HALLAZGOS PREVIOS DEL AGENTE PRINCIPAL:\n${findings.map((s) => `[${s.tool}] ${this.truncate(s.observation, 240)}`).join('\n')}`
       : undefined;
     const sub = await this.run(orgId, taskId, subGoal, {
-      depth: depth + 1, role, context, userId: opts.userId, log,
+      depth: depth + 1,
+      role,
+      context,
+      userId: opts.userId,
+      log,
+      blackboard: opts.blackboard,
     });
-    if (sub.ok) return sub.text;
+    if (sub.ok) {
+      if (opts.blackboard) {
+        const key = role ? `${role}: ${subGoal}` : subGoal;
+        opts.blackboard[key] = sub.text;
+      }
+      return sub.text;
+    }
     const lastError = [...sub.steps].reverse().find((s) => s.observation.startsWith('ERROR:'));
     return `ERROR: el sub-agente (${role ?? 'generalista'}) no resolvió "${subGoal.slice(0, 80)}".${lastError ? ` Último error: ${this.truncate(lastError.observation, 160)}.` : ''} Prueba otro rol, divide distinto el objetivo o resuélvelo tú con otra herramienta.`;
   }
