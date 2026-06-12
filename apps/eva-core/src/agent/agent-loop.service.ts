@@ -333,7 +333,7 @@ export class AgentLoopService {
       'REGLAS:',
       '- Antes de resolver desde cero, revisa memory_recall y el CATÁLOGO INTELIGENTE DE SKILLS.',
       '- Para código: divide en pasos pequeños (inspeccionar→preparar→ejecutar→verificar). Los archivos en /work persisten entre pasos de esta tarea.',
-      '- Para descargar medios/videos (YouTube, Platzi, etc.): el sandbox tiene preinstalado y listo para usar yt-dlp y ffmpeg. Escribe código de Python o Bash que use yt-dlp directamente para descargar el video/audio a /work, y luego usa telegram_send_file para enviarlo. Evita clonar repositorios externos o instalar paquetes pesados.',
+      '- Para descargar medios/videos (YouTube, Platzi, etc.): el sandbox tiene preinstalado y listo para usar yt-dlp y ffmpeg. Escribe código de Python o Bash que use yt-dlp directamente para descargar el video/audio a /work. IMPORTANTE: Para que yt-dlp funcione y tenga acceso a internet, debes pasar el argumento "network": true al llamar a code_execute. Luego usa telegram_send_file para enviarlo. Evita clonar repositorios externos o instalar paquetes pesados.',
       '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
       '- NUNCA inventes salida que ninguna herramienta produjo (datos, contenidos de archivo, respuestas de API). Reportar un bloqueo honesto siempre vale más que un resultado fabricado.',
@@ -455,7 +455,7 @@ export class AgentLoopService {
       },
       {
         name: 'code_execute',
-        usage: 'code_execute{"language":"python|node|bash","code"}: ejecuta TU código literal en el sandbox de la tarea. /work persiste entre pasos; imprime resultados por stdout. Sin red (args opcional "network":true requiere aprobación humana). Python incluye requests/pandas/numpy si la imagen eva-sandbox está instalada.',
+        usage: 'code_execute{"language":"python|node|bash","code","network"?}: ejecuta TU código literal en el sandbox de la tarea. /work persiste entre pasos; imprime resultados por stdout. Sin red por defecto (pasa "network":true si necesitas descargar de internet o llamar APIs externas; en este entorno la red está permitida y no requiere aprobación humana). Python incluye requests/pandas/numpy si la imagen eva-sandbox está instalada.',
         // Real execution lives in runCodeExecute() — needs userId from opts for approvals.
         execute: async () => 'ERROR: code_execute no disponible',
       },
@@ -662,12 +662,26 @@ export class AgentLoopService {
             try {
               const { data: task } = await this.db.admin
                 .from('tasks')
-                .select('metadata')
+                .select('metadata, created_by')
                 .eq('id', taskId)
                 .eq('org_id', orgId)
                 .maybeSingle();
               const meta = (task?.metadata ?? {}) as Record<string, unknown>;
               chatId = String(meta['chat_id'] ?? meta['telegram_chat_id'] ?? '');
+
+              if (!chatId && task?.created_by) {
+                const { data: acc } = await this.db.admin
+                  .from('communication_accounts')
+                  .select('external_chat_id')
+                  .eq('org_id', orgId)
+                  .eq('user_id', task.created_by)
+                  .eq('channel', 'telegram')
+                  .eq('status', 'active')
+                  .maybeSingle();
+                if (acc?.external_chat_id) {
+                  chatId = acc.external_chat_id;
+                }
+              }
             } catch {
               // ignore
             }
@@ -721,7 +735,7 @@ export class AgentLoopService {
 
     if (args.network === true) {
       if (process.env.EVA_SANDBOX_ALLOW_NETWORK === 'true') {
-        const result = await this.sandbox.runOneShot({ language, code, orgId, network: true });
+        const result = await this.sandbox.execInSession(taskId, { kind: language, code, orgId, network: true });
         return this.formatSandboxResult(result);
       }
       if (!this.approvals || !opts.userId) {

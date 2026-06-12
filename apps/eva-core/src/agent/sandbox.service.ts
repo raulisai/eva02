@@ -326,7 +326,7 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
 
     // node no está en la imagen de sesión (python) — corre one-shot sobre el MISMO /work.
     if (opts.kind === 'node') {
-      return this.runNodeOnSharedWorkspace(session, resolved.code, resolved.masks, opts.timeoutMs);
+      return this.runNodeOnSharedWorkspace(session, resolved.code, resolved.masks, opts.timeoutMs, networkRequested);
     }
 
     try {
@@ -376,15 +376,20 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
 
   /** Libera contenedor + workspace de la tarea. Libera ambas sesiones (red y no-red). Idempotente. */
   async release(taskId: string): Promise<void> {
-    const keys = [taskId, `${taskId}:net`];
+    const baseId = taskId.replace(/:net$/, '');
+    const keys = [baseId, `${baseId}:net`];
+    let hostDirToDelete: string | null = null;
     for (const key of keys) {
       const session = this.sessions.get(key);
       if (!session) continue;
       this.sessions.delete(key);
       await this.runDocker(['rm', '-f', session.containerName], { timeout: 15_000, maxBuffer: 1024 * 16 })
         .catch(() => undefined);
-      await rm(session.hostDir, { recursive: true, force: true }).catch(() => undefined);
-      this.logger.log(`sandbox session released for task ${taskId} key=${key} (${session.stepCount} pasos)`);
+      hostDirToDelete = session.hostDir;
+      this.logger.log(`sandbox session released for task ${baseId} key=${key} (${session.stepCount} pasos)`);
+    }
+    if (hostDirToDelete) {
+      await rm(hostDirToDelete, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
@@ -446,7 +451,11 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
     const image = (await this.enrichedImageAvailable()) ? ENRICHED_IMAGE : ONE_SHOT_IMAGES.python.image;
     const suffix = networkEnabled ? 'net' : 'iso';
     const containerName = `eva-sbx-${createHash('md5').update(taskId).digest('hex').slice(0, 10)}-${suffix}`;
-    const hostDir = await mkdtemp(join(tmpdir(), 'eva-sbx-ws-'));
+    
+    // Compartir hostDir si la otra sesión (red o no-red) de esta tarea ya existe
+    const otherKey = networkEnabled ? taskId : `${taskId}:net`;
+    const otherSession = this.sessions.get(otherKey);
+    const hostDir = otherSession ? otherSession.hostDir : await mkdtemp(join(tmpdir(), 'eva-sbx-ws-'));
 
     // Si el standby está listo y no necesitamos red, liberamos el standby ahora
     // para que el nombre 'eva-standby' quede libre antes de recrearlo.
@@ -498,13 +507,14 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
     code: string,
     masks: Array<{ value: string; alias: string }>,
     timeoutMs?: number,
+    networkEnabled = false,
   ): Promise<SandboxRunResult> {
     const file = `step-${session.stepCount}.js`;
     try {
       await writeFile(join(session.hostDir, file), code, 'utf8');
       const { stdout, stderr } = await this.runDocker([
         'run', '--rm',
-        '--network', 'none',
+        '--network', networkEnabled ? 'bridge' : 'none',
         '--memory', '256m',
         '--cpus', '0.5',
         '--read-only',
@@ -534,10 +544,22 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
 
   private async reapIdleSessions(): Promise<void> {
     const now = Date.now();
-    for (const [taskId, session] of this.sessions) {
-      if (now - session.lastUsedAt > SESSION_IDLE_TTL_MS) {
-        this.logger.log(`reaping idle sandbox session for task ${taskId}`);
-        await this.release(taskId);
+    const taskIds = new Set<string>();
+    for (const key of this.sessions.keys()) {
+      taskIds.add(key.replace(/:net$/, ''));
+    }
+
+    for (const baseId of taskIds) {
+      const normalSession = this.sessions.get(baseId);
+      const netSession = this.sessions.get(`${baseId}:net`);
+
+      const normalLastUsed = normalSession?.lastUsedAt ?? 0;
+      const netLastUsed = netSession?.lastUsedAt ?? 0;
+      const lastUsed = Math.max(normalLastUsed, netLastUsed);
+
+      if (now - lastUsed > SESSION_IDLE_TTL_MS) {
+        this.logger.log(`reaping idle sandbox sessions for task ${baseId}`);
+        await this.release(baseId);
       }
     }
   }

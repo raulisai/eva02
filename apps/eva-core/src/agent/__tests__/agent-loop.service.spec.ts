@@ -13,6 +13,7 @@ import { SandboxService } from '../sandbox.service';
 import { ScheduleService } from '../schedule.service';
 import { ScriptForgeService } from '../script-forge.service';
 import { SkillLibraryService } from '../skill-library.service';
+import { TelegramAdapter } from '../../communication/telegram.adapter';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -38,6 +39,7 @@ describe('AgentLoopService', () => {
   let skillLibrary: jest.Mocked<SkillLibraryService>;
   let approvals: jest.Mocked<ApprovalsService>;
   let drive: jest.Mocked<GoogleDriveService>;
+  let telegram: jest.Mocked<TelegramAdapter>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -47,15 +49,14 @@ describe('AgentLoopService', () => {
           provide: DatabaseService,
           useValue: {
             admin: {
-              from: jest.fn().mockReturnValue({
-                select: jest.fn().mockReturnValue({
-                  eq: jest.fn().mockReturnValue({
-                    eq: jest.fn().mockReturnValue({
-                      maybeSingle: jest.fn().mockResolvedValue({ data: { status: 'running' } }),
-                    }),
-                  }),
-                }),
-                insert: jest.fn().mockResolvedValue({ error: null }),
+              from: jest.fn().mockImplementation(() => {
+                const builder = {
+                  select: jest.fn().mockReturnThis(),
+                  eq: jest.fn().mockReturnThis(),
+                  maybeSingle: jest.fn().mockResolvedValue({ data: { status: 'running', metadata: {} } }),
+                  insert: jest.fn().mockResolvedValue({ error: null }),
+                };
+                return builder;
               }),
             },
           },
@@ -110,6 +111,13 @@ describe('AgentLoopService', () => {
             readBackgroundOutput: jest.fn().mockResolvedValue({ ok: true, output: 'bg log' }),
             release: jest.fn().mockResolvedValue(undefined),
             dockerAvailable: jest.fn().mockResolvedValue(true),
+            getHostDir: jest.fn().mockReturnValue('/tmp'),
+          },
+        },
+        {
+          provide: TelegramAdapter,
+          useValue: {
+            sendDocument: jest.fn().mockResolvedValue({ ok: true, externalMessageId: '123' }),
           },
         },
         {
@@ -145,6 +153,7 @@ describe('AgentLoopService', () => {
     skillLibrary = module.get(SkillLibraryService);
     approvals = module.get(ApprovalsService);
     drive = module.get(GoogleDriveService);
+    telegram = module.get(TelegramAdapter);
   });
 
   it('returns the final answer when the model answers directly', async () => {
@@ -341,6 +350,25 @@ describe('AgentLoopService', () => {
     expect(sandbox.execInSession).not.toHaveBeenCalled();
     expect(sandbox.runOneShot).not.toHaveBeenCalled();
     expect(result.steps[0].observation).toContain('PENDIENTE DE APROBACIÓN');
+  });
+
+  it('runs network execution directly in session when EVA_SANDBOX_ALLOW_NETWORK=true', async () => {
+    process.env.EVA_SANDBOX_ALLOW_NETWORK = 'true';
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"descargo","tool":"code_execute","args":{"language":"python","code":"import requests","network":true}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"fin","tool":"final_answer","args":{"text":"listo"}}'));
+
+    const result = await service.run(ORG, TASK, 'descarga algo');
+
+    expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, {
+      kind: 'python',
+      code: 'import requests',
+      orgId: ORG,
+      network: true,
+    });
+    expect(sandbox.runOneShot).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    delete process.env.EVA_SANDBOX_ALLOW_NETWORK;
   });
 
   // ── terminal ───────────────────────────────────────────────────────────────
@@ -616,6 +644,50 @@ describe('AgentLoopService', () => {
       }));
 
       global.fetch = originalFetch;
+    });
+  });
+
+  describe('telegram_send_file tool', () => {
+    it('sends file using communication_accounts fallback when task metadata lacks chat_id', async () => {
+      const fs = require('fs/promises');
+      const path = require('path');
+      const testFile = path.join('/tmp', 'test-file.txt');
+      await fs.writeFile(testFile, 'dummy content', 'utf8');
+
+      const mockTaskData = { data: { id: TASK, org_id: ORG, created_by: 'user-xyz', metadata: {} } };
+      const mockAccountData = { data: { external_chat_id: '99999' } };
+
+      const fromSpy = jest.spyOn(service['db'].admin, 'from');
+      fromSpy.mockImplementation((tableName: string) => {
+        const builder = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          maybeSingle: jest.fn().mockImplementation(async () => {
+            if (tableName === 'tasks') return mockTaskData;
+            if (tableName === 'communication_accounts') return mockAccountData;
+            return { data: null };
+          }),
+        };
+        return builder as any;
+      });
+
+      modelRouter.generate
+        .mockResolvedValueOnce(modelReply('{"thought":"envio","tool":"telegram_send_file","args":{"file":"test-file.txt","caption":"hola"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"fin","tool":"final_answer","args":{"text":"enviado"}}'));
+
+      const result = await service.run(ORG, TASK, 'envia archivo');
+
+      expect(telegram.sendDocument).toHaveBeenCalledWith(
+        { chat_id: '99999' },
+        expect.any(Buffer),
+        'test-file.txt',
+        'hola',
+        null
+      );
+      expect(result.ok).toBe(true);
+
+      await fs.rm(testFile, { force: true }).catch(() => undefined);
+      fromSpy.mockRestore();
     });
   });
 });

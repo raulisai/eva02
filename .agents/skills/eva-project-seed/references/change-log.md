@@ -2,6 +2,18 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 17:14Z
+C: agent: fallback telegram chatId resolution to communication_accounts when metadata is empty; files=apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts; tests=npm test -- agent-loop.service.spec.ts
+P: pending/improve -> add e2e or integration test verifying playground task fallback for communication accounts
+
+### 2026-06-12 17:03Z
+C: agent: refine code_execute tool usage and system prompt download rules to force network: true; files=apps/eva-core/src/agent/agent-loop.service.ts; tests=npm test -- agent-loop.service.spec.ts
+P: pending/improve -> monitor model code execution for network: true parameter compliance
+
+### 2026-06-12 17:01Z
+C: agent: fix sandbox persistent network session and share hostDir workspace; files=apps/eva-core/src/agent/sandbox.service.ts,apps/eva-core/src/agent/agent-loop.service.ts; tests=npm test -- sandbox.service.spec telegram.adapter.spec agent-loop.service.spec --runInBand
+P: pending/improve -> add a test covering sandbox volume concurrency/release safety under stress
+
 ### 2026-06-12 16:52Z
 C: agent: loop robustness with balanced budget and yt-dlp/ffmpeg system instructions; files=apps/eva-core/src/agent/agent-loop.service.ts; tests=npm test -- agent-loop.service.spec
 P: pending/improve -> verify media downloading using yt-dlp on a real YouTube / Platzi link end-to-end

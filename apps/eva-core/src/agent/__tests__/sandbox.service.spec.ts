@@ -271,4 +271,30 @@ describe('SandboxService', () => {
     expect(service.warmUpStatus).toBe('no_docker');
     jest.restoreAllMocks();
   });
+
+  // ── shared workspace (red + no-red) ───────────────────────────────────────
+
+  it('shares the same hostDir between normal session and network session of the same task', async () => {
+    process.env.EVA_SANDBOX_ALLOW_NETWORK = 'true';
+    await service.execInSession('task-shared', { kind: 'python', code: 'print(1)' });
+    await service.execInSession('task-shared', { kind: 'python', code: 'print(2)', network: true });
+
+    expect(service.hasSession('task-shared')).toBe(true);
+    const normalHostDir = service.getHostDir('task-shared');
+    const netHostDir = service.getNetworkHostDir('task-shared');
+
+    expect(normalHostDir).toBe(netHostDir);
+    expect(normalHostDir).not.toBeNull();
+    delete process.env.EVA_SANDBOX_ALLOW_NETWORK;
+  });
+
+  it('passes network settings to Node one-shot runs', async () => {
+    process.env.EVA_SANDBOX_ALLOW_NETWORK = 'true';
+    await service.execInSession('task-node-net', { kind: 'node', code: 'console.log(1)', network: true });
+
+    const run = dockerCalls.find((c) => c.args[0] === 'run' && c.args.includes('node:20-alpine'));
+    expect(run).toBeDefined();
+    expect(run!.args).toEqual(expect.arrayContaining(['--network', 'bridge']));
+    delete process.env.EVA_SANDBOX_ALLOW_NETWORK;
+  });
 });
