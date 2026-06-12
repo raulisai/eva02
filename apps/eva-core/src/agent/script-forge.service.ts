@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import { DatabaseService } from '../database/database.service';
 import { ModelRouterService } from '../model-router/model-router.service';
 import { SandboxLanguage, SandboxService } from './sandbox.service';
+import { SkillLibraryService } from './skill-library.service';
 
 const FORGE_PROMPT = `Eres EVA. Genera UN script autocontenido que resuelva la tarea del usuario.
 Responde SOLO con JSON válido: {"language": "python"|"node"|"bash", "filename": "...",
@@ -33,6 +33,7 @@ export class ScriptForgeService {
     private readonly db: DatabaseService,
     private readonly modelRouter: ModelRouterService,
     private readonly sandbox: SandboxService,
+    private readonly skillLibrary: SkillLibraryService,
   ) {}
 
   /** Cheap signal: does this order ask for code/automation EVA should build? */
@@ -60,12 +61,20 @@ export class ScriptForgeService {
       language: spec.language, generated: true,
     });
 
-    // Register as a reusable skill
-    const skillSlug = await this.registerSkill(orgId, spec).catch((error) => {
-      this.logger.warn(`skill registration failed: ${(error as Error).message}`);
-      return undefined;
+    // Register as a reusable skill — single gate with SkillGuard + provenance.
+    const registered = await this.skillLibrary.register(orgId, {
+      slug: `gen-${spec.filename}`,
+      displayName: spec.filename,
+      description: `${spec.description} (auto-generada por EVA)`,
+      language: spec.language as SandboxLanguage,
+      code: spec.code,
+      filename: spec.filename,
+      origin: 'forge',
+      taskId,
     });
-    if (skillSlug) await log(`registrada como skill "${skillSlug}"`, 'forge');
+    const skillSlug = registered.ok ? registered.slug : undefined;
+    if (registered.ok) await log(`registrada como skill "${registered.slug}" v${registered.version}`, 'forge');
+    else await log(`skill no registrada: ${registered.reason}`, 'forge');
 
     // Execute in the shared throwaway sandbox if Docker is around
     if (!(await this.sandbox.dockerAvailable())) {
@@ -117,32 +126,4 @@ export class ScriptForgeService {
     if (error) this.logger.warn(`artifact save failed: ${error.message}`);
   }
 
-  private async registerSkill(orgId: string, spec: { filename: string; language: string; description: string; code: string }) {
-    const slug = `gen-${spec.filename.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`.slice(0, 60);
-    const { data: skill, error } = await this.db.admin
-      .from('skills')
-      .upsert({
-        org_id: orgId,
-        slug,
-        display_name: spec.filename,
-        description: `${spec.description} (auto-generada por EVA)`,
-        status: 'active',
-        latest_version: '1.0.0',
-        metadata: { generated: true, language: spec.language },
-      }, { onConflict: 'org_id,slug' })
-      .select()
-      .single();
-    if (error || !skill) throw new Error(error?.message ?? 'skill upsert failed');
-
-    await this.db.admin.from('skill_versions').upsert({
-      org_id: orgId,
-      skill_id: skill.id,
-      version: '1.0.0',
-      manifest: { name: slug, version: '1.0.0', generated: true, language: spec.language, filename: spec.filename },
-      instructions: spec.code,
-      checksum: createHash('md5').update(spec.code).digest('hex'),
-    }, { onConflict: 'org_id,skill_id,version' });
-
-    return slug;
-  }
 }

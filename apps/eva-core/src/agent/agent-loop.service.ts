@@ -77,6 +77,8 @@ const MAX_PARSE_FAILURES = 2;
 const DECIDE_MAX_TOKENS = 1400;
 /** Herramientas cuyo uso exitoso amerita memorizar la solución (tipo procedural). */
 const CODE_TOOLS = new Set(['code_execute', 'terminal_run', 'script_forge', 'skill_run']);
+/** Código más corto que esto no vale como skill (one-liners exploratorios). */
+const MIN_SKILL_CODE_LENGTH = 80;
 
 /**
  * AgentLoopService — bucle agéntico genérico (estilo agent-zero):
@@ -292,6 +294,8 @@ export class AgentLoopService {
       '- Para código: divide en pasos pequeños (inspeccionar→preparar→ejecutar→verificar). Los archivos en /work persisten entre pasos de esta tarea.',
       '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
+      '- NUNCA inventes salida que ninguna herramienta produjo (datos, contenidos de archivo, respuestas de API). Reportar un bloqueo honesto siempre vale más que un resultado fabricado.',
+      '- Cuando un código funcione y resuelva algo no trivial (un fix, un método, un flujo), guárdalo con skill_save ANTES de final_answer. Si una skill que ejecutaste salió mal o desactualizada, corrígela y vuelve a guardarla con el mismo name.',
       '- Las herramientas son de solo lectura/sandbox: si el objetivo exige enviar o modificar algo externo, junta la información y explica en final_answer qué quedaría pendiente de aprobación.',
       '- PROHIBIDO cerrar con "no se pudo" a secas: si algo queda fuera de tu alcance, tu final_answer debe traer lo que SÍ conseguiste + 2-3 opciones concretas de solución (qué reintentar, qué conectar, qué harías tú en el siguiente paso).',
       'Responde SOLO con JSON: {"thought":"breve","tool":"<nombre>","args":{...}}',
@@ -448,6 +452,26 @@ export class AgentLoopService {
         },
       },
       {
+        name: 'skill_save',
+        usage: 'skill_save{"name","description","language":"python|node|bash","code"}: guarda código YA PROBADO como skill reutilizable (pasa por un escáner de seguridad). Úsalo tras verificar que funciona; mismo name = nueva versión.',
+        execute: async (orgId, taskId, args) => {
+          const code = String(args.code ?? '').trim();
+          const name = String(args.name ?? '').trim();
+          const description = String(args.description ?? '').trim();
+          if (!code || !name || !description) return 'ERROR: skill_save requiere args.name, args.description y args.code';
+          const rawLang = String(args.language ?? 'python');
+          const language: SandboxLanguage = rawLang === 'node' || rawLang === 'bash' ? rawLang : 'python';
+          const result = await this.skillLibrary.register(orgId, {
+            displayName: name, description, language, code, origin: 'agent-loop', taskId,
+          });
+          if (!result.ok) return `ERROR: ${result.reason}`;
+          await this.saveArtifact(orgId, taskId, `${result.slug}.${language === 'python' ? 'py' : language === 'node' ? 'js' : 'sh'}`, code, {
+            language, skill_slug: result.slug, origin: 'agent-loop',
+          });
+          return `Skill "${result.slug}" v${result.version} guardada (y como artifact). Reutilízala con skill_run{"slug":"${result.slug}"}.`;
+        },
+      },
+      {
         name: 'script_forge',
         usage: 'script_forge{"spec"}: pide a un modelo especializado escribir Y ejecutar un script completo (queda registrado como skill reutilizable). Prefiere code_execute para iterar tú mismo.',
         execute: async (orgId, taskId, args) => {
@@ -548,11 +572,66 @@ export class AgentLoopService {
     }
   }
 
-  // ── memoria de soluciones (estilo a0: memoriza el "cómo", no el chat) ─────
+  // ── sedimentación (estilo hermes: cada run exitoso deja conocimiento) ────
+
+  /**
+   * Auto-sedimentación de skills: si el run resolvió con código y el modelo
+   * NO guardó nada explícitamente (skill_save/script_forge), el último
+   * code_execute exitoso se registra solo como skill + artifact. Es el
+   * "a pass that does nothing is a missed learning opportunity" del
+   * background review de hermes, sin un segundo agente: el trabajo probado
+   * nunca se pierde. SkillGuard sigue siendo el gate.
+   */
+  private maybeAutoSaveSkill(orgId: string, taskId: string, goal: string, steps: AgentLoopStep[]): void {
+    const alreadySaved = steps.some(
+      (s) => (s.tool === 'skill_save' || s.tool === 'script_forge') && !s.observation.startsWith('ERROR:'),
+    );
+    if (alreadySaved) return;
+
+    const lastCodeStep = [...steps].reverse().find(
+      (s) => s.tool === 'code_execute' && !s.observation.startsWith('ERROR:'),
+    );
+    const code = String(lastCodeStep?.args?.code ?? '').trim();
+    if (!lastCodeStep || code.length < MIN_SKILL_CODE_LENGTH) return;
+
+    const rawLang = String(lastCodeStep.args?.language ?? 'python');
+    const language: SandboxLanguage = rawLang === 'node' || rawLang === 'bash' ? rawLang : 'python';
+    const description = `Resuelve: ${goal.slice(0, 220)} (sedimentada automáticamente del agent-loop)`;
+
+    void this.skillLibrary
+      .register(orgId, {
+        slug: `loop-${goal}`,
+        displayName: goal.slice(0, 80),
+        description,
+        language,
+        code,
+        origin: 'agent-loop-auto',
+        taskId,
+      })
+      .then(async (result) => {
+        if (!result.ok) {
+          this.logger.debug(`auto-skill skipped: ${result.reason}`);
+          return;
+        }
+        this.logger.log(`auto-skill "${result.slug}" v${result.version} sedimentada de la tarea ${taskId}`);
+        await this.saveArtifact(orgId, taskId, `${result.slug}.${language === 'python' ? 'py' : language === 'node' ? 'js' : 'sh'}`, code, {
+          language, skill_slug: result.slug, origin: 'agent-loop-auto',
+        });
+      })
+      .catch((err) => this.logger.debug(`auto-skill failed: ${(err as Error).message}`));
+  }
+
+  private async saveArtifact(orgId: string, taskId: string, title: string, content: string, metadata: Record<string, unknown>): Promise<void> {
+    const { error } = await this.db.admin.from('artifacts').insert({
+      org_id: orgId, task_id: taskId, kind: 'code', title, content, metadata,
+    });
+    if (error) this.logger.warn(`artifact save failed: ${error.message}`);
+  }
 
   private maybeMemorizeSolution(orgId: string, taskId: string, goal: string, steps: AgentLoopStep[], depth: number): void {
     try {
       if (depth !== 0) return;
+      this.maybeAutoSaveSkill(orgId, taskId, goal, steps);
       const codeSteps = steps.filter((s) => CODE_TOOLS.has(s.tool) && !s.observation.startsWith('ERROR:'));
       if (codeSteps.length === 0) return;
 
