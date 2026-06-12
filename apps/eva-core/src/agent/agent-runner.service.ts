@@ -1396,7 +1396,8 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           .replace(/\b(por\s+)?(whatsapp|whatsap|watsapp|watsap|guasap|wa)\b/ig, '')
           .trim();
         contact = contact.replace(/\s+(?:de|con|en|para)$/i, '').trim();
-        if (contact && contact.length > 1 && !/^(mis?|el|los|un|una|la)$/i.test(contact)) {
+        const genericPhrases = /^(mis?|el|los|un|una|la|ultimo\s+chat|el\s+ultimo\s+chat|los\s+ultimo\s+chats|mensajes?|chats?|conversaci[oó]n|conversaciones?|mensajes?\s+sin\s+(?:leer|responder|contestar))$/i;
+        if (contact && contact.length > 1 && !genericPhrases.test(contact)) {
           return contact;
         }
       }
@@ -2635,6 +2636,16 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           } catch { /* el resultado ya salió por el event bus */ }
           await this.log(orgId, taskId, `sandbox network exec done in ${Date.now() - startedAt}ms`, 'approval');
           return;
+        }
+        case 'whatsapp.message.send': {
+          const contact = String(payload.contact);
+          const body = String(payload.text);
+          const r = await this.whatsapp.sendMessage(orgId, contact, body, taskId);
+          if (r.session.screenshot) {
+            await this.maybePublishBrowserScreenshot(orgId, taskId, r.session.screenshot, 'WhatsApp Web');
+          }
+          resultText = r.text;
+          break;
         }
         default:
           await this.log(orgId, taskId, `executeApprovedAction: unknown action_type "${actionType}"`, 'approval');

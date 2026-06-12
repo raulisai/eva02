@@ -395,6 +395,15 @@ describe('AgentRunnerService', () => {
               messages: ['[2:09 pm]: Hola'],
               text: 'Mensajes recientes de **Michael Sec** en WhatsApp:\n\n[2:09 pm]: Hola',
             }),
+            sendMessage: jest.fn().mockResolvedValue({
+              ok: true,
+              session: {
+                session_id: 'browser-session-1',
+                state: 'logged_in',
+                current_url: 'https://web.whatsapp.com/',
+              },
+              text: '✅ Mensaje enviado con éxito',
+            }),
           },
         },
         {
@@ -1766,5 +1775,63 @@ describe('AgentRunnerService', () => {
     expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('net ok') }));
     // Tarea ya terminal → no se fuerza otra transición a completed
     expect(tasks.transition).not.toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
+  });
+
+  it('executes whatsapp.message.send after approval.resolved and delivers result', async () => {
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+
+    approvals.consumeApproved.mockResolvedValue({
+      id: 'approval-3',
+      org_id: ORG,
+      task_id: TASK,
+      action_type: 'whatsapp.message.send',
+      action_hash: 'c'.repeat(64),
+      nonce: 'n3',
+      status: 'approved',
+      level: 1,
+      payload: { contact: 'Michael Sec', text: 'Hola' },
+      summary: null,
+      screenshot_ref: null,
+      source: 'core_path',
+      requested_by: 'user-1',
+      reviewed_by: 'user-1',
+      reviewed_by_2: null,
+      nonce_used_at: null,
+      expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    } as never);
+
+    whatsapp.sendMessage.mockResolvedValue({
+      ok: true,
+      session: {
+        session_id: 'session-1',
+        state: 'logged_in',
+        current_url: 'https://web.whatsapp.com/',
+        screenshot: {
+          id: 'shot-1',
+          org_id: ORG,
+          session_id: 'session-1',
+          task_id: TASK,
+          image_base64: 'iVBORw0KGgo=',
+          mime_type: 'image/png',
+          created_at: new Date().toISOString(),
+        },
+      },
+      text: '✅ Mensaje enviado con éxito a **Michael Sec**: "Hola"',
+    });
+
+    tasks.getTask.mockResolvedValue(makeTask({ status: 'waiting_for_approval' }));
+
+    service.onApplicationBootstrap();
+    const onCalls = (events.on as jest.Mock).mock.calls as [string, (event: unknown) => Promise<void>][];
+    const resolvedHandler = onCalls.find(([type]) => type === 'approval.resolved')![1];
+    await resolvedHandler({ type: 'approval.resolved', orgId: ORG, taskId: TASK, payload: { approvalId: 'approval-3', status: 'approved' }, ts: Date.now() });
+
+    expect(approvals.consumeApproved).toHaveBeenCalledWith('approval-3', ORG);
+    expect(whatsapp.sendMessage).toHaveBeenCalledWith(ORG, 'Michael Sec', 'Hola', TASK);
+    const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
+    expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('Mensaje enviado con éxito') }));
   });
 });

@@ -405,6 +405,159 @@ export class WhatsAppWebService {
     };
   }
 
+  async sendMessage(
+    orgId: string,
+    contactName: string,
+    messageBody: string,
+    taskId?: string,
+  ): Promise<{ ok: boolean; session: WhatsAppSessionStatus; text: string }> {
+    const session = await this.startSession(orgId, taskId);
+
+    if (session.state === 'qr_required') {
+      return {
+        ok: false,
+        session,
+        text: 'No se pudo enviar el mensaje porque WhatsApp Web requiere vinculación por código QR.',
+      };
+    }
+
+    if (session.state !== 'logged_in') {
+      return {
+        ok: false,
+        session,
+        text: 'No se pudo enviar el mensaje porque la sesión no está conectada o está cargando.',
+      };
+    }
+
+    const { ok: opened, actualContactName } = await this.selectContact(session.session_id, orgId, contactName);
+
+    // Capture screenshot after selectContact
+    const screenshot = await this.browser.screenshot(session.session_id, orgId);
+    const updatedSession = { ...session, screenshot };
+
+    if (!opened || !actualContactName) {
+      return {
+        ok: false,
+        session: updatedSession,
+        text: `No pude encontrar el contacto **${contactName}** en WhatsApp para enviarle el mensaje.`,
+      };
+    }
+
+    // Now type the message in the input field
+    const inputSelectors = [
+      '#main footer div[contenteditable="true"]',
+      '#main footer div[contenteditable="true"][data-tab="10"]',
+      '#main footer div.lexical-rich-text-input div[contenteditable="true"]',
+      '#main div[contenteditable="true"][data-tab="10"]',
+      'div[contenteditable="true"][data-tab="10"]',
+      '#main footer input[type="text"]',
+      '#main footer [role="textbox"]',
+      '[contenteditable="true"][aria-label="Escribe un mensaje aquí"]',
+      '[contenteditable="true"][aria-label="Type a message"]'
+    ];
+
+    let inputTyped = false;
+    for (const selector of inputSelectors) {
+      try {
+        await this.browser.clickNow(session.session_id, orgId, selector, { timeout: 1500 });
+        await this.browser.evaluate(session.session_id, orgId, (sel) => {
+          const el = document.querySelector(sel) as HTMLElement;
+          if (el) {
+            el.focus();
+            if (el.getAttribute('contenteditable') === 'true') {
+              el.innerText = '';
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            } else if (el instanceof HTMLInputElement) {
+              el.value = '';
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+          }
+        }, selector);
+
+        await this.browser.typeCharacters(session.session_id, orgId, messageBody, 50);
+        inputTyped = true;
+        break;
+      } catch (e) {
+        // ignore and try next
+      }
+    }
+
+    if (!inputTyped) {
+      return {
+        ok: false,
+        session: updatedSession,
+        text: `No pude encontrar el cuadro de texto para escribir el mensaje en el chat de **${actualContactName}**.`,
+      };
+    }
+
+    // Click the send button
+    const sendButtonSelectors = [
+      '#main footer button span[data-testid="send"]',
+      '#main footer button[data-testid="compose-btn-send"]',
+      '#main footer button:has(span[data-icon="send"])',
+      'button[aria-label="Send"]',
+      'button[aria-label="Enviar"]',
+      'span[data-icon="send"]',
+      'span[data-testid="send"]',
+      '#main footer button'
+    ];
+
+    let clickedSend = false;
+    for (const selector of sendButtonSelectors) {
+      try {
+        await this.browser.clickNow(session.session_id, orgId, selector, { timeout: 1500 });
+        clickedSend = true;
+        break;
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (!clickedSend) {
+      // If we couldn't find/click the send button, try pressing Enter key!
+      try {
+        await this.browser.evaluate(session.session_id, orgId, () => {
+          const activeEl = document.activeElement as HTMLElement;
+          if (activeEl) {
+            const enterEvent = new KeyboardEvent('keydown', {
+              key: 'Enter',
+              code: 'Enter',
+              keyCode: 13,
+              which: 13,
+              bubbles: true,
+              cancelable: true
+            });
+            activeEl.dispatchEvent(enterEvent);
+          }
+        });
+        clickedSend = true;
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Wait a brief moment for the message to send
+    await this.browser.wait(session.session_id, orgId, 2000);
+
+    // Final screenshot to confirm it has been sent
+    const finalScreenshot = await this.browser.screenshot(session.session_id, orgId);
+    const finalSession = { ...session, screenshot: finalScreenshot };
+
+    if (clickedSend) {
+      return {
+        ok: true,
+        session: finalSession,
+        text: `✅ Mensaje enviado con éxito a **${actualContactName}**: "${messageBody}"`,
+      };
+    } else {
+      return {
+        ok: false,
+        session: finalSession,
+        text: `No pude enviar el mensaje a **${actualContactName}** porque falló el clic en el botón de enviar y el envío por teclado.`,
+      };
+    }
+  }
+
   private settleMs(): number {
     const configured = Number(process.env.WHATSAPP_WEB_SETTLE_MS ?? DEFAULT_SETTLE_MS);
     if (!Number.isFinite(configured)) return DEFAULT_SETTLE_MS;
@@ -490,52 +643,144 @@ export class WhatsAppWebService {
 
   private async extractVisibleChats(sessionId: string, orgId: string): Promise<WhatsAppChatPreview[]> {
     try {
-      const rows = await this.browser.evaluate<WhatsAppChatRowSnapshot[]>(sessionId, orgId, () => {
-        const normalize = (value: string) => value.replace(/\u00a0/g, ' ').replace(/[ \t]+/g, ' ').trim();
-        const unique = (values: string[]) => {
-          const seen = new Set<string>();
-          return values
-            .map((line) => normalize(line))
-            .filter(Boolean)
-            .filter((line) => {
-              const key = line.toLowerCase();
-              if (seen.has(key)) return false;
-              seen.add(key);
-              return true;
-            });
-        };
+      return await this.browser.evaluate<WhatsAppChatPreview[]>(sessionId, orgId, () => {
         const pane =
           document.querySelector('#pane-side')
           || document.querySelector('[aria-label="Chat list"]')
           || document.querySelector('[aria-label="Lista de chats"]')
+          || document.querySelector('[role="grid"]')
           || document.body;
 
-        const elements = Array.from(pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'))
-          .filter((element) => {
-            const htmlElement = element as HTMLElement;
-            const rect = htmlElement.getBoundingClientRect();
-            const text = normalize(htmlElement.innerText ?? '');
-            return text && rect.height >= 32 && rect.width >= 160;
-          });
+        if (!pane) return [];
 
-        return elements.slice(0, 30).map((element) => {
-          const htmlElement = element as HTMLElement;
-          const labelled = Array.from(htmlElement.querySelectorAll('[aria-label]'))
-            .map((node) => (node as HTMLElement).getAttribute('aria-label') ?? '');
-          const titled = Array.from(htmlElement.querySelectorAll('[title]'))
-            .map((node) => (node as HTMLElement).getAttribute('title') ?? '');
-          const text = normalize(htmlElement.innerText ?? '');
+        const rows = Array.from(pane.querySelectorAll('[role="row"], [data-testid^="list-item-"]'));
+        
+        const isMatch = (chatName: string | null | undefined, query: string | null | undefined): boolean => {
+          if (!chatName || !query) return false;
+          const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+          const c = clean(chatName);
+          const q = clean(query);
+          return c.includes(q);
+        };
+
+        const parsedRows = rows.map((row) => {
+          const htmlRow = row as HTMLElement;
+          
+          let orderIndex = 0;
+          const testId = htmlRow.getAttribute('data-testid') || '';
+          const match = testId.match(/list-item-(\d+)/);
+          if (match) {
+            orderIndex = parseInt(match[1], 10);
+          } else {
+            const transform = htmlRow.style.transform || '';
+            const transformMatch = transform.match(/translateY\((\d+)px\)/);
+            if (transformMatch) {
+              orderIndex = Math.round(parseInt(transformMatch[1], 10) / 76);
+            }
+          }
+          
+          const titleEl = htmlRow.querySelector('[data-testid="cell-frame-title"] span[dir="auto"], [data-testid="cell-frame-title"] [title], [class*="title"] [title]');
+          let chatName = '';
+          if (titleEl) {
+            chatName = titleEl.getAttribute('title') || titleEl.textContent || '';
+          }
+          if (!chatName) {
+            const spansWithTitle = Array.from(htmlRow.querySelectorAll('span[title]'));
+            for (const span of spansWithTitle) {
+              const title = span.getAttribute('title') || '';
+              if (title.length > 1 && title.length < 100 && !/unread messages|sin leer|WhatsApp/i.test(title)) {
+                chatName = title;
+                break;
+              }
+            }
+          }
+          if (!chatName) {
+            const textLines = (htmlRow.innerText || '').split('\n').map(s => s.trim()).filter(Boolean);
+            chatName = textLines[0] || '';
+          }
+          chatName = chatName.trim();
+
+          let unreadCount = 0;
+          const unreadEl = htmlRow.querySelector('[data-testid="icon-unread-count"], [aria-label*="unread"], [aria-label*="sin leer"]');
+          if (unreadEl) {
+            const label = unreadEl.getAttribute('aria-label') || '';
+            const numMatch = label.match(/(\d+)/);
+            if (numMatch) {
+              unreadCount = parseInt(numMatch[1], 10);
+            } else {
+              unreadCount = parseInt(unreadEl.textContent || '0', 10);
+            }
+          }
+
+          const msgStatusEl = htmlRow.querySelector('[data-testid="last-msg-status"]');
+          let preview = '';
+          if (msgStatusEl) {
+            preview = msgStatusEl.getAttribute('title') || msgStatusEl.textContent || '';
+          }
+          if (!preview) {
+            const lastMsgSpan = htmlRow.querySelector('[data-testid="last-msg-status"] span[dir]');
+            if (lastMsgSpan) {
+              preview = lastMsgSpan.getAttribute('title') || lastMsgSpan.textContent || '';
+            }
+          }
+          if (!preview) {
+            const textLines = (htmlRow.innerText || '').split('\n').map(s => s.trim()).filter(Boolean);
+            if (textLines.length >= 3) {
+              preview = textLines[2];
+            }
+          }
+          preview = preview.trim();
+
+          const timeEl = htmlRow.querySelector('[data-testid="cell-frame-primary-detail"], [class*="time"], [class*="date"]');
+          let time = '';
+          if (timeEl) {
+            time = timeEl.textContent || '';
+          }
+          if (!time) {
+            const textLines = (htmlRow.innerText || '').split('\n').map(s => s.trim()).filter(Boolean);
+            if (textLines.length >= 2) {
+              time = textLines[1];
+            }
+          }
+          time = time.trim();
+
+          let latestFromMe = false;
+          const meSelectors = [
+            '[data-testid="status-dblcheck"]',
+            '[data-testid="status-check"]',
+            '[data-testid="status-time"]',
+            '[data-icon^="status-"]',
+            '[data-testid="recalled"]'
+          ];
+          for (const sel of meSelectors) {
+            if (htmlRow.querySelector(sel)) {
+              latestFromMe = true;
+              break;
+            }
+          }
+          if (!latestFromMe && preview) {
+            if (/^(you|t[uú]|yo|me)\s*:?/i.test(preview)) {
+              latestFromMe = true;
+            }
+          }
+
           return {
-            text,
-            lines: unique(text.split('\n')),
-            titles: unique(titled),
-            aria_labels: unique([htmlElement.getAttribute('aria-label') ?? '', ...labelled]),
+            chat_name: chatName,
+            preview: preview || 'Vista previa no disponible',
+            time: time || undefined,
+            unread_count: unreadCount || undefined,
+            latest_from_me: latestFromMe,
+            orderIndex,
+            raw_lines: (htmlRow.innerText || '').split('\n').slice(0, 5)
           };
         });
+
+        return parsedRows
+          .filter(row => row.chat_name && !/^(chats?|buscar|search|nuevo chat|new chat)$/i.test(row.chat_name))
+          .sort((a, b) => a.orderIndex - b.orderIndex);
       });
-      return parseWhatsAppChatRows(rows);
     } catch (error) {
-      this.logger.warn(`Could not extract latest WhatsApp chat: ${(error as Error).message}`);
+      this.logger.warn(`Could not extract latest WhatsApp chats: ${(error as Error).message}`);
       return [];
     }
   }
@@ -588,62 +833,112 @@ export class WhatsAppWebService {
     ].filter(Boolean).join('\n');
   }
 
+  private async verifyOpenedChat(sessionId: string, orgId: string, contactName: string): Promise<{ opened: boolean; actualContactName: string | null }> {
+    return this.browser.evaluate<{ opened: boolean; actualContactName: string | null }, string>(
+      sessionId,
+      orgId,
+      (contactNameLower) => {
+        function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
+          if (!chatName || !query) return false;
+          const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+          const c = clean(chatName);
+          const q = clean(query);
+          if (c.includes(q)) return true;
+          const cWords = c.split(/\s+/);
+          const qWords = q.split(/\s+/);
+          const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.endsWith(qw) || cw.includes(qw)));
+          if (allMatched) return true;
+          const initials = cWords.map((w: string) => w[0]).join('');
+          if (initials.startsWith(q)) return true;
+          return false;
+        }
+
+        const header = document.querySelector('header') || document.querySelector('#main header');
+        if (header) {
+          const titleEl = header.querySelector('[dir="auto"], span[title]');
+          const headerText = titleEl 
+            ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || titleEl.textContent || '') 
+            : header.innerText || '';
+          if (isMatch(headerText, contactNameLower)) {
+            return { opened: true, actualContactName: headerText };
+          }
+          return { opened: false, actualContactName: headerText };
+        }
+        return { opened: false, actualContactName: null };
+      },
+      contactName.toLowerCase().trim()
+    );
+  }
+
+  private async clickElementAndVerify(
+    sessionId: string,
+    orgId: string,
+    selector: string,
+    contactName: string,
+    waitMs = 1500
+  ): Promise<{ ok: boolean; actualContactName: string | null }> {
+    try {
+      // 1. Native click
+      await this.browser.clickNow(sessionId, orgId, selector);
+      await this.browser.wait(sessionId, orgId, waitMs);
+      
+      let check = await this.verifyOpenedChat(sessionId, orgId, contactName);
+      if (check.opened) {
+        return { ok: true, actualContactName: check.actualContactName };
+      }
+
+      // 2. JS click fallback
+      await this.browser.evaluate(sessionId, orgId, (sel) => {
+        const el = document.querySelector(sel) as HTMLElement;
+        if (el) {
+          el.click();
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        }
+      }, selector);
+      await this.browser.wait(sessionId, orgId, waitMs);
+
+      check = await this.verifyOpenedChat(sessionId, orgId, contactName);
+      if (check.opened) {
+        return { ok: true, actualContactName: check.actualContactName };
+      }
+      return { ok: false, actualContactName: check.actualContactName };
+    } catch (err) {
+      this.logger.warn(`Click action failed on ${selector}: ${(err as Error).message}`);
+      return { ok: false, actualContactName: null };
+    }
+  }
+
+  private async clearSearchInput(sessionId: string, orgId: string): Promise<void> {
+    await this.browser.evaluate(sessionId, orgId, () => {
+      const clearSelectors = [
+        '[data-testid="cancel-search"]',
+        '[aria-label="Cancel search"]',
+        '[aria-label="Clear search"]',
+        'span[data-icon="x-alt"]',
+        'button[aria-label="Clear search"]'
+      ];
+      for (const sel of clearSelectors) {
+        const btn = document.querySelector(sel) as HTMLElement;
+        if (btn) {
+          btn.click();
+        }
+      }
+    });
+    await this.browser.wait(sessionId, orgId, 500);
+  }
+
   private async selectContact(sessionId: string, orgId: string, contactName: string): Promise<{ ok: boolean; actualContactName: string | null }> {
     const contactLower = contactName.toLowerCase().trim();
 
     // 1. Check if we are already in the chat with this contact
-    const alreadyOpen = await this.browser.evaluate<{ open: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
-      function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
-        if (!chatName || !query) return false;
-        const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-        const c = clean(chatName);
-        const q = clean(query);
-        if (c.includes(q)) return true;
-        const cWords = c.split(/\s+/);
-        const qWords = q.split(/\s+/);
-        const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw)));
-        if (allMatched) return true;
-        const initials = cWords.map((w: string) => w[0]).join('');
-        if (initials.startsWith(q)) return true;
-        return false;
-      }
-
-      const header = document.querySelector('header');
-      if (header) {
-        const titleEl = header.querySelector('[dir="auto"], span[title]');
-        const headerText = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || titleEl.textContent || '') : header.innerText || '';
-        if (isMatch(headerText, contactNameLower)) {
-          return { open: true, actualContactName: headerText };
-        }
-      }
-      return { open: false, actualContactName: null };
-    }, contactLower);
-
-    if (alreadyOpen.open) {
+    const alreadyOpen = await this.verifyOpenedChat(sessionId, orgId, contactName);
+    if (alreadyOpen.opened) {
       return { ok: true, actualContactName: alreadyOpen.actualContactName };
     }
 
-    // 2. Try to click on the contact if it's already visible in the list
-    const clickedVisible = await this.browser.evaluate<{ clicked: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
-      function getRowChatName(el: HTMLElement) {
-        const titled = Array.from(el.querySelectorAll('[title]')).map(node => node.getAttribute('title') || '');
-        const labelled = Array.from(el.querySelectorAll('[aria-label]')).map(node => node.getAttribute('aria-label') || '');
-        const spans = Array.from(el.querySelectorAll('span')).map(node => node.innerText || '');
-        const candidates = [...titled, ...labelled, ...spans].map(s => s.trim()).filter(Boolean);
-        for (const cand of candidates) {
-          if (cand.length > 0 && cand.length < 90) {
-            const lower = cand.toLowerCase();
-            if (/^(chats?|chat list|lista de chats|archivados?|archived|comunidades|communities|estados?|status|canales|channels|nuevo chat|new chat|buscar|search)$/i.test(cand)) continue;
-            if (/^\d+$/.test(cand)) continue;
-            if (/^(?:\d{1,2}:\d{2}|ayer|yesterday|hoy|today)$/i.test(cand)) continue;
-            if (/\b(unread|sin leer|typing|escribiendo|online|en linea)\b/i.test(lower)) continue;
-            if (/^(you|yo|t[uú])$/i.test(lower)) continue;
-            return cand;
-          }
-        }
-        return el.textContent || '';
-      }
-
+    // 2. Try to click on the contact if it's already visible in the list using native Playwright click
+    const rowSelector = await this.browser.evaluate<string | null, string>(sessionId, orgId, (contactNameLower) => {
       function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
         if (!chatName || !query) return false;
         const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
@@ -652,7 +947,7 @@ export class WhatsAppWebService {
         if (c.includes(q)) return true;
         const cWords = c.split(/\s+/);
         const qWords = q.split(/\s+/);
-        const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw)));
+        const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.endsWith(qw) || cw.includes(qw)));
         if (allMatched) return true;
         const initials = cWords.map((w: string) => w[0]).join('');
         if (initials.startsWith(q)) return true;
@@ -660,27 +955,34 @@ export class WhatsAppWebService {
       }
 
       const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
-      const elements = Array.from(pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
+      const elements = Array.from(pane.querySelectorAll('[role="row"], [data-testid^="list-item-"]'));
       for (const el of elements) {
-        const chatName = getRowChatName(el as HTMLElement);
+        const titleEl = el.querySelector('[data-testid="cell-frame-title"] span[dir="auto"], [data-testid="cell-frame-title"] [title], [class*="title"] [title]');
+        const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.textContent || '') : el.textContent || '';
         if (isMatch(chatName, contactNameLower)) {
-          const clickable = el.querySelector('[role="button"]') || el.querySelector('div[class*="clickable"]') || el;
-          clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-          clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-          (clickable as HTMLElement).click();
-          return { clicked: true, actualContactName: chatName };
+          const clickable = el.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || el;
+          const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          clickable.setAttribute('data-eva-click-target', clickId);
+          return `[data-eva-click-target="${clickId}"]`;
         }
       }
-      return { clicked: false, actualContactName: null };
+      return null;
     }, contactLower);
 
-    if (clickedVisible.clicked) {
-      await this.browser.wait(sessionId, orgId, 1500); // Wait for chat to open
-      return { ok: true, actualContactName: clickedVisible.actualContactName };
+    if (rowSelector) {
+      const clickRes = await this.clickElementAndVerify(sessionId, orgId, rowSelector, contactName);
+      if (clickRes.ok) {
+        return clickRes;
+      }
     }
 
-    // 3. Search for the contact using clickNow + typeCharacters
+    // 3. Search for the contact using clickNow + typeNow / typeCharacters
+    await this.clearSearchInput(sessionId, orgId);
+
     const searchSelectors = [
+      'input#_r_a_',
+      'input[role="textbox"]',
+      'input[data-tab="3"]',
       '#side div[contenteditable="true"]',
       'div[contenteditable="true"][data-tab="3"]',
       'div.lexical-rich-text-input div[contenteditable="true"]',
@@ -694,106 +996,10 @@ export class WhatsAppWebService {
     let typed = false;
     for (const selector of searchSelectors) {
       try {
-        await this.browser.clickNow(sessionId, orgId, selector, { timeout: 1500 });
-        await this.browser.evaluate(sessionId, orgId, (sel) => {
-          const el = document.querySelector(sel) as HTMLElement;
-          if (el) {
-            el.focus();
-            if (el.getAttribute('contenteditable') === 'true') {
-              el.innerText = '';
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-          }
-        }, selector);
-        await this.browser.typeCharacters(sessionId, orgId, contactName, 80);
+        await this.browser.typeNow(sessionId, orgId, selector, contactName, { timeout: 1500 });
         typed = true;
         break;
       } catch (e) {
-        // ignore and try next
-      }
-    }
-
-    if (!typed) {
-      return { ok: false, actualContactName: null };
-    }
-
-    await this.browser.wait(sessionId, orgId, 2000); // Wait for search results to load
-
-    // Click the matching search result
-    const clickedSearchResult = await this.browser.evaluate<{ clicked: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
-      function getRowChatName(el: HTMLElement) {
-        const titled = Array.from(el.querySelectorAll('[title]')).map(node => node.getAttribute('title') || '');
-        const labelled = Array.from(el.querySelectorAll('[aria-label]')).map(node => node.getAttribute('aria-label') || '');
-        const spans = Array.from(el.querySelectorAll('span')).map(node => node.innerText || '');
-        const candidates = [...titled, ...labelled, ...spans].map(s => s.trim()).filter(Boolean);
-        for (const cand of candidates) {
-          if (cand.length > 0 && cand.length < 90) {
-            const lower = cand.toLowerCase();
-            if (/^(chats?|chat list|lista de chats|archivados?|archived|comunidades|communities|estados?|status|canales|channels|nuevo chat|new chat|buscar|search)$/i.test(cand)) continue;
-            if (/^\d+$/.test(cand)) continue;
-            if (/^(?:\d{1,2}:\d{2}|ayer|yesterday|hoy|today)$/i.test(cand)) continue;
-            if (/\b(unread|sin leer|typing|escribiendo|online|en linea)\b/i.test(lower)) continue;
-            if (/^(you|yo|t[uú])$/i.test(lower)) continue;
-            return cand;
-          }
-        }
-        return el.textContent || '';
-      }
-
-      function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
-        if (!chatName || !query) return false;
-        const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-        const c = clean(chatName);
-        const q = clean(query);
-        if (c.includes(q)) return true;
-        const cWords = c.split(/\s+/);
-        const qWords = q.split(/\s+/);
-        const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw)));
-        if (allMatched) return true;
-        const initials = cWords.map((w: string) => w[0]).join('');
-        if (initials.startsWith(q)) return true;
-        return false;
-      }
-
-      const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
-      const elements = Array.from(pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
-      
-      // Try matching
-      for (const el of elements) {
-        const chatName = getRowChatName(el as HTMLElement);
-        if (isMatch(chatName, contactNameLower)) {
-          const clickable = el.querySelector('[role="button"]') || el.querySelector('div[class*="clickable"]') || el;
-          clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-          clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-          (clickable as HTMLElement).click();
-          return { clicked: true, actualContactName: chatName };
-        }
-      }
-      
-      // Fallback to first search result
-      if (elements.length > 0) {
-        const el = elements[0];
-        const chatName = getRowChatName(el as HTMLElement);
-        const clickable = el.querySelector('[role="button"]') || el.querySelector('div[class*="clickable"]') || el;
-        clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-        clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-        (clickable as HTMLElement).click();
-        return { clicked: true, actualContactName: chatName };
-      }
-      
-      return { clicked: false, actualContactName: null };
-    }, contactLower);
-
-    if (clickedSearchResult.clicked) {
-      await this.browser.wait(sessionId, orgId, 1500); // Wait for chat to open
-      return { ok: true, actualContactName: clickedSearchResult.actualContactName };
-    }
-
-    // Fallback: If full search yielded nothing, try searching for the first word/token of the query
-    const firstWord = contactName.split(/\s+/)[0];
-    if (firstWord && firstWord.length > 1 && firstWord.toLowerCase() !== contactLower) {
-      let typedFirst = false;
-      for (const selector of searchSelectors) {
         try {
           await this.browser.clickNow(sessionId, orgId, selector, { timeout: 1500 });
           await this.browser.evaluate(sessionId, orgId, (sel) => {
@@ -803,40 +1009,117 @@ export class WhatsAppWebService {
               if (el.getAttribute('contenteditable') === 'true') {
                 el.innerText = '';
                 el.dispatchEvent(new Event('input', { bubbles: true }));
+              } else if (el instanceof HTMLInputElement) {
+                el.value = '';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
               }
             }
           }, selector);
-          await this.browser.typeCharacters(sessionId, orgId, firstWord, 80);
+          await this.browser.typeCharacters(sessionId, orgId, contactName, 80);
+          typed = true;
+          break;
+        } catch (err) {
+          // ignore
+        }
+      }
+    }
+
+    if (typed) {
+      await this.browser.wait(sessionId, orgId, 2000); // Wait for search results to load
+
+      // Click the matching search result natively
+      const searchRowSelector = await this.browser.evaluate<string | null, string>(sessionId, orgId, (contactNameLower) => {
+        function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
+          if (!chatName || !query) return false;
+          const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+          const c = clean(chatName);
+          const q = clean(query);
+          if (c.includes(q)) return true;
+          const cWords = c.split(/\s+/);
+          const qWords = q.split(/\s+/);
+          const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.endsWith(qw) || cw.includes(qw)));
+          if (allMatched) return true;
+          const initials = cWords.map((w: string) => w[0]).join('');
+          if (initials.startsWith(q)) return true;
+          return false;
+        }
+
+        const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
+        const elements = Array.from(pane.querySelectorAll('[role="row"], [data-testid^="list-item-"]'));
+        
+        // Try matching first
+        for (const el of elements) {
+          const titleEl = el.querySelector('[data-testid="cell-frame-title"] span[dir="auto"], [data-testid="cell-frame-title"] [title], [class*="title"] [title]');
+          const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.textContent || '') : el.textContent || '';
+          if (isMatch(chatName, contactNameLower)) {
+            const clickable = el.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || el;
+            const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            clickable.setAttribute('data-eva-click-target', clickId);
+            return `[data-eva-click-target="${clickId}"]`;
+          }
+        }
+        
+        // Fallback to first search result if elements exist
+        if (elements.length > 0) {
+          const el = elements[0];
+          const clickable = el.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || el;
+          const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          clickable.setAttribute('data-eva-click-target', clickId);
+          return `[data-eva-click-target="${clickId}"]`;
+        }
+        return null;
+      }, contactLower);
+
+      if (searchRowSelector) {
+        const clickRes = await this.clickElementAndVerify(sessionId, orgId, searchRowSelector, contactName);
+        if (clickRes.ok) {
+          return clickRes;
+        }
+      }
+    }
+
+    // Fallback: If full search yielded nothing, try searching for the first word/token of the query
+    const firstWord = contactName.split(/\s+/)[0];
+    if (firstWord && firstWord.length > 1 && firstWord.toLowerCase() !== contactLower) {
+      await this.clearSearchInput(sessionId, orgId);
+
+      let typedFirst = false;
+      for (const selector of searchSelectors) {
+        try {
+          await this.browser.typeNow(sessionId, orgId, selector, firstWord, { timeout: 1500 });
           typedFirst = true;
           break;
         } catch (e) {
-          // ignore and try next
+          try {
+            await this.browser.clickNow(sessionId, orgId, selector, { timeout: 1500 });
+            await this.browser.evaluate(sessionId, orgId, (sel) => {
+              const el = document.querySelector(sel) as HTMLElement;
+              if (el) {
+                el.focus();
+                if (el.getAttribute('contenteditable') === 'true') {
+                  el.innerText = '';
+                  el.dispatchEvent(new Event('input', { bubbles: true }));
+                } else if (el instanceof HTMLInputElement) {
+                  el.value = '';
+                  el.dispatchEvent(new Event('input', { bubbles: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+              }
+            }, selector);
+            await this.browser.typeCharacters(sessionId, orgId, firstWord, 80);
+            typedFirst = true;
+            break;
+          } catch (err) {
+            // ignore
+          }
         }
       }
 
       if (typedFirst) {
         await this.browser.wait(sessionId, orgId, 2000);
 
-        const secondAttempt = await this.browser.evaluate<{ clicked: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
-          function getRowChatName(el: HTMLElement) {
-            const titled = Array.from(el.querySelectorAll('[title]')).map(node => node.getAttribute('title') || '');
-            const labelled = Array.from(el.querySelectorAll('[aria-label]')).map(node => node.getAttribute('aria-label') || '');
-            const spans = Array.from(el.querySelectorAll('span')).map(node => node.innerText || '');
-            const candidates = [...titled, ...labelled, ...spans].map(s => s.trim()).filter(Boolean);
-            for (const cand of candidates) {
-              if (cand.length > 0 && cand.length < 90) {
-                const lower = cand.toLowerCase();
-                if (/^(chats?|chat list|lista de chats|archivados?|archived|comunidades|communities|estados?|status|canales|channels|nuevo chat|new chat|buscar|search)$/i.test(cand)) continue;
-                if (/^\d+$/.test(cand)) continue;
-                if (/^(?:\d{1,2}:\d{2}|ayer|yesterday|hoy|today)$/i.test(cand)) continue;
-                if (/\b(unread|sin leer|typing|escribiendo|online|en linea)\b/i.test(lower)) continue;
-                if (/^(you|yo|t[uú])$/i.test(lower)) continue;
-                return cand;
-              }
-            }
-            return el.textContent || '';
-          }
-
+        const secondAttemptSelector = await this.browser.evaluate<string | null, string>(sessionId, orgId, (contactNameLower) => {
           function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
             if (!chatName || !query) return false;
             const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
@@ -853,35 +1136,35 @@ export class WhatsAppWebService {
           }
 
           const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
-          const elements = Array.from(pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
+          const elements = Array.from(pane.querySelectorAll('[role="row"], [data-testid^="list-item-"]'));
           
           for (const el of elements) {
-            const chatName = getRowChatName(el as HTMLElement);
+            const titleEl = el.querySelector('[data-testid="cell-frame-title"] span[dir="auto"], [data-testid="cell-frame-title"] [title], [class*="title"] [title]');
+            const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.textContent || '') : el.textContent || '';
             if (isMatch(chatName, contactNameLower)) {
-              const clickable = el.querySelector('[role="button"]') || el.querySelector('div[class*="clickable"]') || el;
-              clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-              clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-              (clickable as HTMLElement).click();
-              return { clicked: true, actualContactName: chatName };
+              const clickable = el.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || el;
+              const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+              clickable.setAttribute('data-eva-click-target', clickId);
+              return `[data-eva-click-target="${clickId}"]`;
             }
           }
 
           if (elements.length > 0) {
             const el = elements[0];
-            const chatName = getRowChatName(el as HTMLElement);
-            const clickable = el.querySelector('[role="button"]') || el.querySelector('div[class*="clickable"]') || el;
-            clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-            clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-            (clickable as HTMLElement).click();
-            return { clicked: true, actualContactName: chatName };
+            const clickable = el.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || el;
+            const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            clickable.setAttribute('data-eva-click-target', clickId);
+            return `[data-eva-click-target="${clickId}"]`;
           }
 
-          return { clicked: false, actualContactName: null };
+          return null;
         }, contactLower);
 
-        if (secondAttempt.clicked) {
-          await this.browser.wait(sessionId, orgId, 1500);
-          return { ok: true, actualContactName: secondAttempt.actualContactName };
+        if (secondAttemptSelector) {
+          const clickRes = await this.clickElementAndVerify(sessionId, orgId, secondAttemptSelector, contactName);
+          if (clickRes.ok) {
+            return clickRes;
+          }
         }
       }
     }

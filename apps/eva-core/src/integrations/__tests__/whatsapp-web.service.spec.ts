@@ -29,6 +29,7 @@ describe('WhatsAppWebService', () => {
       saveProfileState: jest.fn().mockResolvedValue({}),
       typeCharacters: jest.fn().mockResolvedValue({}),
       clickNow: jest.fn().mockResolvedValue({}),
+      typeNow: jest.fn().mockResolvedValue({}),
     } as unknown as jest.Mocked<BrowserService>;
 
     service = new WhatsAppWebService(browser);
@@ -68,10 +69,11 @@ describe('WhatsAppWebService', () => {
     browser.evaluate
       .mockResolvedValueOnce('logged_in')
       .mockResolvedValueOnce([{
-        titles: ['Ana'],
-        lines: ['Ana', '17:38', 'Voy en camino', '2'],
-        aria_labels: ['2 unread messages'],
-        text: 'Ana\n17:38\nVoy en camino\n2',
+        chat_name: 'Ana',
+        preview: 'Voy en camino',
+        time: '17:38',
+        unread_count: 2,
+        latest_from_me: false,
       }]);
 
     const result = await service.fetchLatestMessage(ORG, TASK);
@@ -132,15 +134,17 @@ describe('WhatsAppWebService', () => {
     browser.evaluate
       .mockResolvedValueOnce('logged_in')
       .mockResolvedValueOnce([{
-        titles: ['Ana'],
-        lines: ['2 unread messages', 'Ana', '9:16 pm', 'Voy llegando', '2'],
-        aria_labels: ['2 unread messages'],
-        text: '2 unread messages\nAna\n9:16 pm\nVoy llegando\n2',
+        chat_name: 'Ana',
+        preview: 'Voy llegando',
+        time: '9:16 pm',
+        unread_count: 2,
+        latest_from_me: false,
       }, {
-        titles: ['Luis'],
-        lines: ['Luis', '8:00 pm', 'Gracias'],
-        aria_labels: [],
-        text: 'Luis\n8:00 pm\nGracias',
+        chat_name: 'Luis',
+        preview: 'Gracias',
+        time: '8:00 pm',
+        unread_count: 0,
+        latest_from_me: true,
       }]);
 
     const result = await service.fetchUnreadMessages(ORG, TASK);
@@ -155,15 +159,17 @@ describe('WhatsAppWebService', () => {
     browser.evaluate
       .mockResolvedValueOnce('logged_in')
       .mockResolvedValueOnce([{
-        titles: ['Ana'],
-        lines: ['Ana', '9:16 pm', 'Me avisas cuando llegues'],
-        aria_labels: [],
-        text: 'Ana\n9:16 pm\nMe avisas cuando llegues',
+        chat_name: 'Ana',
+        preview: 'Me avisas cuando llegues',
+        time: '9:16 pm',
+        unread_count: 0,
+        latest_from_me: false,
       }, {
-        titles: ['Luis'],
-        lines: ['Luis', '9:10 pm', '(You)', 'Ya quedó'],
-        aria_labels: [],
-        text: 'Luis\n9:10 pm\n(You)\nYa quedó',
+        chat_name: 'Luis',
+        preview: 'Ya quedó',
+        time: '9:10 pm',
+        unread_count: 0,
+        latest_from_me: true,
       }]);
 
     const result = await service.fetchUnansweredMessages(ORG, TASK);
@@ -177,9 +183,10 @@ describe('WhatsAppWebService', () => {
 
   it('opens and retrieves messages for a contact that is already visible in the list', async () => {
     browser.evaluate
-      .mockResolvedValueOnce('logged_in') // detectState
-      .mockResolvedValueOnce({ open: false, actualContactName: null }) // alreadyOpen (check header)
-      .mockResolvedValueOnce({ clicked: true, actualContactName: 'Michael Sec' }) // clickedVisible
+      .mockResolvedValueOnce('logged_in') // startSession: detectState
+      .mockResolvedValueOnce({ opened: false, actualContactName: null }) // selectContact: alreadyOpen
+      .mockResolvedValueOnce('[data-eva-click-target="click-row"]') // selectContact: rowSelector
+      .mockResolvedValueOnce({ opened: true, actualContactName: 'Michael Sec' }) // selectContact: verifyOpened after click
       .mockResolvedValueOnce(['[2:09 pm] Michael Sec: Hola']); // extractOpenChatMessages
 
     const result = await service.fetchContactMessages(ORG, 'Michael Sec', TASK);
@@ -191,16 +198,17 @@ describe('WhatsAppWebService', () => {
 
   it('searches for and retrieves messages for a contact that is not immediately visible', async () => {
     browser.evaluate
-      .mockResolvedValueOnce('logged_in') // detectState
-      .mockResolvedValueOnce({ open: false, actualContactName: null }) // alreadyOpen
-      .mockResolvedValueOnce({ clicked: false, actualContactName: null }) // clickedVisible
-      .mockResolvedValueOnce(true) // searchFocused
-      .mockResolvedValueOnce({ clicked: true, actualContactName: 'Michael Sec' }) // clickedSearchResult
+      .mockResolvedValueOnce('logged_in') // startSession: detectState
+      .mockResolvedValueOnce({ opened: false, actualContactName: null }) // selectContact: alreadyOpen
+      .mockResolvedValueOnce(null) // selectContact: rowSelector (not visible)
+      .mockResolvedValueOnce(undefined) // selectContact: clearSearchInput
+      .mockResolvedValueOnce('[data-eva-click-target="click-search"]') // selectContact: searchRowSelector
+      .mockResolvedValueOnce({ opened: true, actualContactName: 'Michael Sec' }) // selectContact: verifyOpened after search click
       .mockResolvedValueOnce(['[2:09 pm] Michael Sec: Hola']); // extractOpenChatMessages
 
     const result = await service.fetchContactMessages(ORG, 'Michael Sec', TASK);
 
-    expect(browser.typeCharacters).toHaveBeenCalledWith('session-1', ORG, 'Michael Sec', 80);
+    expect(browser.typeNow).toHaveBeenCalledWith('session-1', ORG, expect.any(String), 'Michael Sec', { timeout: 1500 });
     expect(result.ok).toBe(true);
     expect(result.text).toContain('Michael Sec');
     expect(result.text).toContain('Hola');
@@ -208,17 +216,50 @@ describe('WhatsAppWebService', () => {
 
   it('returns contact_not_found if the contact cannot be found', async () => {
     browser.evaluate
-      .mockResolvedValueOnce('logged_in') // detectState
-      .mockResolvedValueOnce({ open: false, actualContactName: null }) // alreadyOpen
-      .mockResolvedValueOnce({ clicked: false, actualContactName: null }) // clickedVisible
-      .mockResolvedValueOnce(true) // searchFocused
-      .mockResolvedValueOnce({ clicked: false, actualContactName: null }) // clickedSearchResult
-      .mockResolvedValueOnce(true) // focus/clear search box fallback
-      .mockResolvedValueOnce({ clicked: false, actualContactName: null }); // secondAttempt fallback
+      .mockResolvedValueOnce('logged_in') // startSession: detectState
+      .mockResolvedValueOnce({ opened: false, actualContactName: null }) // selectContact: alreadyOpen
+      .mockResolvedValueOnce(null) // selectContact: rowSelector (not visible)
+      .mockResolvedValueOnce(undefined) // selectContact: clearSearchInput
+      .mockResolvedValueOnce(null) // selectContact: searchRowSelector (not found)
+      .mockResolvedValueOnce(undefined) // selectContact: clearSearchInput for fallback
+      .mockResolvedValueOnce(null); // selectContact: secondAttemptSelector (not found)
 
     const result = await service.fetchContactMessages(ORG, 'Michael Sec', TASK);
 
     expect(result.ok).toBe(false);
     expect(result.text).toContain('No pude encontrar');
+  });
+
+  describe('sendMessage', () => {
+    it('successfully sends a message when contact is found', async () => {
+      browser.evaluate
+        .mockResolvedValueOnce('logged_in') // startSession: detectState
+        .mockResolvedValueOnce({ opened: false, actualContactName: null }) // selectContact: alreadyOpen
+        .mockResolvedValueOnce('[data-eva-click-target="click-row"]') // selectContact: rowSelector
+        .mockResolvedValueOnce({ opened: true, actualContactName: 'Michael Sec' }) // selectContact: verifyOpened after click
+        .mockResolvedValueOnce(true); // sendMessage: focus/clear message input
+
+      const result = await service.sendMessage(ORG, 'Michael Sec', 'Hola', TASK);
+
+      expect(result.ok).toBe(true);
+      expect(result.text).toContain('Mensaje enviado con éxito');
+      expect(browser.typeCharacters).toHaveBeenCalledWith('session-1', ORG, 'Hola', 50);
+    });
+
+    it('returns error if contact is not found', async () => {
+      browser.evaluate
+        .mockResolvedValueOnce('logged_in') // startSession: detectState
+        .mockResolvedValueOnce({ opened: false, actualContactName: null }) // selectContact: alreadyOpen
+        .mockResolvedValueOnce(null) // selectContact: rowSelector (not visible)
+        .mockResolvedValueOnce(undefined) // selectContact: clearSearchInput
+        .mockResolvedValueOnce(null) // selectContact: searchRowSelector (not found)
+        .mockResolvedValueOnce(undefined) // selectContact: clearSearchInput for fallback
+        .mockResolvedValueOnce(null); // selectContact: secondAttemptSelector (not found)
+
+      const result = await service.sendMessage(ORG, 'Michael Sec', 'Hola', TASK);
+
+      expect(result.ok).toBe(false);
+      expect(result.text).toContain('No pude encontrar el contacto');
+    });
   });
 });

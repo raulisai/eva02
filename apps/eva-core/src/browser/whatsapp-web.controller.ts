@@ -59,4 +59,22 @@ export class WhatsAppWebController {
   ) {
     return this.whatsapp.fetchUnansweredMessages(req.user.orgId, body?.task_id);
   }
+
+  @Post('send-message')
+  @HttpCode(HttpStatus.OK)
+  sendMessage(
+    @Body() body: { contact: string; message: string; task_id?: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.whatsapp.sendMessage(req.user.orgId, body.contact, body.message, body?.task_id);
+  }
+
+  @Post('contact-messages')
+  @HttpCode(HttpStatus.OK)
+  contactMessages(
+    @Body() body: { contact: string; task_id?: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.whatsapp.fetchContactMessages(req.user.orgId, body.contact, body?.task_id);
+  }
 }

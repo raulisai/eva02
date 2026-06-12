@@ -13,6 +13,7 @@ import { SandboxLanguage, SandboxService } from './sandbox.service';
 import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
 import { SkillLibraryService, SkillSummary } from './skill-library.service';
+import { EventBusService } from '../events/event-bus.service';
 
 /** One executed cycle of the loop: what the model decided + what the tool observed. */
 export interface AgentLoopStep {
@@ -115,6 +116,7 @@ export class AgentLoopService {
     private readonly skillLibrary: SkillLibraryService,
     @Optional() private readonly approvals?: ApprovalsService,
     @Optional() private readonly integrations?: IntegrationsService,
+    @Optional() private readonly events?: EventBusService,
   ) {
     this.tools = this.buildToolCatalog();
   }
@@ -194,9 +196,10 @@ export class AgentLoopService {
         const text = String(decision.args.text ?? '').trim();
         if (text) {
           await log(`agent-loop: final_answer en paso ${i + 1} (${tokensUsed} tokens de razonamiento)`, 'loop');
-          this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, text);
+          const refinedText = depth === 0 ? await this.refineAndValidateResponse(orgId, taskId, goal, text) : text;
+          this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, refinedText);
           this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
-          return { ok: true, text, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
+          return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
         }
         steps.push({ tool: decision.tool, args: decision.args, thought: decision.thought, observation: 'ERROR: final_answer sin texto. Incluye args.text.' });
         continue;
@@ -222,6 +225,7 @@ export class AgentLoopService {
       }
 
       await log(`agent-loop paso ${i + 1}/${maxSteps}: ${spec.name}(${JSON.stringify(decision.args).slice(0, 160)}) — ${decision.thought.slice(0, 120)}`, 'loop');
+      await this.announceAction(orgId, taskId, spec.name, decision.args);
 
       let observation: string;
       try {
@@ -258,10 +262,11 @@ export class AgentLoopService {
         { orgId, taskId, requestType: 'response', budget: 'cheap', maxTokens: 600, temperature: 0.2 },
       );
       tokensUsed += synthesis.usage.totalTokens;
+      const refinedText = depth === 0 ? await this.refineAndValidateResponse(orgId, taskId, goal, synthesis.text) : synthesis.text;
       await log(`agent-loop: pasos agotados — sintetizando respuesta con ${gathered.length} hallazgos (${tokensUsed} tokens)`, 'loop');
-      this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, synthesis.text);
+      this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, refinedText);
       this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
-      return { ok: true, text: synthesis.text, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
+      return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     } catch (error) {
       await log(`agent-loop: síntesis falló — ${(error as Error).message}`, 'loop');
       this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
@@ -730,6 +735,107 @@ export class AgentLoopService {
     if (result.ok) return result.output || '(sin salida — añade prints/console.log para verificar)';
     const head = result.timedOut ? 'ERROR: timeout de ejecución' : `ERROR: ${result.error ?? 'ejecución falló'}`;
     return result.output ? `${head}\n${result.output}` : head;
+  }
+
+  private async say(orgId: string, taskId: string, text: string): Promise<void> {
+    if (this.events) {
+      await this.events.publish({
+        type: 'task.say',
+        orgId,
+        taskId,
+        payload: { text },
+      });
+    }
+  }
+
+  private async announceAction(
+    orgId: string,
+    taskId: string,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    let message = '';
+    switch (toolName) {
+      case 'web_search':
+        message = `Dame un momento, voy a buscar en internet 🔎`;
+        break;
+      case 'gmail_read':
+        message = `Voy a revisar tus correos para encontrar la información... 📬`;
+        break;
+      case 'gmail_send':
+      case 'gmail_reply':
+        message = `Redactando y enviando correo... ✉️`;
+        break;
+      case 'calendar_read':
+        message = `Voy a revisar tu calendario para ver tu agenda... 🗓️`;
+        break;
+      case 'calendar_create':
+      case 'calendar_update':
+        message = `Actualizando tu calendario... 🗓️`;
+        break;
+      case 'drive_read':
+        message = `Buscando en tus archivos de Google Drive... 📂`;
+        break;
+      case 'whatsapp_send':
+        message = `Enviando el mensaje por WhatsApp... 💬`;
+        break;
+      case 'whatsapp_screenshot':
+        message = `Abriendo WhatsApp Web para capturar pantalla... 📸`;
+        break;
+      case 'uber_estimate':
+      case 'uber-web':
+        message = `Abriendo Uber para cotizar tu viaje... 🚗`;
+        break;
+      case 'rappi-web':
+        message = `Revisando Rappi... 🍔`;
+        break;
+      case 'code_execute':
+        message = `Ejecutando código en el sandbox seguro... ⚙️`;
+        break;
+      case 'delegate':
+        message = `Delegando parte de la tarea a un sub-agente especializado... 🤖`;
+        break;
+    }
+
+    if (message) {
+      await this.say(orgId, taskId, message);
+    }
+  }
+
+  private async refineAndValidateResponse(
+    orgId: string,
+    taskId: string,
+    goal: string,
+    proposedText: string,
+  ): Promise<string> {
+    try {
+      const prompt = `Eres la capa de pensamiento y coherencia crítica de EVA. Tu objetivo es evaluar, limpiar y refinar la respuesta final que se le enviará al usuario.
+      
+Objetivo original del usuario: "${goal}"
+Respuesta propuesta: "${proposedText}"
+
+CRITERIOS DE CALIDAD QUE DEBES HACER CUMPLIR DE FORMA ESTRICTA:
+1. Coherencia temporal: Asegúrate de que la respuesta tenga sentido hoy (año 2026). Si la información recuperada de internet está desactualizada, no tiene sentido o es contradictoria, corrígela o explica la situación de forma directa y honesta en lugar de presentar datos absurdos.
+2. Formato conversacional / Voz: La respuesta debe ser natural, concisa y fluida para que se escuche bien si una voz de IA la lee en voz alta. Evita listas largas, viñetas complejas y formatos rígidos.
+3. NUNCA incluyas URLs, enlaces de fuentes, o referencias como "Fuentes:" o "[1] https://..." a menos que el usuario haya solicitado explícitamente enlaces o fuentes en su pregunta.
+4. Responde directamente al grano sin rodeos innecesarios o metadatos de depuración.
+
+Genera la respuesta final corregida y pulida en español. No incluyas ninguna explicación, justificación ni introducciones tuyas. Devuelve ÚNICAMENTE el texto final para el usuario.`;
+
+      const refined = await this.modelRouter.generate(prompt, {
+        orgId,
+        taskId,
+        requestType: 'response',
+        budget: 'cheap',
+        temperature: 0.1,
+        maxTokens: 500,
+      });
+
+      return refined.text.trim();
+    } catch (error) {
+      this.logger.warn(`Response refinement failed, using raw response: ${(error as Error).message}`);
+      return proposedText;
+    }
   }
 
   private toolsUsed(steps: AgentLoopStep[]): string[] {
