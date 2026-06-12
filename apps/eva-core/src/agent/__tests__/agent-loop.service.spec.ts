@@ -461,6 +461,130 @@ describe('AgentLoopService', () => {
     expect(result.steps[0].observation).toBe('análisis listo');
   });
 
+  // ── sub-agentes especializados ─────────────────────────────────────────────
+
+  it('advertises the specialist roles in the delegate catalog and orchestration rule', async () => {
+    modelRouter.generate.mockResolvedValueOnce(
+      modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"hecho"}}'),
+    );
+
+    await service.run(ORG, TASK, 'objetivo');
+
+    const system = modelRouter.generate.mock.calls[0][1]!.systemPrompt as string;
+    expect(system).toContain('investigador');
+    expect(system).toContain('programador');
+    expect(system).toContain('planeador');
+    expect(system).toContain('seguridad');
+    // Regla de orquestación: planear → ejecutar → auditar
+    expect(system).toContain('delega primero a "planeador"');
+  });
+
+  it('restricts the tool catalog of a specialist sub-agent to its profile', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"divide","tool":"delegate","args":{"goal":"investiga el mercado","role":"investigador"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"soy sub","tool":"final_answer","args":{"text":"hallazgos listos"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"cierro","tool":"final_answer","args":{"text":"Listo."}}'));
+
+    await service.run(ORG, TASK, 'analiza el mercado');
+
+    const subSystem = modelRouter.generate.mock.calls[1][1]!.systemPrompt as string;
+    // El investigador conserva búsqueda pero pierde herramientas de escritura/envío.
+    expect(subSystem).toContain('web_search');
+    expect(subSystem).toContain('ESPECIALIDAD — investigación');
+    expect(subSystem).not.toContain('telegram_send_file');
+    expect(subSystem).not.toContain('skill_save');
+  });
+
+  it('normalizes free-form roles to the closest specialist profile', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"divide","tool":"delegate","args":{"goal":"audita este script","role":"auditor de seguridad"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"reviso","tool":"final_answer","args":{"text":"sin riesgos"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"cierro","tool":"final_answer","args":{"text":"Auditado."}}'));
+
+    await service.run(ORG, TASK, 'valida el script');
+
+    const subSystem = modelRouter.generate.mock.calls[1][1]!.systemPrompt as string;
+    expect(subSystem).toContain('ESPECIALIDAD — seguridad');
+    expect(subSystem).not.toContain('skill_save');
+  });
+
+  it('passes the root findings as context to the delegated sub-agent', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"busco","tool":"web_search","args":{"query":"clima"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"delego","tool":"delegate","args":{"goal":"resume el clima","role":"investigador"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"sub","tool":"final_answer","args":{"text":"Resumen: despejado"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"fin","tool":"final_answer","args":{"text":"Despejado."}}'));
+
+    await service.run(ORG, TASK, 'reporte del clima');
+
+    // El user prompt del sub-agente (3ª llamada) trae los hallazgos del raíz.
+    const subUser = modelRouter.generate.mock.calls[2][0] as string;
+    expect(subUser).toContain('HALLAZGOS PREVIOS DEL AGENTE PRINCIPAL');
+    expect(subUser).toContain('Clima: 22°C despejado');
+  });
+
+  it('reports sub-agent failures with the last error and adaptation guidance', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"delego","tool":"delegate","args":{"goal":"busca datos","role":"investigador"}}'))
+      // sub-agente: dos decisiones no parseables → aborta
+      .mockResolvedValueOnce(modelReply('no soy json'))
+      .mockResolvedValueOnce(modelReply('tampoco'))
+      .mockResolvedValueOnce(modelReply('{"thought":"adapto","tool":"final_answer","args":{"text":"Lo resuelvo yo."}}'));
+
+    const result = await service.run(ORG, TASK, 'consigue los datos');
+
+    expect(result.steps[0].observation).toContain('ERROR: el sub-agente (investigador) no resolvió');
+    expect(result.steps[0].observation).toContain('Prueba otro rol');
+  });
+
+  // ── robustez: parseo y recuperación con opciones ───────────────────────────
+
+  it('feeds a format hint back after an unparseable decision instead of retrying blind', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('esto no es json'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"hecho"}}'));
+
+    const result = await service.run(ORG, TASK, 'objetivo');
+
+    const secondPrompt = modelRouter.generate.mock.calls[1][0] as string;
+    expect(secondPrompt).toContain('no fue JSON válido');
+    expect(secondPrompt).toContain('esto no es json');
+    expect(result.ok).toBe(true);
+  });
+
+  it('delivers honest options instead of a dry failure when every step errored', async () => {
+    research.answer.mockRejectedValue(new Error('API caída'));
+    gmail.fetchLatest.mockResolvedValue({ ok: false, reason: 'no_credential' });
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"1","tool":"web_search","args":{"query":"a"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"2","tool":"gmail_read","args":{}}'))
+      .mockResolvedValueOnce(modelReply('Intenté buscar y leer tu correo sin éxito. Opciones: (1) conecta Gmail, (2) dame el dato directo, (3) reintento en unos minutos.'));
+
+    const result = await service.run(ORG, TASK, 'objetivo', { maxSteps: 2 });
+
+    expect(result.ok).toBe(true);
+    expect(result.degraded).toBe(true);
+    expect(result.text).toContain('Opciones:');
+    // La síntesis de recuperación ve los errores reales (dicen qué falta).
+    const recoveryPrompt = modelRouter.generate.mock.calls[2][0] as string;
+    expect(recoveryPrompt).toContain('API caída');
+    expect(recoveryPrompt).toContain('opciones concretas y accionables');
+  });
+
+  it('still fails dry for sub-agents so the root can adapt (no recovery at depth 1)', async () => {
+    research.answer.mockRejectedValue(new Error('API caída'));
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"1","tool":"web_search","args":{"query":"a"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"2","tool":"web_search","args":{"query":"b"}}'));
+
+    const result = await service.run(ORG, TASK, 'objetivo', { maxSteps: 2, depth: 1 });
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toBe('');
+    // Sin llamada extra de síntesis: solo los 2 decides.
+    expect(modelRouter.generate).toHaveBeenCalledTimes(2);
+  });
+
   // ── memoria de soluciones ──────────────────────────────────────────────────
 
   it('memorizes the working solution as procedural memory after code success', async () => {

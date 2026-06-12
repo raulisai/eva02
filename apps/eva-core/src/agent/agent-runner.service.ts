@@ -2163,7 +2163,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
       if (!outcome.ok || !outcome.text) return false;
       await this.log(
         orgId, taskId,
-        `agent-loop resolvió en ${outcome.steps.length} pasos — herramientas [${outcome.toolsUsed.join(', ') || 'ninguna'}], ${outcome.tokensUsed} tokens de razonamiento`,
+        `agent-loop resolvió en ${outcome.steps.length} pasos${outcome.degraded ? ' (recuperación: respuesta con opciones)' : ''} — herramientas [${outcome.toolsUsed.join(', ') || 'ninguna'}], ${outcome.tokensUsed} tokens de razonamiento`,
         'loop',
       );
       await this.deliver(orgId, taskId, outcome.text, 'agent-loop', Date.now() - startedAt);

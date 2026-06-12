@@ -18,6 +18,7 @@ import { ScriptForgeService } from './script-forge.service';
 import { SkillLibraryService, SkillSummary } from './skill-library.service';
 import { EventBusService } from '../events/event-bus.service';
 import { TelegramAdapter } from '../communication/telegram.adapter';
+import { AgentProfile, DELEGATE_ROLE_CATALOG, resolveAgentProfile } from './agent-profiles';
 
 
 /** One executed cycle of the loop: what the model decided + what the tool observed. */
@@ -35,6 +36,8 @@ export interface AgentLoopOutcome {
   /** Tokens spent by the decide/synthesis calls of THIS loop (tool-internal LLM calls not included). */
   tokensUsed: number;
   toolsUsed: string[];
+  /** true cuando la respuesta es de recuperación (todo falló → opciones honestas, no el resultado pedido). */
+  degraded?: boolean;
 }
 
 export interface AgentLoopOptions {
@@ -129,18 +132,27 @@ export class AgentLoopService {
 
   async run(orgId: string, taskId: string, goal: string, opts: AgentLoopOptions = {}): Promise<AgentLoopOutcome> {
     const depth = Math.min(Math.max(opts.depth ?? 0, 0), MAX_DEPTH);
-    const maxSteps = Math.min(Math.max(opts.maxSteps ?? (depth === 0 ? DEFAULT_ROOT_STEPS : DEFAULT_SUB_STEPS), 1), 10);
+    // Perfil especializado (investigador/programador/planeador/seguridad): solo
+    // acota a sub-agentes; el raíz siempre conserva el catálogo completo.
+    const profile = depth > 0 ? resolveAgentProfile(opts.role) : null;
+    const defaultSteps = depth === 0 ? DEFAULT_ROOT_STEPS : profile?.maxSteps ?? DEFAULT_SUB_STEPS;
+    const maxSteps = Math.min(Math.max(opts.maxSteps ?? defaultSteps, 1), 10);
     const log = opts.log ?? (async () => undefined);
-    const available = this.tools.filter((t) => !t.rootOnly || depth === 0);
+    const available = this.tools.filter((t) => {
+      if (t.rootOnly && depth > 0) return false;
+      if (profile?.tools && !profile.tools.includes(t.name)) return false;
+      return true;
+    });
     const extras = depth === 0 ? await this.resolveExtras(orgId, goal) : { skills: [], secretAliases: [] };
     // El system (rol + herramientas + skills + secrets + reglas) es idéntico en
     // todos los pasos del run: se calcula UNA vez y se manda como prefijo
     // cacheable. Así no se re-cobran ~600 tokens estáticos por paso.
-    const systemPrompt = this.buildSystemPrompt(opts, available, extras);
+    const systemPrompt = this.buildSystemPrompt(opts, available, extras, profile);
 
     const steps: AgentLoopStep[] = [];
     let tokensUsed = 0;
     let parseFailures = 0;
+    let formatHint: string | undefined;
 
     await log(`agent-loop${depth > 0 ? ` (sub-agente d${depth})` : ''}: objetivo "${goal.slice(0, 120)}" — máx ${maxSteps} pasos`, 'loop');
     if (extras.skills.length > 0) {
@@ -169,7 +181,7 @@ export class AgentLoopService {
       let res: GenerateResult | undefined = undefined;
       try {
         res = await this.modelRouter.generate(
-          this.buildUserPrompt(goal, opts.context, steps, maxSteps - i),
+          this.buildUserPrompt(goal, opts.context, steps, maxSteps - i, formatHint),
           {
             orgId,
             taskId,
@@ -197,9 +209,12 @@ export class AgentLoopService {
           this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
           return { ok: false, text: '', steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
         }
+        // El reintento debe ver QUÉ estuvo mal, no repetir a ciegas.
+        formatHint = `Tu respuesta anterior no fue JSON válido${res?.text ? ` (empezaba: ${this.truncate(res.text, 120)})` : ''}. Responde SOLO el objeto {"thought":"...","tool":"...","args":{...}} sin texto adicional.`;
         continue;
       }
       parseFailures = 0;
+      formatHint = undefined;
 
       if (decision.tool === 'final_answer') {
         const text = String(decision.args.text ?? '').trim();
@@ -239,7 +254,7 @@ export class AgentLoopService {
       let observation: string;
       try {
         if (spec.name === 'delegate') {
-          observation = await this.runDelegate(orgId, taskId, decision.args, depth, opts, log);
+          observation = await this.runDelegate(orgId, taskId, decision.args, depth, opts, log, steps);
         } else if (spec.name === 'code_execute') {
           observation = await this.runCodeExecute(orgId, taskId, decision.args, opts);
         } else {
@@ -262,6 +277,19 @@ export class AgentLoopService {
     // Out of steps — synthesise an answer from what was gathered instead of failing dry.
     const gathered = steps.filter((s) => !s.observation.startsWith('ERROR:'));
     if (gathered.length === 0) {
+      // Nunca un "no" seco: si el agente realmente lo intentó (≥2 acciones),
+      // convierte los errores en una respuesta honesta con opciones accionables.
+      if (depth === 0 && steps.length >= 2) {
+        try {
+          const recovery = await this.synthesizeRecoveryOptions(orgId, taskId, goal, steps);
+          tokensUsed += recovery.usage.totalTokens;
+          await log(`agent-loop: todos los pasos fallaron — entregando respuesta de recuperación con opciones (${tokensUsed} tokens)`, 'loop');
+          this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, recovery.text);
+          return { ok: true, degraded: true, text: recovery.text.trim(), steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
+        } catch (error) {
+          await log(`agent-loop: síntesis de recuperación falló — ${(error as Error).message}`, 'loop');
+        }
+      }
       this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
       return { ok: false, text: '', steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     }
@@ -290,9 +318,10 @@ export class AgentLoopService {
    * + reglas. Idéntico en todos los pasos → se manda como systemPrompt cacheable
    * para no re-cobrar tokens de entrada en cada decisión.
    */
-  private buildSystemPrompt(opts: AgentLoopOptions, tools: ToolSpec[], extras: LoopExtras): string {
+  private buildSystemPrompt(opts: AgentLoopOptions, tools: ToolSpec[], extras: LoopExtras, profile?: AgentProfile | null): string {
     const blocks: string[] = [
       `Eres EVA en modo agente autónomo${opts.role ? `, actuando como ${opts.role}` : ''}. Resuelve el OBJETIVO eligiendo UNA acción por turno.`,
+      ...(profile ? [profile.mission] : []),
       '',
       'HERRAMIENTAS:',
       ...tools.map((t) => `- ${t.usage}`),
@@ -328,16 +357,26 @@ export class AgentLoopService {
         `SECRETS DISPONIBLES (escribe el alias literal en tu código; EVA sustituye el valor al ejecutar y tú NUNCA lo ves): ${extras.secretAliases.join(', ')}`,
       );
     }
+    // Las reglas solo mencionan herramientas que ESTE agente tiene: instruir a
+    // un sub-agente acotado a usar herramientas fuera de su perfil lo confunde.
+    const has = (name: string) => tools.some((t) => t.name === name);
     blocks.push(
       '',
       'REGLAS:',
+      ...(has('delegate')
+        ? ['- Objetivos complejos (varias partes, código + datos externos): delega primero a "planeador" para descomponer, ejecuta las subpartes con "investigador"/"programador", y si generaste código sensible o acciones con riesgo, valida con "seguridad" antes del final_answer. Cada sub-agente recibe tus hallazgos previos.']
+        : []),
       '- Antes de resolver desde cero, revisa memory_recall y el CATÁLOGO INTELIGENTE DE SKILLS.',
       '- Para código: divide en pasos pequeños (inspeccionar→preparar→ejecutar→verificar). Los archivos en /work persisten entre pasos de esta tarea.',
-      '- Para descargar medios/videos (YouTube, Platzi, etc.): el sandbox tiene preinstalado y listo para usar yt-dlp y ffmpeg. Escribe código de Python o Bash que use yt-dlp directamente para descargar el video/audio a /work. IMPORTANTE: Para que yt-dlp funcione y tenga acceso a internet, debes pasar el argumento "network": true al llamar a code_execute. Luego usa telegram_send_file para enviarlo. Evita clonar repositorios externos o instalar paquetes pesados.',
+      ...(has('code_execute') && has('telegram_send_file')
+        ? ['- Para descargar medios/videos (YouTube, Platzi, etc.): el sandbox tiene preinstalado y listo para usar yt-dlp y ffmpeg. Escribe código de Python o Bash que use yt-dlp directamente para descargar el video/audio a /work. IMPORTANTE: Para que yt-dlp funcione y tenga acceso a internet, debes pasar el argumento "network": true al llamar a code_execute. Luego usa telegram_send_file para enviarlo. Evita clonar repositorios externos o instalar paquetes pesados.']
+        : []),
       '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
       '- NUNCA inventes salida que ninguna herramienta produjo (datos, contenidos de archivo, respuestas de API). Reportar un bloqueo honesto siempre vale más que un resultado fabricado.',
-      '- Cuando un código funcione y resuelva algo no trivial (un fix, un método, un flujo), guárdalo con skill_save ANTES de final_answer. Si una skill que ejecutaste salió mal o desactualizada, corrígela y vuelve a guardarla con el mismo name.',
+      ...(has('skill_save')
+        ? ['- Cuando un código funcione y resuelva algo no trivial (un fix, un método, un flujo), guárdalo con skill_save ANTES de final_answer. Si una skill que ejecutaste salió mal o desactualizada, corrígela y vuelve a guardarla con el mismo name.']
+        : []),
       '- Las herramientas son de solo lectura/sandbox: si el objetivo exige enviar o modificar algo externo, junta la información y explica en final_answer qué quedaría pendiente de aprobación.',
       '- PROHIBIDO cerrar con "no se pudo" a secas: si algo queda fuera de tu alcance, tu final_answer debe traer lo que SÍ conseguiste + 2-3 opciones concretas de solución (qué reintentar, qué conectar, qué harías tú en el siguiente paso).',
       'Responde SOLO con JSON: {"thought":"breve","tool":"<nombre>","args":{...}}',
@@ -350,12 +389,13 @@ export class AgentLoopService {
    * restantes. Es lo único que cambia entre pasos, así que es lo único que
    * paga tokens nuevos. Las observaciones viejas van compactadas.
    */
-  private buildUserPrompt(goal: string, context: string | undefined, steps: AgentLoopStep[], stepsLeft: number): string {
+  private buildUserPrompt(goal: string, context: string | undefined, steps: AgentLoopStep[], stepsLeft: number, formatHint?: string): string {
     const blocks: string[] = [`OBJETIVO: ${goal}`];
     if (context) blocks.push('', `CONTEXTO:\n${context}`);
     if (steps.length > 0) {
       blocks.push('', 'PASOS PREVIOS:', ...this.renderHistory(steps));
     }
+    if (formatHint) blocks.push('', `ATENCIÓN: ${formatHint}`);
     blocks.push('', `Te quedan ${stepsLeft} acciones. Elige la siguiente acción y responde SOLO con el JSON.`);
     return blocks.join('\n');
   }
@@ -527,7 +567,7 @@ export class AgentLoopService {
       },
       {
         name: 'delegate',
-        usage: 'delegate{"goal","role"?}: delega un sub-objetivo acotado a un sub-agente con rol propio (ej. "investigador", "programador"). Divide tareas grandes; no delegues el objetivo completo.',
+        usage: `delegate{"goal","role"?}: delega un sub-objetivo acotado a un sub-agente especializado. Roles: ${DELEGATE_ROLE_CATALOG}. Divide tareas grandes; no delegues el objetivo completo.`,
         rootOnly: true,
         // Real execution lives in runDelegate() — needs depth/log from the caller.
         execute: async () => 'ERROR: delegate no disponible',
@@ -763,6 +803,7 @@ export class AgentLoopService {
     depth: number,
     opts: AgentLoopOptions,
     log: (message: string, scope: string) => Promise<unknown>,
+    parentSteps: AgentLoopStep[] = [],
   ): Promise<string> {
     const subGoal = String(args.goal ?? '').trim();
     if (!subGoal) return 'ERROR: delegate requiere args.goal';
@@ -772,10 +813,35 @@ export class AgentLoopService {
       const [suggested] = await this.skillLibrary.findRelevant(orgId, subGoal, 1).catch(() => []);
       role = suggested?.agentRole;
     }
+    // Complementariedad: el sub-agente arranca con lo que el raíz ya averiguó,
+    // no desde cero (un investigador alimenta al programador, etc.).
+    const findings = parentSteps.filter((s) => !s.observation.startsWith('ERROR:')).slice(-3);
+    const context = findings.length > 0
+      ? `HALLAZGOS PREVIOS DEL AGENTE PRINCIPAL:\n${findings.map((s) => `[${s.tool}] ${this.truncate(s.observation, 240)}`).join('\n')}`
+      : undefined;
     const sub = await this.run(orgId, taskId, subGoal, {
-      depth: depth + 1, maxSteps: DEFAULT_SUB_STEPS, role, userId: opts.userId, log,
+      depth: depth + 1, role, context, userId: opts.userId, log,
     });
-    return sub.ok ? sub.text : `ERROR: el sub-agente no pudo resolver "${subGoal.slice(0, 80)}"`;
+    if (sub.ok) return sub.text;
+    // El fallo del sub-agente trae el porqué: el raíz puede adaptar en vez de rendirse.
+    const lastError = [...sub.steps].reverse().find((s) => s.observation.startsWith('ERROR:'));
+    return `ERROR: el sub-agente (${role ?? 'generalista'}) no resolvió "${subGoal.slice(0, 80)}".${lastError ? ` Último error: ${this.truncate(lastError.observation, 160)}.` : ''} Prueba otro rol, divide distinto el objetivo o resuélvelo tú con otra herramienta.`;
+  }
+
+  /**
+   * Recuperación honesta cuando TODOS los pasos fallaron: en lugar de un "no
+   * se pudo" seco, redacta qué se intentó y 2-3 opciones accionables. Los
+   * errores de las herramientas suelen decir exactamente qué falta (integración
+   * sin conectar, dato faltante, permiso) — eso ES la respuesta útil.
+   */
+  private async synthesizeRecoveryOptions(orgId: string, taskId: string, goal: string, steps: AgentLoopStep[]): Promise<GenerateResult> {
+    const attempts = steps
+      .map((s) => `[${s.tool}] ${this.truncate(s.observation, 220)}`)
+      .join('\n');
+    return this.modelRouter.generate(
+      `OBJETIVO DEL USUARIO: ${goal}\n\nINTENTOS REALIZADOS (ninguno produjo el resultado esperado):\n${attempts}\n\nRedacta en español una respuesta honesta y útil para el usuario: una línea con qué se intentó y por qué no salió, seguida de 2 o 3 opciones concretas y accionables para lograrlo (qué integración conectar, qué dato falta, qué reintentar de otra forma). Nada de disculpas largas ni un "no se pudo" a secas. No inventes resultados.`,
+      { orgId, taskId, requestType: 'response', budget: 'cheap', maxTokens: 400, temperature: 0.2 },
+    );
   }
 
   // ── extras (skills + secrets, solo raíz) ──────────────────────────────────
@@ -1021,6 +1087,7 @@ CRITERIOS DE CALIDAD QUE DEBES HACER CUMPLIR DE FORMA ESTRICTA:
 2. Formato conversacional / Voz: La respuesta debe ser natural, concisa y fluida para que se escuche bien si una voz de IA la lee en voz alta. Evita listas largas, viñetas complejas y formatos rígidos.
 3. NUNCA incluyas URLs, enlaces de fuentes, o referencias como "Fuentes:" o "[1] https://..." a menos que el usuario haya solicitado explícitamente enlaces o fuentes en su pregunta.
 4. Responde directamente al grano sin rodeos innecesarios o metadatos de depuración.
+5. Nunca entregues un "no se pudo" o un rechazo a secas: si la respuesta propuesta reporta un bloqueo, consérvalo honesto pero asegúrate de que incluya lo que SÍ se logró y 2-3 opciones concretas de siguiente paso para el usuario.
 
 Genera la respuesta final corregida y pulida en español. No incluyas ninguna explicación, justificación ni introducciones tuyas. Devuelve ÚNICAMENTE el texto final para el usuario.`;
 
