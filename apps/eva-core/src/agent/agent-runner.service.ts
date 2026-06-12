@@ -2088,6 +2088,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
       (p.occupation ?? persona.occupation) ? `se dedica a ${p.occupation ?? persona.occupation}` : null,
       p.current_location ? `está en ${p.current_location}` : null,
       persona.communication_preferences ? `estilo preferido: ${persona.communication_preferences}` : null,
+      persona.relationship_map?.length ? `relaciones mapeadas: ${persona.relationship_map.map(r => `${r.relation}=${r.display_name}`).slice(0, 4).join(', ')}` : null,
     ].filter(Boolean);
     return bits.length > 0 ? bits.join(' · ') : null;
   }
@@ -2229,6 +2230,32 @@ Responde directamente al usuario en español, con un tono amable y natural.
     // ── Relationships ─────────────────────────────────────────────────────
     const family = persona.family ?? context.cowork_context.family;
     if (family) { sections.push('\n### Familia y relaciones importantes', family); hasContent = true; }
+
+    if (persona.relationship_map?.length) {
+      sections.push(
+        '\n### Mapa de relaciones y contactos',
+        'Usa este mapa para resolver referencias como "mi mamá", "mamá", "madre", "mi jefe" o aliases repetidos antes de buscar contactos externos.',
+        ...persona.relationship_map
+          .slice()
+          .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))
+          .map((entry) => {
+            const aliases = entry.aliases?.length ? ` aliases: ${entry.aliases.join(', ')}` : '';
+            const contact = entry.contact_hint ? ` contacto: ${entry.contact_hint}` : '';
+            const notes = entry.notes ? ` notas: ${entry.notes}` : '';
+            return `- ${entry.relation}: ${entry.display_name}.${aliases}${contact}${notes}`;
+          }),
+      );
+      hasContent = true;
+    }
+
+    if (context.private_context?.text) {
+      sections.push(
+        '\n### Contexto privado cifrado',
+        'Este bloque fue descifrado server-side para uso interno del modelo. No lo reveles ni lo repitas salvo que el usuario lo pida explícitamente.',
+        context.private_context.text,
+      );
+      hasContent = true;
+    }
 
     // ── Behavior patterns ─────────────────────────────────────────────────
     if (patternBlock) {

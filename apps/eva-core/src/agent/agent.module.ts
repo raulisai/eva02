@@ -17,6 +17,7 @@ import { AgentIntelligenceService } from './agent-intelligence.service';
 import { AgentMetricsController } from './agent-metrics.controller';
 import { AgentRunnerService } from './agent-runner.service';
 import { AgentTrajectoryService } from './agent-trajectory.service';
+import { SoulController } from './soul.controller';
 import { ConversationDigesterService } from './conversation-digester.service';
 import { GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
@@ -57,7 +58,7 @@ import { CommunicationModule } from '../communication/communication.module';
     MemoryRecallService,
     ConversationDigesterService,
   ],
-  controllers: [AgentFeedbackController, AgentMetricsController],
+  controllers: [AgentFeedbackController, AgentMetricsController, SoulController],
   exports: [
     AgentRunnerService,
     MediaService,

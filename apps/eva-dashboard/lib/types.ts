@@ -120,6 +120,9 @@ export interface AgentSoul {
   directives: string[];
   autonomy_level: 0 | 1 | 2 | 3;
   model_prefs: Record<string, unknown>;
+  persona_context?: Record<string, unknown>;
+  goals?: Array<Record<string, unknown>>;
+  private_context_hint?: string | null;
   updated_at?: string;
 }
 
@@ -215,4 +218,3 @@ export interface TokenLog {
   task_id: string | null;
   created_at: string;
 }
-

@@ -101,7 +101,7 @@ Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_
 
 - Identity/org: `organizations`, `users`.
 - Tasks/events: `tasks`, `task_events`; `014` references `task_steps` but no `CREATE TABLE` was found in current scan.
-- Memory/soul: `memories`, `memory_embeddings`, `agent_souls`; RPC `match_memories`.
+- Memory/soul: `memories`, `memory_embeddings`, `agent_souls`; RPC `match_memories`. `agent_souls.persona_context` is the user-owned structured profile (`personal_profile`, `cowork_context`, `relationship_map`, expectations/routines); `model_prefs` is for model preferences only. `private_context_ciphertext` stores AES-256-GCM private user context written/decrypted only by eva-core, with Data API grants exposing only `private_context_hint`.
 - Routing/planning/tools/agent intelligence: `intent_routes`, `skills`, `skill_versions`, `tools`, `tool_calls`, `skill_usage_stats`, `skill_graph_edges`, `skill_selection_events`, `agent_trajectories`, `skill_embeddings`, `agent_input_requests`, `agent_runtime_artifacts`, `org_agent_settings`; views `agent_tool_success_metrics`, `agent_goal_success_metrics`, `agent_defense_metrics`, `agent_skill_funnel_metrics`, `agent_task_efficiency_metrics`.
 - Browser: `browser_profiles`, `browser_sessions`, `browser_screenshots`, `browser_action_preparations`.
 - Dev manager: `projects`, `dev_tasks`, `claude_code_sessions`, `build_runs`, `test_runs`, `code_reviews`, `roadmap_items`.
@@ -115,7 +115,7 @@ Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_
 - `middleware.ts` refreshes Supabase auth with `getUser()`, redirects unauthenticated users to `/login`, authenticated root/login users to `/tasks`.
 - API client: `lib/core-api.ts` uses client Supabase session and Bearer token.
 - Server org context: `lib/supabase/org.ts` gets `users.org_id`; keep org-scoped Supabase reads.
-- UI components: `components/tasks`, `approvals`, `billing`, `events`, `jobs`, `mcp`, `nodes`, `playground`, `skills`, `soul`, `settings`, `layout`, `ui`.
+- UI components: `components/tasks`, `approvals`, `billing`, `events`, `jobs`, `mcp`, `nodes`, `playground`, `skills`, `soul`, `settings`, `layout`, `ui`. Soul editor separates agent identity, user profile, relationship aliases, cowork context, and encrypted private context sent through `POST /agent/soul/private-context`.
 
 ## Local Drift / Watchlist
 

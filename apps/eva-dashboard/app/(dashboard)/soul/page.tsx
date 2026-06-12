@@ -28,7 +28,7 @@ export default async function SoulPage() {
 
   return (
     <>
-      <Topbar title="Soul" subtitle="persona · directives · autonomy level" />
+      <Topbar title="Soul" subtitle="agent identity · user profile · private context" />
       <div className="flex-1 min-h-0">
         <SoulEditor orgId={profile.org_id} initialSoul={soul as AgentSoul | null} />
       </div>
