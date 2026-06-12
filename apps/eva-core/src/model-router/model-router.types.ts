@@ -2,6 +2,21 @@ export type ModelBackend = 'openai' | 'claude' | 'google' | 'auto';
 
 export type ModelBudget = 'cheap' | 'balanced' | 'powerful';
 
+/** Schema + metadata para una herramienta en modo tool-use nativo. */
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  /** JSON Schema de los argumentos de entrada. */
+  inputSchema: Record<string, unknown>;
+}
+
+/** Una llamada de herramienta devuelta por el modelo en modo tool-use nativo. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
 export interface GenerateOptions {
   backend?: ModelBackend;
   budget?: ModelBudget;
@@ -22,6 +37,10 @@ export interface GenerateOptions {
    * cache_control ephemeral; OpenAI/Gemini ya cachean el prefijo estable solos.
    */
   cacheSystem?: boolean;
+  /** Herramientas para tool-use nativo (Claude tool_use / OpenAI function calling). */
+  tools?: ToolDefinition[];
+  /** Fuerza al modelo a usar una herramienta. 'required' = debe usar alguna; string = slug específico. */
+  toolChoice?: 'auto' | 'required' | string;
 }
 
 export interface GenerateResult {
@@ -33,6 +52,9 @@ export interface GenerateResult {
     completionTokens: number;
     totalTokens: number;
   };
+  /** Llamadas de herramienta nativas devueltas por el modelo (solo cuando opts.tools fue pasado). */
+  toolCalls?: ToolCall[];
+  stopReason?: 'end_turn' | 'tool_use' | 'max_tokens' | string;
 }
 
 export interface EmbedResult {

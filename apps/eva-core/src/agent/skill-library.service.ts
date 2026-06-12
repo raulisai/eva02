@@ -16,6 +16,8 @@ export interface SkillSummary {
   maxConcurrency?: number;
   useMode?: 'prompt' | 'run';
   reason?: string;
+  /** true = registrada automáticamente, aún no verificada con ≥2 éxitos reales. */
+  isProvisional?: boolean;
 }
 
 export interface RunnableSkill {
@@ -35,6 +37,12 @@ export interface RegisterSkillInput {
   /** Procedencia (estilo hermes skill_provenance): quién escribió la skill. */
   origin: 'forge' | 'agent-loop' | 'agent-loop-auto';
   taskId?: string;
+  /**
+   * Estado inicial de la skill.
+   * - 'active': verificada y disponible (default para skill_save explícito).
+   * - 'provisional': auto-sedimentada, penalizada en score hasta ≥2 éxitos.
+   */
+  status?: 'active' | 'provisional';
 }
 
 export type RegisterSkillResult =
@@ -229,6 +237,7 @@ export class SkillLibraryService {
         .maybeSingle();
       const version = existing ? this.bumpVersion(String(existing.latest_version ?? '1.0.0')) : '1.0.0';
 
+      const initialStatus = input.status ?? 'active';
       const { data: skill, error } = await this.db.admin
         .from('skills')
         .upsert({
@@ -236,7 +245,7 @@ export class SkillLibraryService {
           slug,
           display_name: input.displayName.slice(0, 120),
           description: input.description.slice(0, 500),
-          status: 'active',
+          status: initialStatus,
           latest_version: version,
           updated_at: new Date().toISOString(),
           metadata: {
@@ -261,7 +270,7 @@ export class SkillLibraryService {
       }, { onConflict: 'org_id,skill_id,version' });
       if (vError) return { ok: false, reason: vError.message };
 
-      this.logger.log(`skill "${slug}" v${version} registrada (origin=${input.origin}, verdict=${scan.verdict})`);
+      this.logger.log(`skill "${slug}" v${version} registrada (origin=${input.origin}, status=${initialStatus}, verdict=${scan.verdict})`);
       return { ok: true, slug, version };
     } catch (err) {
       return { ok: false, reason: (err as Error).message };
@@ -307,6 +316,13 @@ export class SkillLibraryService {
         await this.reinforceGraphEdge(orgId, selectedSlugs[i], selectedSlugs[j], input.success ? 0.08 : -0.04, now);
         await this.reinforceGraphEdge(orgId, selectedSlugs[j], selectedSlugs[i], input.success ? 0.08 : -0.04, now);
       }
+    }
+
+    // C — Promotion: after recording outcome, check if any used provisional skill can be promoted.
+    if (input.success && used.size > 0) {
+      await Promise.all(
+        [...used].map((slug) => this.maybePromoteProvisional(orgId, slug)),
+      );
     }
   }
 
@@ -393,14 +409,14 @@ export class SkillLibraryService {
   private async loadGeneratedSkills(orgId: string): Promise<SkillSummary[]> {
     const { data, error } = await this.db.admin
       .from('skills')
-      .select('slug, display_name, description, metadata')
+      .select('slug, display_name, description, status, metadata')
       .eq('org_id', orgId)
-      .eq('status', 'active')
+      .in('status', ['active', 'provisional'])
       .order('updated_at', { ascending: false })
       .limit(50);
     if (error || !data) return [];
 
-    return (data as Array<SkillSummary & { metadata?: Record<string, unknown> }>)
+    return (data as Array<SkillSummary & { status?: string; metadata?: Record<string, unknown> }>)
       .map((skill) => ({
         slug: skill.slug,
         display_name: skill.display_name,
@@ -410,6 +426,7 @@ export class SkillLibraryService {
         agentRole: String(skill.metadata?.agent_role ?? 'automation specialist'),
         maxConcurrency: Number(skill.metadata?.max_concurrency ?? 1),
         useMode: 'run' as const,
+        isProvisional: skill.status === 'provisional',
       }));
   }
 
@@ -499,8 +516,48 @@ export class SkillLibraryService {
 
     score += this.learnedGraphBoost(skill.slug, learnedEdges, baseScores);
 
+    // C — Skill quarantine: provisional skills ranked lower until promoted.
+    if (skill.isProvisional) score -= 1.5;
+
     skill.reason = this.reasonFor(skill, score, global, context);
     return score;
+  }
+
+  /**
+   * Promueve una skill provisional a 'active' cuando acumula ≥2 éxitos en
+   * skill_usage_stats. Llamado desde recordOutcome tras cada resultado exitoso.
+   */
+  private async maybePromoteProvisional(orgId: string, skillSlug: string): Promise<void> {
+    try {
+      const { data: skill } = await this.db.admin
+        .from('skills')
+        .select('id, status')
+        .eq('org_id', orgId)
+        .eq('slug', skillSlug)
+        .eq('status', 'provisional')
+        .maybeSingle();
+      if (!skill) return;
+
+      const { data: stat } = await this.db.admin
+        .from('skill_usage_stats')
+        .select('successes')
+        .eq('org_id', orgId)
+        .eq('skill_slug', skillSlug)
+        .eq('context_key', '__global__')
+        .maybeSingle();
+
+      const successes = Number((stat as { successes?: number } | null)?.successes ?? 0);
+      if (successes >= 2) {
+        await this.db.admin
+          .from('skills')
+          .update({ status: 'active', updated_at: new Date().toISOString() })
+          .eq('org_id', orgId)
+          .eq('id', skill.id);
+        this.logger.log(`skill "${skillSlug}" promovida de provisional a active (${successes} éxitos)`);
+      }
+    } catch (err) {
+      this.logger.debug(`maybePromoteProvisional skipped: ${(err as Error).message}`);
+    }
   }
 
   private phraseHits(goal: string, phrases: string[]): number {

@@ -8,7 +8,7 @@ const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 function chain(result: { data: unknown; error: unknown }) {
   const builder: Record<string, jest.Mock> = {};
   const self = () => builder;
-  for (const method of ['select', 'eq', 'order', 'limit']) {
+  for (const method of ['select', 'eq', 'in', 'order', 'limit']) {
     builder[method] = jest.fn(self);
   }
   builder['maybeSingle'] = jest.fn().mockResolvedValue(result);

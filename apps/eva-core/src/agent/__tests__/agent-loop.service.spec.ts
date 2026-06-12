@@ -28,6 +28,18 @@ function modelReply(text: string, tokens = 40) {
   };
 }
 
+/** Builds a fake modelRouter.generate reply with native tool-use (A). */
+function modelReplyWithTool(toolName: string, args: Record<string, unknown>, tokens = 40) {
+  return {
+    text: '',
+    model: 'claude-sonnet-4-6',
+    backend: 'claude' as const,
+    usage: { promptTokens: tokens / 2, completionTokens: tokens / 2, totalTokens: tokens },
+    toolCalls: [{ id: 'tc_1', name: toolName, input: args }],
+    stopReason: 'tool_use' as const,
+  };
+}
+
 describe('AgentLoopService', () => {
   let service: AgentLoopService;
   let modelRouter: jest.Mocked<ModelRouterService>;
@@ -655,10 +667,12 @@ describe('AgentLoopService', () => {
     await service.run(ORG, TASK, 'suma las ventas del json');
     await new Promise((r) => setImmediate(r)); // sedimentación es fire-and-forget
 
+    // C — Skill quarantine: auto-sedimentated skills start as 'provisional'.
     expect(skillLibrary.register).toHaveBeenCalledWith(ORG, expect.objectContaining({
       origin: 'agent-loop-auto',
       language: 'python',
       taskId: TASK,
+      status: 'provisional',
     }));
   });
 
@@ -735,6 +749,123 @@ describe('AgentLoopService', () => {
     expect(lastUser).toContain('Y'.repeat(900));        // reciente, completo
     expect(lastUser).toContain('Z'.repeat(900));        // reciente, completo
   });
+
+  // ── A: tool-use nativo ─────────────────────────────────────────────────────
+
+  it('reads native toolCalls from model response instead of parsing JSON text', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReplyWithTool('web_search', { query: 'clima CDMX' }))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"Hace 22°C."}}'));
+
+    const result = await service.run(ORG, TASK, 'clima en CDMX');
+
+    expect(research.answer).toHaveBeenCalledWith('clima CDMX', ORG);
+    expect(result.ok).toBe(true);
+    expect(result.steps[0].tool).toBe('web_search');
+    expect(result.steps[0].args).toEqual({ query: 'clima CDMX' });
+  });
+
+  it('passes tool definitions to generate() with required toolChoice on every decide call', async () => {
+    modelRouter.generate.mockResolvedValueOnce(
+      modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"hecho"}}'),
+    );
+
+    await service.run(ORG, TASK, 'objetivo');
+
+    const opts = modelRouter.generate.mock.calls[0][1]!;
+    expect(Array.isArray(opts.tools)).toBe(true);
+    expect(opts.toolChoice).toBe('required');
+    // final_answer debe estar en el array de herramientas.
+    const finalAnswerDef = (opts.tools as { name: string }[]).find((t) => t.name === 'final_answer');
+    expect(finalAnswerDef).toBeDefined();
+    expect(finalAnswerDef).toHaveProperty('description');
+    expect(finalAnswerDef).toHaveProperty('inputSchema');
+    // web_search también debe estar.
+    const webSearchDef = (opts.tools as unknown as { name: string; inputSchema: { required: string[] } }[]).find((t) => t.name === 'web_search');
+    expect(webSearchDef).toBeDefined();
+    expect(webSearchDef!.inputSchema.required).toContain('query');
+  });
+
+  // ── D: detección de estancamiento semántico ───────────────────────────────
+
+  it('detects semantic stall when the same tool+observation repeats in the window', async () => {
+    // La ventana necesita ≥3 pasos antes de activarse; con 3 pasos de mismo sig (≥STALL_THRESHOLD=2)
+    // se dispara en la 4ª iteración antes de ejecutar el tool.
+    research.answer.mockRejectedValue(new Error('API caída'));
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"1","tool":"web_search","args":{"query":"a"}}'))  // ejecutado → ERROR
+      .mockResolvedValueOnce(modelReply('{"thought":"2","tool":"web_search","args":{"query":"b"}}'))  // ejecutado → ERROR
+      .mockResolvedValueOnce(modelReply('{"thought":"3","tool":"web_search","args":{"query":"c"}}'))  // ejecutado → ERROR
+      // Con steps=[e0,e1,e2] (3 pasos de mismo sig) el stall se dispara aquí; NO ejecuta.
+      .mockResolvedValueOnce(modelReply('{"thought":"4","tool":"web_search","args":{"query":"d"}}'))
+      // Tras ver el mensaje de stall, el modelo cierra.
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"bloqueado"}}'));
+
+    const result = await service.run(ORG, TASK, 'objetivo');
+
+    // El 4° intento debe haber generado la observación de ciclo detectado.
+    const stallStep = result.steps.find((s) => s.observation.includes('Ciclo detectado'));
+    expect(stallStep).toBeDefined();
+    // research.answer se llama exactamente 3 veces; el 4° intento es bloqueado antes de ejecutar.
+    expect(research.answer).toHaveBeenCalledTimes(3);
+  });
+
+  it('injects stall guidance and lets the model close with final_answer after three identical errors', async () => {
+    research.answer.mockRejectedValue(new Error('timeout permanente'));
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"1","tool":"web_search","args":{"query":"x"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"2","tool":"web_search","args":{"query":"y"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"3","tool":"web_search","args":{"query":"z"}}'))
+      // Stall dispara aquí (steps con sig repetido ≥ 2 en ventana).
+      .mockResolvedValueOnce(modelReply('{"thought":"4","tool":"web_search","args":{"query":"w"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"fin","tool":"final_answer","args":{"text":"sin opciones"}}'));
+
+    const result = await service.run(ORG, TASK, 'otra cosa');
+
+    const stallStep = result.steps.find((s) => s.observation.includes('Ciclo detectado'));
+    expect(stallStep).toBeDefined();
+    // Tras el stall, el modelo produce el final_answer → ok=true.
+    expect(result.ok).toBe(true);
+  });
+
+  // ── B: definition-of-done ─────────────────────────────────────────────────
+
+  it('blocks final_answer when the last code step failed and forces the model to fix it', async () => {
+    sandbox.execInSession
+      .mockResolvedValueOnce({ ok: false, output: '', error: 'ModuleNotFoundError: No module named pandas' });
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"código","tool":"code_execute","args":{"language":"python","code":"import pandas as pd; print(pd.read_csv(\\"data.csv\\"))"}}'  ))
+      // Intento de final_answer con código fallido → DoD debe rechazarlo.
+      .mockResolvedValueOnce(modelReply('{"thought":"listo","tool":"final_answer","args":{"text":"El CSV fue procesado exitosamente."}}'))
+      // Después del rechazo del DoD, el modelo corrige (reporte honesto).
+      .mockResolvedValueOnce(modelReply('{"thought":"corrijo","tool":"final_answer","args":{"text":"No se pudo importar pandas. Reintenta instalando el módulo."}}'));
+
+    const result = await service.run(ORG, TASK, 'procesa el csv con pandas');
+
+    // El DoD debe haber inyectado una observación de verificación fallida.
+    const dodStep = result.steps.find((s) => s.observation.includes('VERIFICACIÓN FALLIDA'));
+    expect(dodStep).toBeDefined();
+    expect(dodStep!.observation).toContain('ModuleNotFoundError');
+    // El resultado final es la respuesta honesta, no el éxito falso.
+    expect(result.ok).toBe(true);
+  });
+
+  it('accepts final_answer directly when it is an honest failure report (DoD does not block)', async () => {
+    sandbox.execInSession.mockResolvedValueOnce({ ok: false, output: '', error: 'permission denied' });
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"código","tool":"code_execute","args":{"language":"python","code":"import stuff; stuff.run()"}}'))
+      // Reporte honesto de fallo → DoD debe dejarlo pasar.
+      .mockResolvedValueOnce(modelReply('{"thought":"honesto","tool":"final_answer","args":{"text":"No se pudo ejecutar el script por falta de permisos."}}'));
+
+    const result = await service.run(ORG, TASK, 'ejecuta el script protegido');
+
+    // DoD no debe haber bloqueado — no debe haber observación de VERIFICACIÓN FALLIDA.
+    const dodStep = result.steps.find((s) => s.observation.includes('VERIFICACIÓN FALLIDA'));
+    expect(dodStep).toBeUndefined();
+    expect(result.ok).toBe(true);
+  });
+
+  // ── image_analyze tool ─────────────────────────────────────────────────────
 
   describe('image_analyze tool', () => {
     it('executes image_analyze tool with a URL successfully', async () => {

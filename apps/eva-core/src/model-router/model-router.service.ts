@@ -11,6 +11,7 @@ import {
   ModelBudget,
   MODEL_CATALOGUE,
   EMBED_MODELS,
+  ToolCall,
 } from './model-router.types';
 
 interface ResolvedKeys {
@@ -189,14 +190,28 @@ export class ModelRouterService {
       messages.push({ role: 'user', content: prompt });
     }
 
+    const isToolMode = !!(opts.tools && opts.tools.length > 0);
+
     const body: Record<string, unknown> = {
       model,
       messages,
       temperature:  opts.temperature  ?? 0.7,
       max_tokens:   opts.maxTokens    ?? 1024,
     };
-    if (opts.responseFormat === 'json') {
+    if (opts.responseFormat === 'json' && !isToolMode) {
       body['response_format'] = { type: 'json_object' };
+    }
+    if (isToolMode) {
+      body['tools'] = opts.tools!.map(t => ({
+        type:     'function',
+        function: { name: t.name, description: t.description, parameters: t.inputSchema },
+      }));
+      const tc = opts.toolChoice;
+      body['tool_choice'] = !tc || tc === 'auto'
+        ? 'auto'
+        : tc === 'required'
+          ? 'required'
+          : { type: 'function', function: { name: tc } };
     }
 
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -211,13 +226,31 @@ export class ModelRouterService {
     }
 
     const data = (await res.json()) as {
-      choices: { message: { content: string } }[];
+      choices: {
+        message: {
+          content: string | null;
+          tool_calls?: Array<{
+            id: string;
+            type: 'function';
+            function: { name: string; arguments: string };
+          }>;
+        };
+        finish_reason: string;
+      }[];
       model: string;
       usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
     };
 
+    const choice = data.choices[0];
+    const rawToolCalls = choice.message.tool_calls ?? [];
+    const toolCalls: ToolCall[] = rawToolCalls.map(tc => {
+      let input: Record<string, unknown> = {};
+      try { input = JSON.parse(tc.function.arguments) as Record<string, unknown>; } catch { /* ignore */ }
+      return { id: tc.id, name: tc.function.name, input };
+    });
+
     return {
-      text:    data.choices[0].message.content,
+      text:    choice.message.content ?? '',
       model:   data.model,
       backend: 'openai',
       usage: {
@@ -225,6 +258,8 @@ export class ModelRouterService {
         completionTokens: data.usage.completion_tokens,
         totalTokens:      data.usage.total_tokens,
       },
+      toolCalls:  toolCalls.length > 0 ? toolCalls : undefined,
+      stopReason: choice.finish_reason === 'tool_calls' ? 'tool_use' : choice.finish_reason,
     };
   }
 
@@ -239,10 +274,12 @@ export class ModelRouterService {
     const key = apiKey ?? this.anthropicKey;
     const model = opts.model ?? MODEL_CATALOGUE[budget as keyof typeof MODEL_CATALOGUE]?.claude ?? 'claude-haiku-4-5-20251001';
 
-    // Claude has no native JSON mode — enforce it via the system prompt so the
-    // JSON consumers (intent router, planner, forge, navigator) keep working.
+    const isToolMode = !!(opts.tools && opts.tools.length > 0);
+
+    // En modo tool-use nativo el modelo devuelve tool_use blocks, no JSON text.
+    // Solo inyectar la regla de JSON cuando NO hay tools nativos.
     let system = opts.systemPrompt;
-    if (opts.responseFormat === 'json') {
+    if (opts.responseFormat === 'json' && !isToolMode) {
       const jsonRule = 'Responde ÚNICAMENTE con un objeto JSON válido. Sin markdown, sin code fences, sin texto antes o después.';
       system = system ? `${system}\n\n${jsonRule}` : jsonRule;
     }
@@ -268,15 +305,26 @@ export class ModelRouterService {
       messages:   [{ role: 'user', content }],
     };
     if (system) {
-      // cacheSystem → bloque cacheable (prompt caching de Anthropic). El prefijo
-      // estable se reusa entre pasos del bucle sin re-cobrar tokens de entrada.
-      // Si el system es muy corto para el mínimo de caché, Anthropic lo ignora
-      // sin error, así que es seguro marcarlo siempre que pidan cacheSystem.
       body['system'] = opts.cacheSystem
         ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }]
         : system;
     }
     if (opts.temperature !== undefined) body['temperature'] = opts.temperature;
+
+    // Tool-use nativo: el modelo devuelve tool_use blocks en vez de JSON text.
+    if (isToolMode) {
+      body['tools'] = opts.tools!.map(t => ({
+        name:         t.name,
+        description:  t.description,
+        input_schema: t.inputSchema,
+      }));
+      const tc = opts.toolChoice;
+      body['tool_choice'] = !tc || tc === 'auto'
+        ? { type: 'auto' }
+        : tc === 'required'
+          ? { type: 'any' }
+          : { type: 'tool', name: tc };
+    }
 
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -284,6 +332,7 @@ export class ModelRouterService {
         'Content-Type':      'application/json',
         'x-api-key':         key!,
         'anthropic-version': '2023-06-01',
+        'anthropic-beta':    'tools-2024-04-04',
       },
       body: JSON.stringify(body),
     });
@@ -294,13 +343,22 @@ export class ModelRouterService {
     }
 
     const data = (await res.json()) as {
-      content: { type: string; text: string }[];
+      content: Array<
+        | { type: 'text'; text: string }
+        | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+      >;
       model: string;
+      stop_reason: string;
       usage: { input_tokens: number; output_tokens: number };
     };
 
-    let text = data.content.find(b => b.type === 'text')?.text ?? '';
-    if (opts.responseFormat === 'json') text = this.stripCodeFences(text);
+    const textBlock  = data.content.find((b): b is { type: 'text'; text: string } => b.type === 'text');
+    const toolBlocks = data.content.filter((b): b is { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> } => b.type === 'tool_use');
+
+    let text = textBlock?.text ?? '';
+    if (!isToolMode && opts.responseFormat === 'json') text = this.stripCodeFences(text);
+
+    const toolCalls: ToolCall[] = toolBlocks.map(b => ({ id: b.id, name: b.name, input: b.input }));
 
     return {
       text,
@@ -311,6 +369,8 @@ export class ModelRouterService {
         completionTokens: data.usage.output_tokens,
         totalTokens:      data.usage.input_tokens + data.usage.output_tokens,
       },
+      toolCalls:  toolCalls.length > 0 ? toolCalls : undefined,
+      stopReason: data.stop_reason,
     };
   }
 

@@ -5,7 +5,7 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { MemoryAgentService } from '../memory/memory-agent.service';
 import { ModelRouterService } from '../model-router/model-router.service';
-import { GenerateResult } from '../model-router/model-router.types';
+import { GenerateResult, ToolDefinition } from '../model-router/model-router.types';
 import { GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
 import { GoogleDriveService } from './google-drive.service';
@@ -61,6 +61,8 @@ interface ToolSpec {
   name: string;
   /** One line shown to the model — keep it short, every char repeats per step. */
   usage: string;
+  /** JSON Schema for native tool-use (Claude tool_use / OpenAI function calling). */
+  inputSchema: Record<string, unknown>;
   execute: ToolExecutor;
   /** Tools hidden from delegated sub-agents (depth ≥ 1). */
   rootOnly?: boolean;
@@ -88,22 +90,25 @@ const DECIDE_MAX_TOKENS = 1400;
 const CODE_TOOLS = new Set(['code_execute', 'terminal_run', 'script_forge', 'skill_run']);
 /** Código más corto que esto no vale como skill (one-liners exploratorios). */
 const MIN_SKILL_CODE_LENGTH = 80;
+/** Ventana de pasos para la detección de estancamiento semántico. */
+const STALL_WINDOW = 4;
+/** Firmas iguales en la ventana → ciclo detectado. */
+const STALL_THRESHOLD = 2;
+/** Máx rechazos de definition-of-done antes de aceptar la respuesta de todas formas. */
+const MAX_DOD_REJECTIONS = 2;
+/** Texto que indica reporte honesto de fallo — no aplicar DoD a respuestas honestas. */
+const HONEST_FAILURE_RE = /\b(no se pudo|no pude|no fue posible|bloqueado|error|falló|fall[oó]|no logr[eé]|no dispon|no encontr|no hay|no tengo acceso|requiere|pendiente de aprobaci[oó]n|sin [eé]xito)\b/i;
 
 /**
  * AgentLoopService — bucle agéntico genérico (estilo agent-zero):
  * el modelo ve el objetivo + catálogo de herramientas, decide UNA acción por
  * ciclo, observa el resultado y repite hasta dar `final_answer` o agotar pasos.
  *
- * Ejecución de código de primera clase: con `code_execute` el MISMO modelo del
- * loop escribe código literal y lo corre en el sandbox persistente de la tarea
- * (archivos en /work sobreviven entre pasos → escribir→error→corregir real).
- * `terminal_run`/`terminal_output` dan shell incremental y procesos en
- * background; `skill_run` re-ejecuta skills guardadas sin regenerar código.
- *
- * Costo acotado: decide con presupuesto `cheap` + JSON estricto, observaciones
- * truncadas, pasos limitados, y `delegate` permite UN nivel de sub-agente con
- * rol propio. Los writes externos siguen pasando por Approval Engine; la
- * ejecución con red crea una approval en vez de ejecutarse sola.
+ * Mejoras v2:
+ * - Tool-use nativo (Claude tool_use / OpenAI function calling) con fallback JSON.
+ * - Detección de estancamiento semántico (ciclos A→B→A y errores repetidos).
+ * - Definition-of-done: el final_answer se valida antes de aceptarse.
+ * - Skill quarantine: la auto-sedimentación registra skills como 'provisional'.
  */
 @Injectable()
 export class AgentLoopService {
@@ -132,8 +137,6 @@ export class AgentLoopService {
 
   async run(orgId: string, taskId: string, goal: string, opts: AgentLoopOptions = {}): Promise<AgentLoopOutcome> {
     const depth = Math.min(Math.max(opts.depth ?? 0, 0), MAX_DEPTH);
-    // Perfil especializado (investigador/programador/planeador/seguridad): solo
-    // acota a sub-agentes; el raíz siempre conserva el catálogo completo.
     const profile = depth > 0 ? resolveAgentProfile(opts.role) : null;
     const defaultSteps = depth === 0 ? DEFAULT_ROOT_STEPS : profile?.maxSteps ?? DEFAULT_SUB_STEPS;
     const maxSteps = Math.min(Math.max(opts.maxSteps ?? defaultSteps, 1), 10);
@@ -144,15 +147,15 @@ export class AgentLoopService {
       return true;
     });
     const extras = depth === 0 ? await this.resolveExtras(orgId, goal) : { skills: [], secretAliases: [] };
-    // El system (rol + herramientas + skills + secrets + reglas) es idéntico en
-    // todos los pasos del run: se calcula UNA vez y se manda como prefijo
-    // cacheable. Así no se re-cobran ~600 tokens estáticos por paso.
     const systemPrompt = this.buildSystemPrompt(opts, available, extras, profile);
+    // Tool definitions para tool-use nativo — se construyen UNA vez por run.
+    const toolDefinitions = this.buildToolDefinitions(available);
 
     const steps: AgentLoopStep[] = [];
     let tokensUsed = 0;
     let parseFailures = 0;
     let formatHint: string | undefined;
+    let dodRejections = 0;
 
     await log(`agent-loop${depth > 0 ? ` (sub-agente d${depth})` : ''}: objetivo "${goal.slice(0, 120)}" — máx ${maxSteps} pasos`, 'loop');
     if (extras.skills.length > 0) {
@@ -165,7 +168,6 @@ export class AgentLoopService {
     }
 
     for (let i = 0; i < maxSteps; i += 1) {
-      // Check if the task was cancelled by the user in the database
       const { data: currentTask } = await this.db.admin
         .from('tasks')
         .select('status')
@@ -192,10 +194,23 @@ export class AgentLoopService {
             maxTokens: DECIDE_MAX_TOKENS,
             systemPrompt,
             cacheSystem: true,
+            tools: toolDefinitions,
+            toolChoice: 'required',
           },
         );
         tokensUsed += res.usage.totalTokens;
-        decision = this.parseDecision(res.text);
+
+        // A — Tool-use nativo: leer toolCalls primero, fallback a JSON parsing.
+        if (res.toolCalls && res.toolCalls.length > 0) {
+          const tc = res.toolCalls[0];
+          decision = {
+            thought: (res.text || tc.name).slice(0, 300),
+            tool: tc.name,
+            args: tc.input,
+          };
+        } else {
+          decision = this.parseDecision(res.text);
+        }
       } catch (error) {
         await log(`agent-loop: decide falló — ${(error as Error).message}`, 'loop');
       }
@@ -209,24 +224,39 @@ export class AgentLoopService {
           this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
           return { ok: false, text: '', steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
         }
-        // El reintento debe ver QUÉ estuvo mal, no repetir a ciegas.
         formatHint = `Tu respuesta anterior no fue JSON válido${res?.text ? ` (empezaba: ${this.truncate(res.text, 120)})` : ''}. Responde SOLO el objeto {"thought":"...","tool":"...","args":{...}} sin texto adicional.`;
         continue;
       }
       parseFailures = 0;
       formatHint = undefined;
 
+      // B — Definition-of-done: validar final_answer antes de aceptarlo.
       if (decision.tool === 'final_answer') {
         const text = String(decision.args.text ?? '').trim();
-        if (text) {
-          await log(`agent-loop: final_answer en paso ${i + 1} (${tokensUsed} tokens de razonamiento)`, 'loop');
-          const refinedText = depth === 0 ? await this.refineAndValidateResponse(orgId, taskId, goal, text) : text;
-          this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, refinedText);
-          this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
-          return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
+        if (!text) {
+          steps.push({ tool: decision.tool, args: decision.args, thought: decision.thought, observation: 'ERROR: final_answer sin texto. Incluye args.text.' });
+          continue;
         }
-        steps.push({ tool: decision.tool, args: decision.args, thought: decision.thought, observation: 'ERROR: final_answer sin texto. Incluye args.text.' });
-        continue;
+
+        const dodViolation = dodRejections < MAX_DOD_REJECTIONS && depth === 0
+          ? this.validateFinalAnswer(text, steps)
+          : null;
+
+        if (dodViolation) {
+          dodRejections += 1;
+          await log(`agent-loop: DoD rechazó final_answer (${dodRejections}/${MAX_DOD_REJECTIONS}): ${dodViolation.slice(0, 80)}`, 'loop');
+          steps.push({
+            tool: decision.tool, args: decision.args, thought: decision.thought,
+            observation: `VERIFICACIÓN FALLIDA: ${dodViolation} Corrige el problema antes de declarar éxito.`,
+          });
+          continue;
+        }
+
+        await log(`agent-loop: final_answer en paso ${i + 1} (${tokensUsed} tokens de razonamiento)`, 'loop');
+        const refinedText = depth === 0 ? await this.refineAndValidateResponse(orgId, taskId, goal, text) : text;
+        this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, refinedText);
+        this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
+        return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
       }
 
       const spec = available.find((t) => t.name === decision!.tool);
@@ -248,6 +278,16 @@ export class AgentLoopService {
         continue;
       }
 
+      // D — Detección de estancamiento semántico (ciclos A→B→A y errores repetidos).
+      const stallMsg = this.detectStall(steps);
+      if (stallMsg) {
+        steps.push({
+          tool: spec.name, args: decision.args, thought: decision.thought,
+          observation: `ERROR: ${stallMsg}`,
+        });
+        continue;
+      }
+
       await log(`agent-loop paso ${i + 1}/${maxSteps}: ${spec.name}(${JSON.stringify(decision.args).slice(0, 160)}) — ${decision.thought.slice(0, 120)}`, 'loop');
       await this.announceAction(orgId, taskId, spec.name, decision.args);
 
@@ -261,7 +301,6 @@ export class AgentLoopService {
           observation = await spec.execute(orgId, taskId, decision.args);
         }
       } catch (error) {
-        // Forms for missing info must bubble up to agent-runner untouched.
         if (error instanceof MissingInformationError) throw error;
         observation = `ERROR: ${(error as Error).message.slice(0, 300)}`;
       }
@@ -277,8 +316,6 @@ export class AgentLoopService {
     // Out of steps — synthesise an answer from what was gathered instead of failing dry.
     const gathered = steps.filter((s) => !s.observation.startsWith('ERROR:'));
     if (gathered.length === 0) {
-      // Nunca un "no" seco: si el agente realmente lo intentó (≥2 acciones),
-      // convierte los errores en una respuesta honesta con opciones accionables.
       if (depth === 0 && steps.length >= 2) {
         try {
           const recovery = await this.synthesizeRecoveryOptions(orgId, taskId, goal, steps);
@@ -313,11 +350,6 @@ export class AgentLoopService {
 
   // ── prompt ────────────────────────────────────────────────────────────────
 
-  /**
-   * Bloque ESTÁTICO del run: rol + catálogo de herramientas + skills + secrets
-   * + reglas. Idéntico en todos los pasos → se manda como systemPrompt cacheable
-   * para no re-cobrar tokens de entrada en cada decisión.
-   */
   private buildSystemPrompt(opts: AgentLoopOptions, tools: ToolSpec[], extras: LoopExtras, profile?: AgentProfile | null): string {
     const blocks: string[] = [
       `Eres EVA en modo agente autónomo${opts.role ? `, actuando como ${opts.role}` : ''}. Resuelve el OBJETIVO eligiendo UNA acción por turno.`,
@@ -335,7 +367,8 @@ export class AgentLoopService {
           const mode = s.useMode === 'run' ? 'ejecutable con skill_run' : 'guía para razonar/delegar';
           const role = s.agentRole ? `; sub-agente sugerido: ${s.agentRole}` : '';
           const reason = s.reason ? `; ${s.reason}` : '';
-          return `- ${s.slug} [${s.source ?? 'unknown'}, ${mode}${role}${reason}]: ${s.description}`;
+          const prov = s.isProvisional ? ' [provisional, no verificada aún]' : '';
+          return `- ${s.slug} [${s.source ?? 'unknown'}, ${mode}${prov}${role}${reason}]: ${s.description}`;
         }),
       );
       const roles = extras.skills
@@ -357,8 +390,6 @@ export class AgentLoopService {
         `SECRETS DISPONIBLES (escribe el alias literal en tu código; EVA sustituye el valor al ejecutar y tú NUNCA lo ves): ${extras.secretAliases.join(', ')}`,
       );
     }
-    // Las reglas solo mencionan herramientas que ESTE agente tiene: instruir a
-    // un sub-agente acotado a usar herramientas fuera de su perfil lo confunde.
     const has = (name: string) => tools.some((t) => t.name === name);
     blocks.push(
       '',
@@ -384,11 +415,6 @@ export class AgentLoopService {
     return blocks.join('\n');
   }
 
-  /**
-   * Parte DINÁMICA: objetivo + contexto + historial de pasos + acciones
-   * restantes. Es lo único que cambia entre pasos, así que es lo único que
-   * paga tokens nuevos. Las observaciones viejas van compactadas.
-   */
   private buildUserPrompt(goal: string, context: string | undefined, steps: AgentLoopStep[], stepsLeft: number, formatHint?: string): string {
     const blocks: string[] = [`OBJETIVO: ${goal}`];
     if (context) blocks.push('', `CONTEXTO:\n${context}`);
@@ -400,11 +426,6 @@ export class AgentLoopService {
     return blocks.join('\n');
   }
 
-  /**
-   * Historial con fidelidad decreciente: las últimas RECENT_FULL acciones se
-   * muestran completas (el modelo aún razona sobre ellas); las anteriores se
-   * comprimen a una línea. Evita el crecimiento O(n²) del prompt por paso.
-   */
   private renderHistory(steps: AgentLoopStep[]): string[] {
     return steps.map((s, idx) => {
       const recent = idx >= steps.length - RECENT_FULL_STEPS;
@@ -434,6 +455,89 @@ export class AgentLoopService {
     return { thought: String(obj['thought'] ?? '').slice(0, 300), tool: obj['tool'], args };
   }
 
+  // ── D: detección de estancamiento semántico ───────────────────────────────
+
+  /**
+   * Detecta ciclos y errores repetidos que el loop-guard consecutivo no ve.
+   * Retorna el mensaje de error a inyectar como observación, o null si no hay stall.
+   */
+  private detectStall(steps: AgentLoopStep[]): string | null {
+    if (steps.length < 3) return null;
+
+    // Firma semántica: tool + prefijo normalizado de la observación.
+    const sig = (s: AgentLoopStep): string =>
+      `${s.tool}||${s.observation.replace(/\s+/g, ' ').trim().slice(0, 80)}`;
+
+    const window = steps.slice(-STALL_WINDOW);
+    const counts = new Map<string, number>();
+    for (const s of window) {
+      const k = sig(s);
+      const n = (counts.get(k) ?? 0) + 1;
+      counts.set(k, n);
+      if (n >= STALL_THRESHOLD) {
+        return 'Ciclo detectado: la misma herramienta produjo el mismo resultado ≥2 veces en los últimos pasos. Cambia de estrategia, prueba otra herramienta distinta, o entrega final_answer con lo que ya tienes.';
+      }
+    }
+
+    // Error idéntico repetido 3 veces consecutivas (aunque con tools distintas).
+    const last3 = steps.slice(-3);
+    if (last3.length === 3 && last3.every((s) => s.observation.startsWith('ERROR:'))) {
+      const prefixes = last3.map((s) => s.observation.slice(0, 80));
+      if (new Set(prefixes).size === 1) {
+        return `El mismo error se repitió 3 veces seguidas: "${last3[0].observation.slice(7, 80)}". Cambia de enfoque completamente o explica el bloqueo en final_answer.`;
+      }
+    }
+
+    return null;
+  }
+
+  // ── B: definition-of-done ─────────────────────────────────────────────────
+
+  /**
+   * Valida el texto del final_answer contra criterios mínimos antes de aceptarlo.
+   * Retorna string con la violación, o null si todo está bien.
+   * Solo aplica a code_execute / terminal_run (código que el agente escribió).
+   */
+  private validateFinalAnswer(text: string, steps: AgentLoopStep[]): string | null {
+    // Si la respuesta es un reporte honesto de fallo, no bloquear.
+    if (HONEST_FAILURE_RE.test(text)) return null;
+
+    // Si el último paso de código propio falló, no declarar éxito.
+    const lastCodeStep = [...steps]
+      .reverse()
+      .find((s) => s.tool === 'code_execute' || s.tool === 'terminal_run');
+
+    if (lastCodeStep && lastCodeStep.observation.startsWith('ERROR:')) {
+      return `El último código falló: "${lastCodeStep.observation.slice(7, 120)}". Verifica y corrige antes de declarar éxito, o reporta el estado real en tu respuesta.`;
+    }
+
+    return null;
+  }
+
+  // ── A: tool definitions para tool-use nativo ──────────────────────────────
+
+  /** Construye el array de ToolDefinition desde los ToolSpec disponibles + final_answer. */
+  private buildToolDefinitions(tools: ToolSpec[]): ToolDefinition[] {
+    const defs: ToolDefinition[] = tools.map((t) => ({
+      name: t.name,
+      description: t.usage,
+      inputSchema: t.inputSchema,
+    }));
+    // final_answer es especial: no está en buildToolCatalog pero el modelo debe usarla.
+    defs.push({
+      name: 'final_answer',
+      description: 'Entrega la respuesta final al usuario (español, directa). Úsala cuando tengas toda la información necesaria.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'Respuesta final para el usuario, en español.' },
+        },
+        required: ['text'],
+      },
+    });
+    return defs;
+  }
+
   // ── tools ─────────────────────────────────────────────────────────────────
 
   private buildToolCatalog(): ToolSpec[] {
@@ -441,6 +545,11 @@ export class AgentLoopService {
       {
         name: 'web_search',
         usage: 'web_search{"query"}: busca en internet/APIs públicas (clima, noticias, precios, lugares, datos actuales).',
+        inputSchema: {
+          type: 'object',
+          properties: { query: { type: 'string', description: 'Término o pregunta a buscar.' } },
+          required: ['query'],
+        },
         execute: async (orgId, _taskId, args) => {
           const query = String(args.query ?? '').trim();
           if (!query) return 'ERROR: web_search requiere args.query';
@@ -451,6 +560,10 @@ export class AgentLoopService {
       {
         name: 'gmail_read',
         usage: 'gmail_read{"query"?}: lee correos del usuario; query opcional estilo Gmail (from:, subject:, texto).',
+        inputSchema: {
+          type: 'object',
+          properties: { query: { type: 'string', description: 'Filtro estilo Gmail (from:, subject:, palabra clave). Omitir = últimos 3 correos.' } },
+        },
         execute: async (orgId, _taskId, args) => {
           const query = String(args.query ?? '').trim();
           const result = query
@@ -462,6 +575,10 @@ export class AgentLoopService {
       {
         name: 'calendar_read',
         usage: 'calendar_read{"days"?}: agenda próxima del usuario (local + Google Calendar).',
+        inputSchema: {
+          type: 'object',
+          properties: { days: { type: 'number', description: 'Días hacia adelante (1-30, default 7).' } },
+        },
         execute: async (orgId, _taskId, args) => {
           const days = Math.min(Math.max(Number(args.days ?? 7) || 7, 1), 30);
           const [local, gcal] = await Promise.all([
@@ -475,6 +592,11 @@ export class AgentLoopService {
       {
         name: 'drive_read',
         usage: 'drive_read{"query"}: busca archivos/carpetas en el Google Drive del usuario.',
+        inputSchema: {
+          type: 'object',
+          properties: { query: { type: 'string', description: 'Nombre o descripción del archivo/carpeta a buscar.' } },
+          required: ['query'],
+        },
         execute: async (orgId, _taskId, args) => {
           const query = String(args.query ?? '').trim();
           if (!query) return 'ERROR: drive_read requiere args.query';
@@ -485,6 +607,11 @@ export class AgentLoopService {
       {
         name: 'memory_recall',
         usage: 'memory_recall{"query"}: recuerda conversaciones, datos y soluciones pasadas del usuario.',
+        inputSchema: {
+          type: 'object',
+          properties: { query: { type: 'string', description: 'Tema o pregunta a recordar.' } },
+          required: ['query'],
+        },
         execute: async (orgId, _taskId, args) => {
           const query = String(args.query ?? '').trim();
           if (!query) return 'ERROR: memory_recall requiere args.query';
@@ -496,12 +623,28 @@ export class AgentLoopService {
       {
         name: 'code_execute',
         usage: 'code_execute{"language":"python|node|bash","code","network"?}: ejecuta TU código literal en el sandbox de la tarea. /work persiste entre pasos; imprime resultados por stdout. Sin red por defecto (pasa "network":true si necesitas descargar de internet o llamar APIs externas; en este entorno la red está permitida y no requiere aprobación humana). Python incluye requests/pandas/numpy si la imagen eva-sandbox está instalada.',
-        // Real execution lives in runCodeExecute() — needs userId from opts for approvals.
+        inputSchema: {
+          type: 'object',
+          properties: {
+            language: { type: 'string', enum: ['python', 'node', 'bash'], description: 'Lenguaje del código.' },
+            code: { type: 'string', description: 'Código a ejecutar. Usa print()/console.log() para ver resultados.' },
+            network: { type: 'boolean', description: 'true = permitir acceso a red (para descargas y llamadas a APIs).' },
+          },
+          required: ['language', 'code'],
+        },
         execute: async () => 'ERROR: code_execute no disponible',
       },
       {
         name: 'terminal_run',
         usage: 'terminal_run{"cmd","background"?}: comando de shell en el sandbox de la tarea (cwd /work). background:true para procesos largos; léelos con terminal_output.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            cmd: { type: 'string', description: 'Comando de shell a ejecutar en /work.' },
+            background: { type: 'boolean', description: 'true = ejecutar en background (leer con terminal_output).' },
+          },
+          required: ['cmd'],
+        },
         execute: async (orgId, taskId, args) => {
           const cmd = String(args.cmd ?? '').trim();
           if (!cmd) return 'ERROR: terminal_run requiere args.cmd';
@@ -514,6 +657,7 @@ export class AgentLoopService {
       {
         name: 'terminal_output',
         usage: 'terminal_output{}: lee la salida acumulada del proceso en background del sandbox.',
+        inputSchema: { type: 'object', properties: {} },
         execute: async (_orgId, taskId) => {
           const result = await this.sandbox.readBackgroundOutput(taskId);
           return this.formatSandboxResult(result);
@@ -522,6 +666,11 @@ export class AgentLoopService {
       {
         name: 'skill_run',
         usage: 'skill_run{"slug"}: re-ejecuta una skill guardada (código ya probado) en el sandbox, sin regenerarla.',
+        inputSchema: {
+          type: 'object',
+          properties: { slug: { type: 'string', description: 'Slug de la skill a ejecutar.' } },
+          required: ['slug'],
+        },
         execute: async (orgId, taskId, args) => {
           const slug = String(args.slug ?? '').trim();
           if (!slug) return 'ERROR: skill_run requiere args.slug';
@@ -536,6 +685,16 @@ export class AgentLoopService {
       {
         name: 'skill_save',
         usage: 'skill_save{"name","description","language":"python|node|bash","code"}: guarda código YA PROBADO como skill reutilizable (pasa por un escáner de seguridad). Úsalo tras verificar que funciona; mismo name = nueva versión.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Nombre corto de la skill.' },
+            description: { type: 'string', description: 'Qué hace esta skill.' },
+            language: { type: 'string', enum: ['python', 'node', 'bash'] },
+            code: { type: 'string', description: 'Código ya verificado que funciona.' },
+          },
+          required: ['name', 'description', 'language', 'code'],
+        },
         execute: async (orgId, taskId, args) => {
           const code = String(args.code ?? '').trim();
           const name = String(args.name ?? '').trim();
@@ -556,6 +715,11 @@ export class AgentLoopService {
       {
         name: 'script_forge',
         usage: 'script_forge{"spec"}: pide a un modelo especializado escribir Y ejecutar un script completo (queda registrado como skill reutilizable). Prefiere code_execute para iterar tú mismo.',
+        inputSchema: {
+          type: 'object',
+          properties: { spec: { type: 'string', description: 'Descripción detallada de qué debe hacer el script.' } },
+          required: ['spec'],
+        },
         execute: async (orgId, taskId, args) => {
           const spec = String(args.spec ?? '').trim();
           if (!spec) return 'ERROR: script_forge requiere args.spec';
@@ -568,13 +732,28 @@ export class AgentLoopService {
       {
         name: 'delegate',
         usage: `delegate{"goal","role"?}: delega un sub-objetivo acotado a un sub-agente especializado. Roles: ${DELEGATE_ROLE_CATALOG}. Divide tareas grandes; no delegues el objetivo completo.`,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            goal: { type: 'string', description: 'Sub-objetivo concreto y acotado.' },
+            role: { type: 'string', description: `Rol del sub-agente: ${DELEGATE_ROLE_CATALOG}.` },
+          },
+          required: ['goal'],
+        },
         rootOnly: true,
-        // Real execution lives in runDelegate() — needs depth/log from the caller.
         execute: async () => 'ERROR: delegate no disponible',
       },
       {
         name: 'image_analyze',
         usage: 'image_analyze{"path","prompt"?}: analiza una imagen (captura de pantalla, foto, etc.) guardada en el sandbox (ruta relativa o absoluta) o desde una URL pública, usando un modelo de visión para extraer texto, leer códigos o resolver dudas contextuales.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Ruta de la imagen en /work o URL pública.' },
+            prompt: { type: 'string', description: 'Qué analizar en la imagen.' },
+          },
+          required: ['path'],
+        },
         execute: async (orgId, taskId, args) => {
           const pathArg = String(args.path ?? '').trim();
           if (!pathArg) return 'ERROR: image_analyze requiere args.path';
@@ -644,6 +823,10 @@ export class AgentLoopService {
       {
         name: 'sandbox_ls',
         usage: 'sandbox_ls{"path"?}: lista los archivos en /work del sandbox de la tarea (o en un subdirectorio). Usa esto para verificar que un archivo fue descargado antes de enviarlo.',
+        inputSchema: {
+          type: 'object',
+          properties: { path: { type: 'string', description: 'Subdirectorio dentro de /work (opcional).' } },
+        },
         execute: async (_orgId, taskId, args) => {
           const subPath = String(args.path ?? '').trim().replace(/^\/work\/?/, '');
           const hostDir = this.sandbox.getHostDir(taskId);
@@ -675,13 +858,21 @@ export class AgentLoopService {
       {
         name: 'telegram_send_file',
         usage: 'telegram_send_file{"file","caption"?,"chat_id"?}: envía un archivo del workspace (/work) directamente a Telegram. file=nombre del archivo (ej. "video.mp4"). Si no se especifica chat_id, se usa el de la conversación activa de la tarea.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            file: { type: 'string', description: 'Nombre del archivo en /work (ej. "video.mp4").' },
+            caption: { type: 'string', description: 'Pie de foto/descripción del archivo.' },
+            chat_id: { type: 'string', description: 'Chat ID de Telegram (opcional, se infiere de la tarea).' },
+          },
+          required: ['file'],
+        },
         execute: async (orgId, taskId, args) => {
           if (!this.telegram) return 'ERROR: TelegramAdapter no disponible en este contexto.';
 
           const fileArg = String(args.file ?? '').trim().replace(/^\/work\/?/, '');
           if (!fileArg) return 'ERROR: telegram_send_file requiere args.file (nombre o ruta relativa en /work)';
 
-          // Resolver ruta del archivo desde el hostDir del sandbox
           const hostDir = this.sandbox.getHostDir(taskId);
           if (!hostDir) return 'ERROR: no hay sesión sandbox activa. El archivo debe existir en /work (usa code_execute primero).';
 
@@ -696,7 +887,6 @@ export class AgentLoopService {
           const caption = String(args.caption ?? '').trim() || undefined;
           const filename = pathLib.basename(fileArg);
 
-          // Resolver chat_id: argumento explícito o desde el task channel de la tarea.
           let chatId = String(args.chat_id ?? '').trim();
           if (!chatId) {
             try {
@@ -731,7 +921,6 @@ export class AgentLoopService {
             return 'ERROR: no se encontró chat_id de Telegram. Pasa args.chat_id explícitamente o asegúrate de que la tarea venga de un mensaje de Telegram.';
           }
 
-          // Obtener bot token del org
           let botToken: string | null | undefined;
           if (this.integrations) {
             botToken = await this.integrations
@@ -813,8 +1002,6 @@ export class AgentLoopService {
       const [suggested] = await this.skillLibrary.findRelevant(orgId, subGoal, 1).catch(() => []);
       role = suggested?.agentRole;
     }
-    // Complementariedad: el sub-agente arranca con lo que el raíz ya averiguó,
-    // no desde cero (un investigador alimenta al programador, etc.).
     const findings = parentSteps.filter((s) => !s.observation.startsWith('ERROR:')).slice(-3);
     const context = findings.length > 0
       ? `HALLAZGOS PREVIOS DEL AGENTE PRINCIPAL:\n${findings.map((s) => `[${s.tool}] ${this.truncate(s.observation, 240)}`).join('\n')}`
@@ -823,17 +1010,10 @@ export class AgentLoopService {
       depth: depth + 1, role, context, userId: opts.userId, log,
     });
     if (sub.ok) return sub.text;
-    // El fallo del sub-agente trae el porqué: el raíz puede adaptar en vez de rendirse.
     const lastError = [...sub.steps].reverse().find((s) => s.observation.startsWith('ERROR:'));
     return `ERROR: el sub-agente (${role ?? 'generalista'}) no resolvió "${subGoal.slice(0, 80)}".${lastError ? ` Último error: ${this.truncate(lastError.observation, 160)}.` : ''} Prueba otro rol, divide distinto el objetivo o resuélvelo tú con otra herramienta.`;
   }
 
-  /**
-   * Recuperación honesta cuando TODOS los pasos fallaron: en lugar de un "no
-   * se pudo" seco, redacta qué se intentó y 2-3 opciones accionables. Los
-   * errores de las herramientas suelen decir exactamente qué falta (integración
-   * sin conectar, dato faltante, permiso) — eso ES la respuesta útil.
-   */
   private async synthesizeRecoveryOptions(orgId: string, taskId: string, goal: string, steps: AgentLoopStep[]): Promise<GenerateResult> {
     const attempts = steps
       .map((s) => `[${s.tool}] ${this.truncate(s.observation, 220)}`)
@@ -863,6 +1043,7 @@ export class AgentLoopService {
         reason: s.reason,
         useMode: s.useMode ?? 'run',
         maxConcurrency: s.maxConcurrency,
+        isProvisional: s.isProvisional,
       })),
       secretAliases,
     };
@@ -906,15 +1087,12 @@ export class AgentLoopService {
     }
   }
 
-  // ── sedimentación (estilo hermes: cada run exitoso deja conocimiento) ────
+  // ── sedimentación ─────────────────────────────────────────────────────────
 
   /**
-   * Auto-sedimentación de skills: si el run resolvió con código y el modelo
-   * NO guardó nada explícitamente (skill_save/script_forge), el último
-   * code_execute exitoso se registra solo como skill + artifact. Es el
-   * "a pass that does nothing is a missed learning opportunity" del
-   * background review de hermes, sin un segundo agente: el trabajo probado
-   * nunca se pierde. SkillGuard sigue siendo el gate.
+   * C — Skill quarantine: las skills auto-sedimentadas se registran como
+   * 'provisional' y no se ofrecen al mismo nivel que las 'active'. Solo se
+   * promueven a 'active' cuando acumulan ≥2 usos exitosos vía recordOutcome.
    */
   private maybeAutoSaveSkill(orgId: string, taskId: string, goal: string, steps: AgentLoopStep[]): void {
     const alreadySaved = steps.some(
@@ -941,15 +1119,17 @@ export class AgentLoopService {
         code,
         origin: 'agent-loop-auto',
         taskId,
+        // C — quarantine: inicia como provisional, se promueve con ≥2 éxitos.
+        status: 'provisional',
       })
       .then(async (result) => {
         if (!result.ok) {
           this.logger.debug(`auto-skill skipped: ${result.reason}`);
           return;
         }
-        this.logger.log(`auto-skill "${result.slug}" v${result.version} sedimentada de la tarea ${taskId}`);
+        this.logger.log(`auto-skill provisional "${result.slug}" v${result.version} sedimentada de la tarea ${taskId}`);
         await this.saveArtifact(orgId, taskId, `${result.slug}.${language === 'python' ? 'py' : language === 'node' ? 'js' : 'sh'}`, code, {
-          language, skill_slug: result.slug, origin: 'agent-loop-auto',
+          language, skill_slug: result.slug, origin: 'agent-loop-auto', status: 'provisional',
         });
       })
       .catch((err) => this.logger.debug(`auto-skill failed: ${(err as Error).message}`));
@@ -1078,7 +1258,7 @@ export class AgentLoopService {
   ): Promise<string> {
     try {
       const prompt = `Eres la capa de pensamiento y coherencia crítica de EVA. Tu objetivo es evaluar, limpiar y refinar la respuesta final que se le enviará al usuario.
-      
+
 Objetivo original del usuario: "${goal}"
 Respuesta propuesta: "${proposedText}"
 
