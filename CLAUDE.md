@@ -2,6 +2,13 @@
 
 Stack: TypeScript · NestJS · Supabase (Postgres + pgvector) · Redis · BullMQ · Playwright · Docker · Next.js
 
+## 🔄 Closed-Loop Living Documentation (MANDATORY)
+To minimize context token consumption and avoid documentation drift, **every AI agent** (Claude, Codex, Antigravity, etc.) working on this project **must**:
+1. Load the local skill `eva-project-seed` first.
+2. Read the high-density documentation files under `docs/` (starting with [architecture.md](file:///Users/djoker/code/eva02/docs/architecture.md)).
+3. Follow the closed-loop workflow defined in [improvement_loop.md](file:///Users/djoker/code/eva02/docs/improvement_loop.md).
+4. Update relevant documentation in `docs/` and log outstanding items in [backlog.md](file:///Users/djoker/code/eva02/docs/backlog.md) at the end of every task before updating the project seed.
+
 ## Non-negotiable rules
 - **Multi-tenant**: every table and query MUST filter by `org_id`. Never query without it.
 - **RLS**: new tables → add migration AND an RLS policy in `014_rls_policies.sql`.

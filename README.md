@@ -11,6 +11,16 @@ EVA Fast Path   →  ruta rápida con token efímero desde Wear OS
 
 ---
 
+## 🔄 Closed-Loop Living Documentation (MANDATORY)
+
+Para minimizar el consumo de tokens de contexto y evitar la desactualización de los documentos, **todos los agentes de IA** (Claude, Codex, Antigravity, etc.) que trabajen en este proyecto **deben**:
+1. Cargar primero la skill local `.agents/skills/eva-project-seed`.
+2. Consultar la documentación compacta en `docs/` (comenzando por [architecture.md](file:///Users/djoker/code/eva02/docs/architecture.md)).
+3. Seguir el flujo de trabajo de circuito cerrado especificado en [improvement_loop.md](file:///Users/djoker/code/eva02/docs/improvement_loop.md).
+4. Actualizar la documentación y registrar tareas pendientes en [backlog.md](file:///Users/djoker/code/eva02/docs/backlog.md) al finalizar cada tarea.
+
+---
+
 ## Stack
 
 | Capa          | Tecnología                                |
@@ -39,7 +49,7 @@ eva02/
 ├── docker/
 │   └── postgres-init.sql
 ├── docker-compose.yml
-└── doc/                 # Documentación de arquitectura y fases
+└── docs/                # Documentación viva de arquitectura y backlog
 ```
 
 ---
