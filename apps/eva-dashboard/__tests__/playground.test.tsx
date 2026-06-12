@@ -126,4 +126,38 @@ describe('PlaygroundClient', () => {
     expect(await screen.findByText('Hola, aqui estoy. ¿Que hacemos?')).toBeInTheDocument();
     expect(screen.queryByText('EVA está trabajando…')).not.toBeInTheDocument();
   });
+
+  it('sends explicit feedback for a completed answer', async () => {
+    const completedTask = {
+      ...task,
+      status: 'completed' as const,
+      result: { text: 'Listo, ya lo hice.' },
+    };
+    mockWsState.events = [];
+    mockWsState.taskPatches = {};
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => completedTask,
+      text: async () => '',
+    }) as jest.Mock;
+
+    render(<PlaygroundClient />);
+
+    fireEvent.change(screen.getByLabelText('Order'), { target: { value: 'haz una prueba' } });
+    fireEvent.click(screen.getByText('Run'));
+
+    expect(await screen.findByText('Listo, ya lo hice.')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Mark answer helpful'));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/agent/feedback'),
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.stringContaining('"reaction":"positive"'),
+        }),
+      );
+    });
+    expect(await screen.findByText('feedback saved')).toBeInTheDocument();
+  });
 });

@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 23:15Z
+C: dashboard/docs: implemented high-impact backlog items: Playground thumbs feedback, Topbar core/sandbox health indicator, and project-map freshness checker; files=apps/eva-dashboard/components/playground/playground-client.tsx,apps/eva-dashboard/__tests__/playground.test.tsx,apps/eva-dashboard/components/layout/topbar.tsx,scripts/check-project-map-freshness.mjs,package.json,docs/backlog.md,docs/architecture.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm run docs:check; cd apps/eva-dashboard && npm test -- --runInBand __tests__/playground.test.tsx; cd apps/eva-dashboard && npm run build; cd apps/eva-core && npm run build; cd apps/eva-core && npm test -- src/agent/__tests__/soul-context.service.spec.ts --runInBand
+P: pending/improve -> add docs:check to CI and consider a Topbar unit test with mocked /health states
+
 ### 2026-06-12 22:55Z
 C: soul: separated agent identity from user profile, added relationship alias map and encrypted private user context for model-only prompting; files=apps/eva-core/src/agent/soul-context.service.ts,apps/eva-core/src/agent/soul.controller.ts,apps/eva-core/src/agent/dto/private-soul-context.dto.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/soul-context.service.spec.ts,apps/eva-dashboard/components/soul/soul-editor.tsx,apps/eva-dashboard/lib/types.ts,apps/eva-dashboard/app/(dashboard)/soul/page.tsx,supabase/migrations/031_soul_private_context.sql,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/soul-context.service.spec.ts --runInBand; cd apps/eva-core && npm run build; cd apps/eva-dashboard && npm run build
 P: pending/improve -> apply migration 031 in a real Supabase environment and run RLS_TEST=true npm run test:e2e to verify ciphertext column grants

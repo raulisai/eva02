@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Inbox, BrainCircuit, Cog, ShieldCheck, Flag, Send, Loader2,
-  ChevronRight, AlertTriangle, Clock, ClipboardList,
+  ChevronRight, AlertTriangle, Clock, ClipboardList, ThumbsDown, ThumbsUp,
 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { coreFetch } from '@/lib/core-api';
@@ -350,6 +350,9 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
   selected: boolean;
   onSelect: () => void;
 }) {
+  const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null);
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const says = events
     .filter((event) => event.type === 'task.say')
     .map((event) => String((event.payload as Record<string, unknown>)['text'] ?? ''));
@@ -363,6 +366,28 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
   const setupEvents = events.filter((event) => event.type === 'task.setup_required');
   const working = !TERMINAL.includes(status) && !resultText;
   const failed = status === 'failed';
+  const canRate = Boolean(resultText) || failed;
+
+  async function sendFeedback(reaction: 'positive' | 'negative') {
+    if (feedbackBusy) return;
+    setFeedbackBusy(true);
+    setFeedbackError(null);
+    try {
+      await coreFetch('/agent/feedback', {
+        method: 'POST',
+        body: JSON.stringify({
+          taskId: entry.task.id,
+          reaction,
+          rating: reaction === 'positive' ? 5 : 1,
+        }),
+      });
+      setFeedback(reaction);
+    } catch (error) {
+      setFeedbackError((error as Error).message);
+    } finally {
+      setFeedbackBusy(false);
+    }
+  }
 
   return (
     <div
@@ -500,6 +525,46 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
         <div className="flex justify-start">
           <div className="max-w-[85%] border border-red-500/30 bg-red-500/5 rounded-sm px-3 py-2 text-xs text-red-300">
             {entry.task.error ?? 'La tarea falló — revisa el action log.'}
+          </div>
+        </div>
+      )}
+      {canRate && (
+        <div className="flex justify-start">
+          <div className="inline-flex items-center gap-1 border border-zinc-800 rounded-sm bg-zinc-950/80 px-1.5 py-1">
+            <button
+              type="button"
+              aria-label="Mark answer helpful"
+              disabled={feedbackBusy}
+              onClick={(event) => { event.stopPropagation(); void sendFeedback('positive'); }}
+              className={cn(
+                'h-6 w-6 inline-flex items-center justify-center rounded-sm text-zinc-500 hover:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50',
+                feedback === 'positive' && 'text-emerald-300 bg-emerald-500/10',
+              )}
+            >
+              <ThumbsUp className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              aria-label="Mark answer unhelpful"
+              disabled={feedbackBusy}
+              onClick={(event) => { event.stopPropagation(); void sendFeedback('negative'); }}
+              className={cn(
+                'h-6 w-6 inline-flex items-center justify-center rounded-sm text-zinc-500 hover:text-red-300 hover:bg-red-500/10 disabled:opacity-50',
+                feedback === 'negative' && 'text-red-300 bg-red-500/10',
+              )}
+            >
+              <ThumbsDown className="w-3.5 h-3.5" />
+            </button>
+            {feedback && (
+              <span className="px-1 text-[10px] font-mono text-zinc-500">
+                feedback saved
+              </span>
+            )}
+            {feedbackError && (
+              <span className="max-w-56 truncate px-1 text-[10px] font-mono text-red-400">
+                {feedbackError}
+              </span>
+            )}
           </div>
         </div>
       )}

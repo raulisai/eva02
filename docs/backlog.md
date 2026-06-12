@@ -35,12 +35,12 @@ This backlog compiles outstanding tasks, technical debt, and improvement ideas c
 
 ## 5. Web Dashboard & UI
 - [ ] **autonomy UI Controls**: Add dashboard controls to edit agent settings (e.g., `maxSteps` limits) by tier.
-- [ ] **Autonomy Health Indicators**: Pipe the NestJS `/health` sandbox status field directly to the dashboard header.
-- [ ] **Feedback Upvotes**: Add interactive "Thumbs Up/Down" buttons to the Playground UI calling `POST /agent/feedback`.
+- [x] **Autonomy Health Indicators**: Pipe the NestJS `/health` sandbox status field directly to the dashboard header.
+- [x] **Feedback Upvotes**: Add interactive "Thumbs Up/Down" buttons to the Playground UI calling `POST /agent/feedback`.
 
 ---
 
 ## 6. Testing & Quality Assurance
 - [ ] **RLS Tests**: Run and verify `RLS_TEST=true npm run test:e2e` for the recent skill learning tables (`skill_usage_stats`, `skill_graph_edges`, `skill_selection_events`).
 - [ ] **Soul Private Context RLS**: After applying migration `031_soul_private_context.sql`, verify `agent_souls.private_context_ciphertext` is not readable through the authenticated Supabase Data API and that eva-core can still decrypt it server-side.
-- [ ] **Project Map Freshness Check**: Script an automated validator check comparing schema migrations and module controllers against `references/project-map.md`.
+- [x] **Project Map Freshness Check**: Script an automated validator check comparing schema migrations and module controllers against `references/project-map.md`.

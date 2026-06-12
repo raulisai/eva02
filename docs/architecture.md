@@ -45,6 +45,7 @@ EVA is a highly distributed agentic platform built to perform complex, multi-mod
 ### 1. User Interfaces & Channel Connectors
 - **Wear OS / Android Companion**: Uses Kotlin + Jetpack Compose. Communicates using a **Fast Path** (short-lived 300s tokens, zero storage of keys, raw OpenAI Realtime audio/vibration) or triggers Core actions via JSON Server-Driven UI (SDUI).
 - **Web Dashboard**: Built with Next.js 14 and Tailwind, interacting with the NestJS Core API via JWT token authentication.
+- **Operations Header**: The dashboard topbar polls public `/health` to surface Core and sandbox readiness while WebSocket status tracks live event delivery.
 - **Telegram Bot**: Listens to user webhook calls, routes tasks to the Intent Router, processes multi-modal feedback (voice transcription, photos), and returns telemetry updates.
 
 ### 2. NestJS Core API (`apps/eva-core`)
