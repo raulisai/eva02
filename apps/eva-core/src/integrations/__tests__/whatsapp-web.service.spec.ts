@@ -222,12 +222,14 @@ describe('WhatsAppWebService', () => {
       .mockResolvedValueOnce(undefined) // selectContact: clearSearchInput
       .mockResolvedValueOnce(null) // selectContact: searchRowSelector (not found)
       .mockResolvedValueOnce(undefined) // selectContact: clearSearchInput for fallback
-      .mockResolvedValueOnce(null); // selectContact: secondAttemptSelector (not found)
+      .mockResolvedValueOnce(null) // selectContact: secondAttemptSelector (not found)
+      .mockResolvedValueOnce(['Michael Sec', 'Luis']); // selectContact: getVisibleResults fallback
 
     const result = await service.fetchContactMessages(ORG, 'Michael Sec', TASK);
 
     expect(result.ok).toBe(false);
     expect(result.text).toContain('No pude encontrar');
+    expect(result.text).toContain('Michael Sec, Luis');
   });
 
   describe('sendMessage', () => {
@@ -254,12 +256,14 @@ describe('WhatsAppWebService', () => {
         .mockResolvedValueOnce(undefined) // selectContact: clearSearchInput
         .mockResolvedValueOnce(null) // selectContact: searchRowSelector (not found)
         .mockResolvedValueOnce(undefined) // selectContact: clearSearchInput for fallback
-        .mockResolvedValueOnce(null); // selectContact: secondAttemptSelector (not found)
+        .mockResolvedValueOnce(null) // selectContact: secondAttemptSelector (not found)
+        .mockResolvedValueOnce(['Michael Sec', 'Luis']); // selectContact: getVisibleResults fallback
 
       const result = await service.sendMessage(ORG, 'Michael Sec', 'Hola', TASK);
 
       expect(result.ok).toBe(false);
       expect(result.text).toContain('No pude encontrar el contacto');
+      expect(result.text).toContain('Michael Sec, Luis');
     });
   });
 });

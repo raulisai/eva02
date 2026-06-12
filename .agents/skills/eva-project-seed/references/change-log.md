@@ -2,6 +2,14 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 08:47Z
+C: whatsapp: fixed active chat header targeting to prevent matching sidebar header, robust innerText name fallback, and extracted visible search results list on selection failure; files=apps/eva-core/src/integrations/whatsapp-web.service.ts,apps/eva-core/src/integrations/__tests__/whatsapp-web.service.spec.ts; tests=npm test -- src/integrations/__tests__/whatsapp-web.service.spec.ts
+P: pending/improve -> add actual integration/E2E test suite using true chrome profiles for WhatsApp Web flow
+
+### 2026-06-12 08:23Z
+C: whatsapp: fixed contact selection click failures by implementing verified open headers, dual-clicks (native+JS), and clearSearchInput; files=apps/eva-core/src/integrations/whatsapp-web.service.ts,apps/eva-core/src/integrations/__tests__/whatsapp-web.service.spec.ts; tests=npm test -- src/integrations/__tests__/whatsapp-web.service.spec.ts
+P: pending/improve -> add actual integration/E2E test suite using true chrome profiles for WhatsApp Web flow
+
 ### 2026-06-12 08:07Z
 C: whatsapp: added sendMessage, improved search input selectors, resolved approvals execution loop; files=apps/eva-core/src/integrations/whatsapp-web.service.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/browser/whatsapp-web.controller.ts,apps/eva-core/src/integrations/__tests__/whatsapp-web.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts; tests=npm test -- apps/eva-core/src/integrations/__tests__/whatsapp-web.service.spec.ts,npm test -- apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts
 P: pending/improve -> add end-to-end integration tests for WhatsApp Web message flows with real browser sessions if possible

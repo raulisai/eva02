@@ -370,20 +370,26 @@ export class WhatsAppWebService {
       };
     }
 
-    const { ok: opened, actualContactName } = await this.selectContact(session.session_id, orgId, contactName);
+    const selectRes = await this.selectContact(session.session_id, orgId, contactName);
     
     // Always capture a screenshot of what we found/did!
     const screenshot = await this.browser.screenshot(session.session_id, orgId);
     const updatedSession = { ...session, screenshot };
 
-    if (!opened || !actualContactName) {
+    if (!selectRes.ok || !selectRes.actualContactName) {
+      const resultsText = selectRes.visibleResults && selectRes.visibleResults.length > 0
+        ? ` En los resultados de búsqueda encontré ${selectRes.visibleResults.length} contacto(s): ${selectRes.visibleResults.join(', ')}.`
+        : ' No encontré ningún resultado en la búsqueda.';
+
       return {
         ok: false,
         reason: 'contact_not_found',
         session: updatedSession,
-        text: `No pude encontrar ningún contacto similar a **${contactName}** en WhatsApp. Te adjunto una captura de la pantalla actual para que lo verifiques.`,
+        text: `No pude encontrar ningún contacto similar a **${contactName}** en WhatsApp.${resultsText} Te adjunto una captura de la pantalla actual para que lo verifiques.`,
       };
     }
+
+    const actualContactName = selectRes.actualContactName;
 
     const messages = await this.extractOpenChatMessages(session.session_id, orgId);
     
@@ -429,19 +435,24 @@ export class WhatsAppWebService {
       };
     }
 
-    const { ok: opened, actualContactName } = await this.selectContact(session.session_id, orgId, contactName);
+    const selectRes = await this.selectContact(session.session_id, orgId, contactName);
 
     // Capture screenshot after selectContact
     const screenshot = await this.browser.screenshot(session.session_id, orgId);
     const updatedSession = { ...session, screenshot };
 
-    if (!opened || !actualContactName) {
+    if (!selectRes.ok || !selectRes.actualContactName) {
+      const resultsText = selectRes.visibleResults && selectRes.visibleResults.length > 0
+        ? ` En los resultados de búsqueda encontré: ${selectRes.visibleResults.join(', ')}.`
+        : '';
       return {
         ok: false,
         session: updatedSession,
-        text: `No pude encontrar el contacto **${contactName}** en WhatsApp para enviarle el mensaje.`,
+        text: `No pude encontrar el contacto **${contactName}** en WhatsApp para enviarle el mensaje.${resultsText}`,
       };
     }
+
+    const actualContactName = selectRes.actualContactName;
 
     // Now type the message in the input field
     const inputSelectors = [
@@ -853,12 +864,17 @@ export class WhatsAppWebService {
           return false;
         }
 
-        const header = document.querySelector('header') || document.querySelector('#main header');
+        const header = document.querySelector('#main header, [data-testid="conversation-panel"] header, [role="region"] header');
         if (header) {
-          const titleEl = header.querySelector('[dir="auto"], span[title]');
-          const headerText = titleEl 
+          const titleEl = header.querySelector('[role="button"] [dir="auto"], [role="button"] span[title], [dir="auto"], span[title]');
+          let headerText = titleEl 
             ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || titleEl.textContent || '') 
-            : header.innerText || '';
+            : '';
+          if (!headerText) {
+            const htmlHeader = header as HTMLElement;
+            const firstLine = (htmlHeader.innerText || '').split('\n')[0];
+            headerText = firstLine ? firstLine.trim() : '';
+          }
           if (isMatch(headerText, contactNameLower)) {
             return { opened: true, actualContactName: headerText };
           }
@@ -928,8 +944,34 @@ export class WhatsAppWebService {
     await this.browser.wait(sessionId, orgId, 500);
   }
 
-  private async selectContact(sessionId: string, orgId: string, contactName: string): Promise<{ ok: boolean; actualContactName: string | null }> {
+  private async selectContact(
+    sessionId: string,
+    orgId: string,
+    contactName: string
+  ): Promise<{ ok: boolean; actualContactName: string | null; visibleResults?: string[] }> {
     const contactLower = contactName.toLowerCase().trim();
+
+    // Helper to extract visible results
+    const getVisibleResults = async (): Promise<string[]> => {
+      try {
+        return await this.browser.evaluate<string[]>(sessionId, orgId, () => {
+          const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
+          const elements = Array.from(pane.querySelectorAll('[role="row"], [data-testid^="list-item-"]'));
+          const names: string[] = [];
+          for (const el of elements) {
+            const titleEl = el.querySelector('[data-testid="cell-frame-title"] span[dir="auto"], [data-testid="cell-frame-title"] [title], [class*="title"] [title]');
+            const name = titleEl ? (titleEl.getAttribute('title') || titleEl.textContent || '') : el.textContent || '';
+            const trimmed = name.trim();
+            if (trimmed && !/^(chats?|buscar|search|nuevo chat|new chat)$/i.test(trimmed) && !names.includes(trimmed)) {
+              names.push(trimmed);
+            }
+          }
+          return names;
+        });
+      } catch (err) {
+        return [];
+      }
+    };
 
     // 1. Check if we are already in the chat with this contact
     const alreadyOpen = await this.verifyOpenedChat(sessionId, orgId, contactName);
@@ -1168,6 +1210,9 @@ export class WhatsAppWebService {
         }
       }
     }
+
+    const results = await getVisibleResults();
+    return { ok: false, actualContactName: null, visibleResults: results };
 
     return { ok: false, actualContactName: null };
   }

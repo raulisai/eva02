@@ -13,17 +13,17 @@ EVA Fast Path   →  ruta rápida con token efímero desde Wear OS
 
 ## Stack
 
-| Capa | Tecnología |
-|------|-----------|
-| Backend | TypeScript · NestJS |
-| Base de datos | Supabase Postgres + pgvector |
-| Cache / Queue | Redis · BullMQ · Redis Streams |
-| Browser | Playwright (perfiles persistentes) |
-| Auth | Supabase Auth (JWT + claim `org_id`) |
-| Dashboard | Next.js 14 · Tailwind · shadcn/ui |
-| Realtime | WebSocket (Socket.io) + Supabase Realtime |
-| Reloj | Kotlin · Jetpack Compose for Wear OS |
-| Contenedores | Docker · Docker Compose |
+| Capa          | Tecnología                                |
+| ------------- | ----------------------------------------- |
+| Backend       | TypeScript · NestJS                       |
+| Base de datos | Supabase Postgres + pgvector              |
+| Cache / Queue | Redis · BullMQ · Redis Streams            |
+| Browser       | Playwright (perfiles persistentes)        |
+| Auth          | Supabase Auth (JWT + claim `org_id`)      |
+| Dashboard     | Next.js 14 · Tailwind · shadcn/ui         |
+| Realtime      | WebSocket (Socket.io) + Supabase Realtime |
+| Reloj         | Kotlin · Jetpack Compose for Wear OS      |
+| Contenedores  | Docker · Docker Compose                   |
 
 ---
 
@@ -109,9 +109,9 @@ cd apps/eva-core && npm install
 cd apps/eva-dashboard && npm install
 ```
 
+```bash
 ### 5. Arrancar en desarrollo
 
-```bash
 # Backend (puerto 3000)
 cd apps/eva-core
 npm run start:dev
@@ -135,35 +135,35 @@ Esto levanta Postgres, Redis y eva-core juntos. El dashboard corre fuera de Dock
 
 ### `apps/eva-core/.env`
 
-| Variable | Descripción | Ejemplo |
-|----------|-------------|---------|
-| `SUPABASE_URL` | URL del proyecto Supabase | `https://<project>.supabase.co` |
-| `SUPABASE_ANON_KEY` | Clave anon pública | `eyJ...` |
-| `SUPABASE_SERVICE_ROLE_KEY` | Clave service role (solo backend) | `eyJ...` |
-| `SUPABASE_JWT_SECRET` | Secret JWT de Supabase (Settings → API) | `super-secret-jwt-...` |
-| `DATABASE_URL` | Conexión directa Postgres | `postgresql://postgres:<pwd>@<host>:5432/postgres` |
-| `REDIS_URL` | URL de Redis | `redis://localhost:6379` |
-| `PORT` | Puerto del servidor | `3000` |
-| `NODE_ENV` | Entorno | `development` |
-| `THROTTLE_TTL` | Ventana de rate limit en segundos | `60` |
-| `THROTTLE_LIMIT` | Max requests por ventana | `100` |
-| `CORS_ORIGIN` | Origen permitido en CORS | `http://localhost:3001` |
+| Variable                    | Descripción                             | Ejemplo                                            |
+| --------------------------- | --------------------------------------- | -------------------------------------------------- |
+| `SUPABASE_URL`              | URL del proyecto Supabase               | `https://<project>.supabase.co`                    |
+| `SUPABASE_ANON_KEY`         | Clave anon pública                      | `eyJ...`                                           |
+| `SUPABASE_SERVICE_ROLE_KEY` | Clave service role (solo backend)       | `eyJ...`                                           |
+| `SUPABASE_JWT_SECRET`       | Secret JWT de Supabase (Settings → API) | `super-secret-jwt-...`                             |
+| `DATABASE_URL`              | Conexión directa Postgres               | `postgresql://postgres:<pwd>@<host>:5432/postgres` |
+| `REDIS_URL`                 | URL de Redis                            | `redis://localhost:6379`                           |
+| `PORT`                      | Puerto del servidor                     | `3000`                                             |
+| `NODE_ENV`                  | Entorno                                 | `development`                                      |
+| `THROTTLE_TTL`              | Ventana de rate limit en segundos       | `60`                                               |
+| `THROTTLE_LIMIT`            | Max requests por ventana                | `100`                                              |
+| `CORS_ORIGIN`               | Origen permitido en CORS                | `http://localhost:3001`                            |
 
 > `SUPABASE_SERVICE_ROLE_KEY` **nunca** debe exponerse al cliente ni commitearse.
 
 ### `apps/eva-dashboard/.env`
 
-| Variable | Descripción |
-|----------|-------------|
-| `NEXT_PUBLIC_SUPABASE_URL` | URL pública del proyecto Supabase |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Clave anon pública |
-| `NEXT_PUBLIC_EVA_CORE_URL` | URL del backend (ej. `http://localhost:3000`) |
-| `EVA_CORE_URL` | URL interna server-side del backend |
+| Variable                        | Descripción                                   |
+| ------------------------------- | --------------------------------------------- |
+| `NEXT_PUBLIC_SUPABASE_URL`      | URL pública del proyecto Supabase             |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Clave anon pública                            |
+| `NEXT_PUBLIC_EVA_CORE_URL`      | URL del backend (ej. `http://localhost:3000`) |
+| `EVA_CORE_URL`                  | URL interna server-side del backend           |
 
 ### `.env` raíz (Docker Compose)
 
-| Variable | Descripción |
-|----------|-------------|
+| Variable            | Descripción                |
+| ------------------- | -------------------------- |
 | `POSTGRES_PASSWORD` | Password de Postgres local |
 
 ---
@@ -174,7 +174,7 @@ Esto levanta Postgres, Redis y eva-core juntos. El dashboard corre fuera de Dock
 2. **Settings → API**:
    - `URL` → `SUPABASE_URL`
    - `anon public` → `SUPABASE_ANON_KEY`
-   - `service_role` → `SUPABASE_SERVICE_ROLE_KEY` *(solo backend)*
+   - `service_role` → `SUPABASE_SERVICE_ROLE_KEY` _(solo backend)_
    - `JWT Secret` → `SUPABASE_JWT_SECRET`
 3. **Settings → Database** → Connection string → `DATABASE_URL`
 
@@ -200,11 +200,11 @@ X-Org-Id: <uuid-de-tu-org>
 
 ### Endpoints principales
 
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| `GET` | `/health` | Health check público |
-| `POST` | `/tasks` | Crear una tarea |
-| `GET` | `/tasks/:id` | Obtener tarea por ID |
+| Método  | Ruta                | Descripción                     |
+| ------- | ------------------- | ------------------------------- |
+| `GET`   | `/health`           | Health check público            |
+| `POST`  | `/tasks`            | Crear una tarea                 |
+| `GET`   | `/tasks/:id`        | Obtener tarea por ID            |
 | `PATCH` | `/tasks/:id/status` | Transicionar estado de la tarea |
 
 #### POST /tasks
@@ -236,33 +236,33 @@ Namespace: `ws://localhost:3000/eva`
 ### Conexión
 
 ```js
-import { io } from 'socket.io-client';
+import { io } from "socket.io-client";
 
-const socket = io('http://localhost:3000/eva', {
-  auth: { token: '<supabase-jwt>' }
+const socket = io("http://localhost:3000/eva", {
+  auth: { token: "<supabase-jwt>" },
 });
 
-socket.on('connected', ({ orgId }) => console.log('Sala:', orgId));
+socket.on("connected", ({ orgId }) => console.log("Sala:", orgId));
 ```
 
 El servidor une automáticamente al cliente a la sala `org:<orgId>` para que solo reciba eventos de su organización.
 
 ### Eventos emitidos por el servidor
 
-| Evento | Payload | Descripción |
-|--------|---------|-------------|
-| `task.created` | `{ taskId, payload, ts }` | Nueva tarea creada |
-| `task.started` | `{ taskId, payload, ts }` | Tarea inició ejecución |
-| `task.completed` | `{ taskId, payload, ts }` | Tarea completada |
-| `task.failed` | `{ taskId, payload, ts }` | Tarea falló |
-| `task.cancelled` | `{ taskId, payload, ts }` | Tarea cancelada |
-| `approval.requested` | `{ taskId, payload, ts }` | Aprobación requerida |
-| `approval.resolved` | `{ taskId, payload, ts }` | Aprobación resuelta |
+| Evento               | Payload                   | Descripción            |
+| -------------------- | ------------------------- | ---------------------- |
+| `task.created`       | `{ taskId, payload, ts }` | Nueva tarea creada     |
+| `task.started`       | `{ taskId, payload, ts }` | Tarea inició ejecución |
+| `task.completed`     | `{ taskId, payload, ts }` | Tarea completada       |
+| `task.failed`        | `{ taskId, payload, ts }` | Tarea falló            |
+| `task.cancelled`     | `{ taskId, payload, ts }` | Tarea cancelada        |
+| `approval.requested` | `{ taskId, payload, ts }` | Aprobación requerida   |
+| `approval.resolved`  | `{ taskId, payload, ts }` | Aprobación resuelta    |
 
 ### Eventos del cliente
 
-| Evento | Descripción |
-|--------|-------------|
+| Evento | Descripción                      |
+| ------ | -------------------------------- |
 | `ping` | Liveness check → responde `pong` |
 
 ---
@@ -274,14 +274,14 @@ El Event Bus corre sobre Redis Streams en el stream `eva:events`. Todos los mód
 ```typescript
 // Publicar
 await eventBus.publish({
-  type: 'task.created',
-  orgId: 'uuid',
-  taskId: 'uuid',
-  payload: { title: '...' },
+  type: "task.created",
+  orgId: "uuid",
+  taskId: "uuid",
+  payload: { title: "..." },
 });
 
 // Suscribirse
-eventBus.on('task.completed', async (event) => {
+eventBus.on("task.completed", async (event) => {
   // procesar...
 });
 ```
@@ -411,21 +411,21 @@ AWS_REGION=us-east-1
 
 ## Fases de desarrollo
 
-| Fase | Entregable | Estado |
-|------|------------|--------|
-| 1 · Core mínimo | API Gateway, Auth, Task Engine, Event Bus, WebSocket | ✅ Completo |
-| 2 · Dashboard | Panel Next.js (login, tareas, nodos, eventos, logs) | ✅ Completo |
-| 3 · Memory System | Memory Agent, embeddings pgvector, búsqueda semántica | Pendiente |
-| 4 · Planner + LLM | Model Router, Planner, Tool Router, Intent Router | Pendiente |
-| 5 · Server/Desktop Node | Node App, heartbeat, capability registry | Pendiente |
-| 6 · Dev Manager | Project Registry, Claude Code Controller, Dev Queue | Pendiente |
-| 7 · Browser Agent | Playwright, perfiles, screenshots | Pendiente |
-| 8 · Approval Engine | Niveles 0-3, action_hash, UI de aprobación | Pendiente |
-| 9 · Communication Hub | Telegram, Discord, email, push | Pendiente |
-| 10 · Skill System | Registry, loader, permisos, versioning | Pendiente |
-| 11 · MCP Manager | Gateway MCP, adapters GitHub/Supabase/Google/AWS | Pendiente |
-| 12 · Experience System | Traces, feedback, detección de patrones | Pendiente |
-| 13 · Wear Token / Fast Path | Tokens efímeros, policy, cost guard | Pendiente |
+| Fase                        | Entregable                                            | Estado      |
+| --------------------------- | ----------------------------------------------------- | ----------- |
+| 1 · Core mínimo             | API Gateway, Auth, Task Engine, Event Bus, WebSocket  | ✅ Completo |
+| 2 · Dashboard               | Panel Next.js (login, tareas, nodos, eventos, logs)   | ✅ Completo |
+| 3 · Memory System           | Memory Agent, embeddings pgvector, búsqueda semántica | Pendiente   |
+| 4 · Planner + LLM           | Model Router, Planner, Tool Router, Intent Router     | Pendiente   |
+| 5 · Server/Desktop Node     | Node App, heartbeat, capability registry              | Pendiente   |
+| 6 · Dev Manager             | Project Registry, Claude Code Controller, Dev Queue   | Pendiente   |
+| 7 · Browser Agent           | Playwright, perfiles, screenshots                     | Pendiente   |
+| 8 · Approval Engine         | Niveles 0-3, action_hash, UI de aprobación            | Pendiente   |
+| 9 · Communication Hub       | Telegram, Discord, email, push                        | Pendiente   |
+| 10 · Skill System           | Registry, loader, permisos, versioning                | Pendiente   |
+| 11 · MCP Manager            | Gateway MCP, adapters GitHub/Supabase/Google/AWS      | Pendiente   |
+| 12 · Experience System      | Traces, feedback, detección de patrones               | Pendiente   |
+| 13 · Wear Token / Fast Path | Tokens efímeros, policy, cost guard                   | Pendiente   |
 
 Ver [doc/06 - Plan de Ejecución por Fases.md](doc/06%20-%20Plan%20de%20Ejecución%20por%20Fases.md) para el roadmap completo.
 
@@ -442,6 +442,7 @@ acción preparada → action_hash = sha256(payload normalizado) + nonce + expire
 ```
 
 Niveles:
+
 - **0** — auto-aprobado (bajo riesgo)
 - **1** — confirmación única
 - **2** — aprobación explícita con screenshot
