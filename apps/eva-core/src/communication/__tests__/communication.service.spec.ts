@@ -306,12 +306,14 @@ describe('CommunicationService', () => {
   describe('onApplicationBootstrap — Telegram response delivery', () => {
     let resultHandler: (event: EvaEvent) => Promise<void>;
     let mediaHandler: (event: EvaEvent) => Promise<void>;
+    let sayHandler: (event: EvaEvent) => Promise<void>;
 
     beforeEach(() => {
       service.onApplicationBootstrap();
       const calls = (events.on as jest.Mock).mock.calls as [string, (e: EvaEvent) => Promise<void>][];
       resultHandler = calls.find(([type]) => type === 'task.result')![1];
       mediaHandler = calls.find(([type]) => type === 'task.media')![1];
+      sayHandler = calls.find(([type]) => type === 'task.say')![1];
     });
 
     it('forwards task.result text to Telegram when task source is telegram', async () => {
@@ -443,11 +445,52 @@ describe('CommunicationService', () => {
       })).resolves.not.toThrow();
     });
 
-    it('registers both task.result and task.media handlers on bootstrap', () => {
+    it('forwards task.say progress acks to Telegram so the user hears EVA immediately', async () => {
+      integrations.getChannelSettings.mockResolvedValue({
+        status: 'active',
+        config: {},
+        secret: 'bot-token',
+        webhookSecret: 'secret',
+      });
+
+      await sayHandler({
+        type: 'task.say',
+        orgId: ORG,
+        taskId: TASK,
+        payload: { text: 'Va para largo, así que ya lo estoy ejecutando en segundo plano 🛠️.' },
+        ts: Date.now(),
+      });
+
+      expect(telegram.sendMessage).toHaveBeenCalledWith(
+        { chat_id: '100' },
+        'Va para largo, así que ya lo estoy ejecutando en segundo plano 🛠️.',
+        'bot-token',
+      );
+    });
+
+    it('skips task.say forwarding when the task did not originate on Telegram', async () => {
+      tasks.getTask.mockResolvedValue({
+        ...telegramTask,
+        metadata: { source: 'wearos' },
+      });
+
+      await sayHandler({
+        type: 'task.say',
+        orgId: ORG,
+        taskId: TASK,
+        payload: { text: 'Enseguida, ya estoy en ello ⚙️' },
+        ts: Date.now(),
+      });
+
+      expect(telegram.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('registers task.result, task.media and task.say handlers on bootstrap', () => {
       const calls = (events.on as jest.Mock).mock.calls as [string, unknown][];
       const types = calls.map(([type]) => type);
       expect(types).toContain('task.result');
       expect(types).toContain('task.media');
+      expect(types).toContain('task.say');
     });
   });
 });

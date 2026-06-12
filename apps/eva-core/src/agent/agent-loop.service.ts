@@ -290,8 +290,10 @@ export class AgentLoopService {
       'REGLAS:',
       '- Antes de resolver desde cero, revisa memory_recall y las SKILLS GUARDADAS.',
       '- Para código: divide en pasos pequeños (inspeccionar→preparar→ejecutar→verificar). Los archivos en /work persisten entre pasos de esta tarea.',
+      '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
       '- Las herramientas son de solo lectura/sandbox: si el objetivo exige enviar o modificar algo externo, junta la información y explica en final_answer qué quedaría pendiente de aprobación.',
+      '- PROHIBIDO cerrar con "no se pudo" a secas: si algo queda fuera de tu alcance, tu final_answer debe traer lo que SÍ conseguiste + 2-3 opciones concretas de solución (qué reintentar, qué conectar, qué harías tú en el siguiente paso).',
       'Responde SOLO con JSON: {"thought":"breve","tool":"<nombre>","args":{...}}',
     );
     return blocks.join('\n');

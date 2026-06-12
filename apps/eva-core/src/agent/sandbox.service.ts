@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy, Optional } from '@nestjs/common';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -54,6 +54,12 @@ const OUTPUT_LIMIT = 4000;
 const DEFAULT_TIMEOUT_MS = 60_000;
 const SESSION_IDLE_TTL_MS = 15 * 60_000;
 const BG_LOG = '.eva-bg.log';
+/** TTL del check de Docker: un resultado negativo caduca rápido para re-detectar el daemon. */
+const DOCKER_CHECK_OK_TTL_MS = 5 * 60_000;
+const DOCKER_CHECK_FAIL_TTL_MS = 30_000;
+/** TTL del check de imagen enriquecida: si se construye después, se detecta sin reiniciar. */
+const ENRICHED_CHECK_OK_TTL_MS = 60 * 60_000;
+const ENRICHED_CHECK_FAIL_TTL_MS = 60_000;
 
 /** Imágenes one-shot por lenguaje — sin red, recursos acotados, autodestruidas. */
 const ONE_SHOT_IMAGES: Record<SandboxLanguage, { image: string; cmd: (file: string) => string[] }> = {
@@ -82,11 +88,11 @@ const FILE_EXT: Record<SandboxLanguage, string> = { python: 'py', node: 'js', ba
  * real justo antes de ejecutar y se enmascara en la salida; el modelo nunca lo ve.
  */
 @Injectable()
-export class SandboxService implements OnModuleDestroy {
+export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(SandboxService.name);
   private readonly sessions = new Map<string, SandboxSession>();
-  private dockerCheck?: Promise<boolean>;
-  private enrichedImageCheck?: Promise<boolean>;
+  private dockerCheck?: { value: boolean; checkedAt: number };
+  private enrichedImageCheck?: { value: boolean; checkedAt: number };
   private readonly reaper: NodeJS.Timeout;
 
   constructor(@Optional() private readonly integrations?: IntegrationsService) {
@@ -94,16 +100,57 @@ export class SandboxService implements OnModuleDestroy {
     this.reaper.unref();
   }
 
+  /** Warm-up: la "computadora" de EVA debe estar lista ANTES de la primera tarea. */
+  onApplicationBootstrap() {
+    void this.warmUp();
+  }
+
   async onModuleDestroy() {
     clearInterval(this.reaper);
     await Promise.all([...this.sessions.keys()].map((taskId) => this.release(taskId)));
   }
 
+  /**
+   * Verifica Docker y deja las imágenes pre-descargadas para que la primera
+   * ejecución no pague un `docker pull` (ni falle por imagen ausente).
+   * Best-effort: nunca tira el bootstrap del proceso.
+   */
+  async warmUp(): Promise<void> {
+    try {
+      if (!(await this.dockerAvailable())) {
+        this.logger.warn('sandbox warm-up: Docker no disponible — se reintentará en el próximo uso');
+        return;
+      }
+      if (await this.enrichedImageAvailable()) {
+        this.logger.log(`sandbox warm-up: Docker OK, imagen enriquecida ${process.env.EVA_SANDBOX_IMAGE || ENRICHED_IMAGE} lista`);
+      } else {
+        this.logger.warn(`sandbox warm-up: imagen enriquecida ausente — construye "docker build -t ${ENRICHED_IMAGE.replace(':latest', '')} docker/sandbox"; usando fallbacks alpine`);
+      }
+      // Pre-pull de los fallbacks en background — no bloquea el arranque.
+      for (const { image } of Object.values(ONE_SHOT_IMAGES)) {
+        void this.runDocker(['image', 'inspect', image, '--format', '{{.Id}}'], { timeout: 5000, maxBuffer: 1024 * 16 })
+          .catch(() => this.runDocker(['pull', image], { timeout: 120_000, maxBuffer: 1024 * 256 })
+            .then(() => this.logger.log(`sandbox warm-up: imagen ${image} descargada`))
+            .catch((err) => this.logger.warn(`sandbox warm-up: no pude descargar ${image}: ${(err as Error).message.slice(0, 120)}`)));
+      }
+    } catch (error) {
+      this.logger.warn(`sandbox warm-up falló: ${(error as Error).message.slice(0, 200)}`);
+    }
+  }
+
+  /**
+   * Disponibilidad con TTL: un "no" de hace un rato no condena al proceso —
+   * si el daemon de Docker se levanta después, EVA lo vuelve a encontrar sola.
+   */
   async dockerAvailable(): Promise<boolean> {
-    this.dockerCheck ??= execFileAsync('docker', ['version', '--format', '{{.Server.Version}}'], { timeout: 5000 })
+    const now = Date.now();
+    const ttl = this.dockerCheck?.value ? DOCKER_CHECK_OK_TTL_MS : DOCKER_CHECK_FAIL_TTL_MS;
+    if (this.dockerCheck && now - this.dockerCheck.checkedAt < ttl) return this.dockerCheck.value;
+    const value = await execFileAsync('docker', ['version', '--format', '{{.Server.Version}}'], { timeout: 5000 })
       .then(() => true)
       .catch(() => false);
-    return this.dockerCheck;
+    this.dockerCheck = { value, checkedAt: now };
+    return value;
   }
 
   // ── one-shot (script-forge y ejecuciones aprobadas con red) ───────────────
@@ -155,7 +202,17 @@ export class SandboxService implements OnModuleDestroy {
     if (resolved.error) return { ok: false, output: '', error: resolved.error };
 
     const session = await this.getOrCreateSession(taskId);
-    if (!session) return { ok: false, output: '', error: 'No se pudo crear la sesión sandbox' };
+    if (!session) {
+      // Resiliencia: sin sesión persistente, el paso aún puede correr one-shot
+      // (se pierde /work entre pasos, pero la tarea no se queda sin computadora).
+      this.logger.warn(`sandbox session unavailable for task ${taskId} — falling back to one-shot exec`);
+      const language: SandboxLanguage = opts.kind === 'terminal' ? 'bash' : opts.kind;
+      const result = await this.runOneShot({ language, code: opts.code, orgId: opts.orgId, timeoutMs: opts.timeoutMs });
+      if (result.ok) {
+        result.output = `${result.output}\n[aviso: sin sesión persistente — /work no conserva archivos entre pasos]`.trim();
+      }
+      return result;
+    }
     session.lastUsedAt = Date.now();
     session.stepCount += 1;
 
@@ -320,10 +377,14 @@ export class SandboxService implements OnModuleDestroy {
   private async enrichedImageAvailable(): Promise<boolean> {
     const override = process.env.EVA_SANDBOX_IMAGE;
     if (override === '') return false;
-    this.enrichedImageCheck ??= this.runDocker(['image', 'inspect', override ?? ENRICHED_IMAGE, '--format', '{{.Id}}'], {
+    const now = Date.now();
+    const ttl = this.enrichedImageCheck?.value ? ENRICHED_CHECK_OK_TTL_MS : ENRICHED_CHECK_FAIL_TTL_MS;
+    if (this.enrichedImageCheck && now - this.enrichedImageCheck.checkedAt < ttl) return this.enrichedImageCheck.value;
+    const value = await this.runDocker(['image', 'inspect', override ?? ENRICHED_IMAGE, '--format', '{{.Id}}'], {
       timeout: 5000, maxBuffer: 1024 * 16,
     }).then(() => true).catch(() => false);
-    return this.enrichedImageCheck;
+    this.enrichedImageCheck = { value, checkedAt: now };
+    return value;
   }
 
   private async reapIdleSessions(): Promise<void> {

@@ -83,8 +83,8 @@ const ACK_RULES: Array<{ pattern: RegExp; say: string; hint: string }> = [
 const DEFAULT_ACK = { say: 'Enseguida, ya estoy en ello ⚙️', hint: 'default' };
 
 const LONG_TASK_ACK =
-  'Esto va a tomar un rato — lo estoy atendiendo en segundo plano 🛠️. '
-  + 'Puedes seguir hablándome mientras tanto; te aviso cuando termine.';
+  'Va para largo, así que ya lo estoy ejecutando en segundo plano 🛠️. '
+  + 'Puedes seguir hablándome mientras tanto; te aviso en cuanto esté listo.';
 
 const SYSTEM_PROMPT = `Eres EVA, un agente operativo. Responde SIEMPRE en español,
 de forma directa y concisa (máximo ~120 palabras salvo que pidan detalle).
@@ -1110,23 +1110,47 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
     // 2. Otherwise scan input and context for text patterns
     const patterns = [
-      /\b(?:de|desde)\s+(.+?)\s+(?:a|hasta|para|al)\s+(.+?)(?:\?|$|[.,])/i,
-      /\borigen[:\s]+(.+?)\s+destino[:\s]+(.+?)(?:\?|$|[.,])/i,
-      /\b(?:a|hasta|para|al)\s+(.+?)(?:\?|$|[.,])/i,
+      {
+        regex: /\b(?:de|desde)\s+(.+?)\s+(?:a|hasta|para|al)\s+(.+?)(?:\?|$|[.,])/i,
+        originIdx: 1,
+        destIdx: 2,
+      },
+      {
+        regex: /\borigen[:\s]+(.+?)\s+destino[:\s]+(.+?)(?:\?|$|[.,])/i,
+        originIdx: 1,
+        destIdx: 2,
+      },
+      {
+        regex: /\b(?:a|hasta|para|al)\s+(.+?)\s+(?:desde)\s+(.+?)(?:\?|$|[.,])/i,
+        originIdx: 2,
+        destIdx: 1,
+      },
+      {
+        regex: /\b(?:a|hasta|para|al)\s+(.+?)\s+(?:de)\s+(.+?)(?:\?|$|[.,])/i,
+        originIdx: 2,
+        destIdx: 1,
+      },
+      {
+        regex: /\b(?:a|hasta|para|al)\s+(.+?)(?:\?|$|[.,])/i,
+        originIdx: null,
+        destIdx: 1,
+      },
     ];
 
     for (const text of allInputs) {
       for (const pattern of patterns) {
-        const match = text.match(pattern);
+        const match = text.match(pattern.regex);
         if (!match) continue;
 
-        let rawOrigin = match.length > 2 ? match[1] : null;
-        let rawDest = match.length > 2 ? match[2] : match[1];
+        let rawOrigin = pattern.originIdx !== null ? match[pattern.originIdx] : null;
+        let rawDest = match[pattern.destIdx];
 
         if (rawOrigin) {
           const cleanedOrigin = this.cleanUberPlace(rawOrigin);
           if (cleanedOrigin.toLowerCase() === 'uber' || cleanedOrigin.toLowerCase() === 'taxi' || !cleanedOrigin) {
-            rawOrigin = null; // Ignore "de uber" or "de taxi" as origin
+            // If origin is invalid (e.g. matched "de Uber"), this is a false match.
+            // Continue to the next pattern.
+            continue;
           }
         }
 
@@ -1204,7 +1228,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
   private async normalizeUberPlace(value: string, orgId: string, taskId?: string): Promise<string> {
     const cleaned = this.cleanUberPlace(value);
-    if (!/\b(mi ubicaci[oó]n|ubicaci[oó]n actual|aqu[ií]|aqui|donde estoy|mi casa|casa)\b/i.test(cleaned)) return cleaned;
+    if (!/\b(mi ubicaci[oó]n|ubicaci[oó]n actual|aqu[ií]|aqui|donde estoy|mi casa|casa|depa|departamento|mi depa|mi departamento)\b/i.test(cleaned)) return cleaned;
     
     if (taskId) {
       try {
@@ -1276,7 +1300,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
     // Repeatedly strip leading Spanish prepositions/articles
     while (true) {
-      const next = cleaned.replace(/^(?:el|la|los|las|un|una|unos|unas|de|del|al|a|para|este|ese|mi|tu|su)\s+/ig, '');
+      const next = cleaned.replace(/^(?:el|la|los|las|un|una|unos|unas|de|del|al|a|para|este|ese|mi|tu|su)\b\s*/ig, '');
       if (next === cleaned) break;
       cleaned = next;
     }
@@ -1915,9 +1939,12 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     );
     const text = [
       'No voy a cerrar esta tarea con una respuesta genérica del modelo.',
-      'Intenté resolverla con las herramientas disponibles del proyecto, pero todas fallaron.',
-      errors.length > 0 ? `Errores: ${errors.join(' | ')}` : 'No hubo una herramienta aplicable.',
-      'Siguiente acción: agrega una integración/API en Credentials o define una ruta de herramienta específica para esta capacidad, y la tarea se puede reintentar.',
+      errors.length > 0 ? `Lo que intenté y su detalle: ${errors.join(' | ')}` : 'Ninguna de mis herramientas actuales aplica directo a esto.',
+      '',
+      'Opciones para sacarlo adelante:',
+      '1. Dime "reintenta" y lo vuelvo a intentar por otra ruta (otra herramienta o búsqueda distinta).',
+      '2. Si falta una integración/API, conéctala en Credentials y lo reintento al instante.',
+      '3. Puedo dividirlo en pasos pequeños y avanzar ya con la parte que sí está a mi alcance — solo dime.',
     ].join('\n');
     await this.deliver(orgId, taskId, text, 'tool-recovery', Date.now() - startedAt);
     return true;
@@ -2018,11 +2045,55 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       const refreshed = await this.tasks.getTask(taskId, orgId);
       // planning, running and waiting_for_approval can all fail directly
       if (!['completed', 'failed', 'cancelled'].includes(refreshed.status)) {
+        // The user must never get dead silence (or a bare "no se pudo"):
+        // publish a task.result so every channel (dashboard, Telegram, wearOS)
+        // receives what happened plus concrete next moves EVA can take.
+        await this.events.publish({
+          type: 'task.result',
+          orgId,
+          taskId,
+          payload: { text: this.composeFailureOptions(message), model: 'failure-options', latency_ms: 0 },
+        }).catch(() => undefined);
         await this.tasks.transition(taskId, orgId, 'failed', { error: message });
       }
     } catch (transitionError) {
       this.logger.error(`Could not mark task ${taskId} as failed`, transitionError as Error);
     }
+  }
+
+  /**
+   * Turns a raw failure into a natural reply with autonomous solution options.
+   * Heuristics keyed on the error text — no model call here, because the model
+   * itself may be what just failed.
+   */
+  private composeFailureOptions(message: string): string {
+    const m = message.toLowerCase();
+    const options: string[] = [];
+    if (/docker|sandbox|contenedor/.test(m)) {
+      options.push('Reintentar la ejecución en cuanto el sandbox Docker esté disponible — dime "reintenta" y lo vuelvo a correr.');
+      options.push('Resolverlo sin código: puedo buscar el dato o hacerlo paso a paso con mis otras herramientas.');
+    } else if (/key|credencial|credential|token|api|unauthorized|401|403/.test(m)) {
+      options.push('Conectar la credencial que falta en Credentials/Integraciones y me dices "reintenta".');
+      options.push('Intentarlo por otra vía que no requiera esa credencial (web pública o sandbox).');
+    } else if (/timeout|tiempo|timed out|etimedout/.test(m)) {
+      options.push('Reintentarlo ahora mismo dividiéndolo en pasos más pequeños — dime "reintenta".');
+      options.push('Dejarlo programado para que lo intente en unos minutos y te avise con el resultado.');
+    } else if (/login|sesi[oó]n|qr|cookie|navegador|browser|chromium/.test(m)) {
+      options.push('Renovar la sesión del navegador (QR o cookies) y vuelvo a intentarlo de inmediato.');
+      options.push('Conseguir la información por otra ruta (API o búsqueda) mientras tanto.');
+    } else {
+      options.push('Reintentarlo con otro enfoque — dime "reintenta" y pruebo una ruta distinta (otra herramienta u otro proveedor).');
+      options.push('Dividir la tarea en pasos pequeños y avanzar lo que sí se puede ahora.');
+    }
+    return [
+      'Me topé con un obstáculo y no quiero darte una respuesta a medias.',
+      `Detalle técnico: ${message.slice(0, 220)}`,
+      '',
+      'Esto es lo que puedo hacer ahora mismo:',
+      ...options.map((o, i) => `${i + 1}. ${o}`),
+      '',
+      'Dime cuál prefieres (o solo di "reintenta") y sigo yo.',
+    ].join('\n');
   }
 
   /**

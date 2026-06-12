@@ -930,6 +930,17 @@ describe('AgentRunnerService', () => {
 
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'failed', { error: 'provider down' });
     expect(publishedLogs().some((message) => message.includes('ERROR: provider down'))).toBe(true);
+    // El usuario nunca recibe silencio ni un "no se pudo" a secas: la falla
+    // llega como task.result con opciones de solución (visible en todos los canales).
+    const failureResult = events.publish.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'task.result');
+    expect(failureResult).toBeDefined();
+    const payload = failureResult!.payload as { text: string; model: string };
+    expect(payload.model).toBe('failure-options');
+    expect(payload.text).toContain('provider down');
+    expect(payload.text).toContain('Esto es lo que puedo hacer ahora mismo');
+    expect(payload.text).toContain('reintenta');
   });
 
   it('rejects useless model answers and recovers with available tools', async () => {
@@ -1289,6 +1300,24 @@ describe('AgentRunnerService', () => {
     expect(uber.estimateRide).toHaveBeenCalledWith(ORG, {
       origin: 'metro puebla',
       destination: 'zocalo',
+      taskId: TASK,
+    });
+  });
+
+  it('routes Uber quote requests with reverse destination-origin patterns and resolves "mi depa" from soul profile', async () => {
+    soul.getPersonalProfile.mockResolvedValue({
+      address: 'Calle Falsa 123, CDMX',
+    });
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'Costo de un viaje de Uber a el zócalo de CDMX desde mi depa?',
+    }));
+    const uber = module.get(UberWebService) as jest.Mocked<UberWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(uber.estimateRide).toHaveBeenCalledWith(ORG, {
+      origin: 'Calle Falsa 123, CDMX',
+      destination: 'zócalo de CDMX',
       taskId: TASK,
     });
   });

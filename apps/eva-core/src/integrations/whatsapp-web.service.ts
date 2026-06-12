@@ -625,6 +625,25 @@ export class WhatsAppWebService {
 
     // 2. Try to click on the contact if it's already visible in the list
     const clickedVisible = await this.browser.evaluate<{ clicked: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
+      function getRowChatName(el: HTMLElement) {
+        const titled = Array.from(el.querySelectorAll('[title]')).map(node => node.getAttribute('title') || '');
+        const labelled = Array.from(el.querySelectorAll('[aria-label]')).map(node => node.getAttribute('aria-label') || '');
+        const spans = Array.from(el.querySelectorAll('span')).map(node => node.innerText || '');
+        const candidates = [...titled, ...labelled, ...spans].map(s => s.trim()).filter(Boolean);
+        for (const cand of candidates) {
+          if (cand.length > 0 && cand.length < 90) {
+            const lower = cand.toLowerCase();
+            if (/^(chats?|chat list|lista de chats|archivados?|archived|comunidades|communities|estados?|status|canales|channels|nuevo chat|new chat|buscar|search)$/i.test(cand)) continue;
+            if (/^\d+$/.test(cand)) continue;
+            if (/^(?:\d{1,2}:\d{2}|ayer|yesterday|hoy|today)$/i.test(cand)) continue;
+            if (/\b(unread|sin leer|typing|escribiendo|online|en linea)\b/i.test(lower)) continue;
+            if (/^(you|yo|t[uú])$/i.test(lower)) continue;
+            return cand;
+          }
+        }
+        return el.textContent || '';
+      }
+
       function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
         if (!chatName || !query) return false;
         const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
@@ -643,10 +662,12 @@ export class WhatsAppWebService {
       const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
       const elements = Array.from(pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
       for (const el of elements) {
-        const titleEl = el.querySelector('[title], [aria-label]');
-        const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || el.textContent || '') : el.textContent || '';
+        const chatName = getRowChatName(el as HTMLElement);
         if (isMatch(chatName, contactNameLower)) {
-          (el as HTMLElement).click();
+          const clickable = el.querySelector('[role="button"]') || el.querySelector('div[class*="clickable"]') || el;
+          clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+          (clickable as HTMLElement).click();
           return { clicked: true, actualContactName: chatName };
         }
       }
@@ -660,6 +681,7 @@ export class WhatsAppWebService {
 
     // 3. Search for the contact using clickNow + typeCharacters
     const searchSelectors = [
+      '#side div[contenteditable="true"]',
       'div[contenteditable="true"][data-tab="3"]',
       'div.lexical-rich-text-input div[contenteditable="true"]',
       '[data-testid="chat-list-search"]',
@@ -699,6 +721,25 @@ export class WhatsAppWebService {
 
     // Click the matching search result
     const clickedSearchResult = await this.browser.evaluate<{ clicked: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
+      function getRowChatName(el: HTMLElement) {
+        const titled = Array.from(el.querySelectorAll('[title]')).map(node => node.getAttribute('title') || '');
+        const labelled = Array.from(el.querySelectorAll('[aria-label]')).map(node => node.getAttribute('aria-label') || '');
+        const spans = Array.from(el.querySelectorAll('span')).map(node => node.innerText || '');
+        const candidates = [...titled, ...labelled, ...spans].map(s => s.trim()).filter(Boolean);
+        for (const cand of candidates) {
+          if (cand.length > 0 && cand.length < 90) {
+            const lower = cand.toLowerCase();
+            if (/^(chats?|chat list|lista de chats|archivados?|archived|comunidades|communities|estados?|status|canales|channels|nuevo chat|new chat|buscar|search)$/i.test(cand)) continue;
+            if (/^\d+$/.test(cand)) continue;
+            if (/^(?:\d{1,2}:\d{2}|ayer|yesterday|hoy|today)$/i.test(cand)) continue;
+            if (/\b(unread|sin leer|typing|escribiendo|online|en linea)\b/i.test(lower)) continue;
+            if (/^(you|yo|t[uú])$/i.test(lower)) continue;
+            return cand;
+          }
+        }
+        return el.textContent || '';
+      }
+
       function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
         if (!chatName || !query) return false;
         const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
@@ -719,10 +760,12 @@ export class WhatsAppWebService {
       
       // Try matching
       for (const el of elements) {
-        const titleEl = el.querySelector('[title], [aria-label]');
-        const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || el.textContent || '') : el.textContent || '';
+        const chatName = getRowChatName(el as HTMLElement);
         if (isMatch(chatName, contactNameLower)) {
-          (el as HTMLElement).click();
+          const clickable = el.querySelector('[role="button"]') || el.querySelector('div[class*="clickable"]') || el;
+          clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+          (clickable as HTMLElement).click();
           return { clicked: true, actualContactName: chatName };
         }
       }
@@ -730,9 +773,11 @@ export class WhatsAppWebService {
       // Fallback to first search result
       if (elements.length > 0) {
         const el = elements[0];
-        (el as HTMLElement).click();
-        const titleEl = el.querySelector('[title], [aria-label]');
-        const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || el.textContent || '') : el.textContent || '';
+        const chatName = getRowChatName(el as HTMLElement);
+        const clickable = el.querySelector('[role="button"]') || el.querySelector('div[class*="clickable"]') || el;
+        clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        (clickable as HTMLElement).click();
         return { clicked: true, actualContactName: chatName };
       }
       
@@ -773,6 +818,25 @@ export class WhatsAppWebService {
         await this.browser.wait(sessionId, orgId, 2000);
 
         const secondAttempt = await this.browser.evaluate<{ clicked: boolean; actualContactName: string | null }, string>(sessionId, orgId, (contactNameLower) => {
+          function getRowChatName(el: HTMLElement) {
+            const titled = Array.from(el.querySelectorAll('[title]')).map(node => node.getAttribute('title') || '');
+            const labelled = Array.from(el.querySelectorAll('[aria-label]')).map(node => node.getAttribute('aria-label') || '');
+            const spans = Array.from(el.querySelectorAll('span')).map(node => node.innerText || '');
+            const candidates = [...titled, ...labelled, ...spans].map(s => s.trim()).filter(Boolean);
+            for (const cand of candidates) {
+              if (cand.length > 0 && cand.length < 90) {
+                const lower = cand.toLowerCase();
+                if (/^(chats?|chat list|lista de chats|archivados?|archived|comunidades|communities|estados?|status|canales|channels|nuevo chat|new chat|buscar|search)$/i.test(cand)) continue;
+                if (/^\d+$/.test(cand)) continue;
+                if (/^(?:\d{1,2}:\d{2}|ayer|yesterday|hoy|today)$/i.test(cand)) continue;
+                if (/\b(unread|sin leer|typing|escribiendo|online|en linea)\b/i.test(lower)) continue;
+                if (/^(you|yo|t[uú])$/i.test(lower)) continue;
+                return cand;
+              }
+            }
+            return el.textContent || '';
+          }
+
           function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
             if (!chatName || !query) return false;
             const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
@@ -792,19 +856,23 @@ export class WhatsAppWebService {
           const elements = Array.from(pane.querySelectorAll('[role="listitem"], [role="row"], [data-testid="cell-frame-container"]'));
           
           for (const el of elements) {
-            const titleEl = el.querySelector('[title], [aria-label]');
-            const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || el.textContent || '') : el.textContent || '';
+            const chatName = getRowChatName(el as HTMLElement);
             if (isMatch(chatName, contactNameLower)) {
-              (el as HTMLElement).click();
+              const clickable = el.querySelector('[role="button"]') || el.querySelector('div[class*="clickable"]') || el;
+              clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+              clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+              (clickable as HTMLElement).click();
               return { clicked: true, actualContactName: chatName };
             }
           }
 
           if (elements.length > 0) {
             const el = elements[0];
-            (el as HTMLElement).click();
-            const titleEl = el.querySelector('[title], [aria-label]');
-            const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.getAttribute('aria-label') || el.textContent || '') : el.textContent || '';
+            const chatName = getRowChatName(el as HTMLElement);
+            const clickable = el.querySelector('[role="button"]') || el.querySelector('div[class*="clickable"]') || el;
+            clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+            clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+            (clickable as HTMLElement).click();
             return { clicked: true, actualContactName: chatName };
           }
 

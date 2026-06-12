@@ -112,6 +112,41 @@ describe('SandboxService', () => {
     expect(service.hasSession('task-1')).toBe(true);
   });
 
+  it('falls back to one-shot execution when the session container cannot be created', async () => {
+    dockerSpy.mockImplementation(async (args: string[]) => {
+      dockerCalls.push({ args });
+      if (args[0] === 'image') throw new Error('no such image');
+      // La creación de sesión (run -d) falla; el run one-shot (--rm sin -d) funciona.
+      if (args[0] === 'run' && args.includes('-d')) throw new Error('cannot create container');
+      return { stdout: 'salida one-shot', stderr: '' };
+    });
+
+    const result = await service.execInSession('task-x', { kind: 'python', code: 'print(1)' });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('salida one-shot');
+    expect(result.output).toContain('sin sesión persistente');
+    expect(service.hasSession('task-x')).toBe(false);
+    // Hubo un run one-shot real además del intento de sesión fallido.
+    const oneShot = dockerCalls.find((c) => c.args[0] === 'run' && !c.args.includes('-d'));
+    expect(oneShot).toBeDefined();
+  });
+
+  it('maps terminal kind to bash in the one-shot fallback', async () => {
+    dockerSpy.mockImplementation(async (args: string[]) => {
+      dockerCalls.push({ args });
+      if (args[0] === 'image') throw new Error('no such image');
+      if (args[0] === 'run' && args.includes('-d')) throw new Error('cannot create container');
+      return { stdout: 'ok', stderr: '' };
+    });
+
+    const result = await service.execInSession('task-y', { kind: 'terminal', code: 'ls' });
+
+    expect(result.ok).toBe(true);
+    const oneShot = dockerCalls.find((c) => c.args[0] === 'run' && !c.args.includes('-d'));
+    expect(oneShot!.args).toEqual(expect.arrayContaining(['alpine:3.20']));
+  });
+
   it('runs terminal commands inside the session workdir', async () => {
     await service.execInSession('task-1', { kind: 'terminal', code: 'ls -la' });
 

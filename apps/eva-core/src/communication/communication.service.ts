@@ -59,7 +59,18 @@ export class CommunicationService implements OnApplicationBootstrap {
       await this.deliverPhotoToTelegram(orgId, taskId, url);
     });
 
-    this.logger.log('CommunicationService subscribed to task.result and task.media');
+    // Forward progress acks ("lo estoy ejecutando en segundo plano…") to the
+    // originating channel, so Telegram users hear EVA immediately instead of
+    // waiting in silence until the final result. The dashboard/wearOS already
+    // receive task.say through the WebSocket events bridge.
+    this.events.on('task.say', async (event: EvaEvent) => {
+      const { orgId, taskId, payload } = event;
+      if (!taskId) return;
+      const text = String((payload as Record<string, unknown>)['text'] ?? '');
+      await this.deliverToTelegram(orgId, taskId, text);
+    });
+
+    this.logger.log('CommunicationService subscribed to task.result, task.media and task.say');
   }
 
   linkTelegramAccount(input: {
