@@ -1,5 +1,6 @@
 import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { DatabaseService } from '../../database/database.service';
 import { EvaEvent, EventBusService } from '../../events/event-bus.service';
 import { IntegrationsService } from '../../integrations/integrations.service';
 import { TasksService } from '../../tasks/tasks.service';
@@ -66,8 +67,14 @@ describe('CommunicationService', () => {
   let telegram: jest.Mocked<TelegramAdapter>;
   let events: jest.Mocked<EventBusService>;
   let integrations: jest.Mocked<IntegrationsService>;
+  let db: jest.Mocked<DatabaseService>;
 
   beforeEach(async () => {
+    const bucket = {
+      upload: jest.fn().mockResolvedValue({ error: null }),
+      getPublicUrl: jest.fn().mockReturnValue({ data: { publicUrl: 'https://bucket/eva-media/telegram-media.jpg' } }),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         CommunicationService,
@@ -129,13 +136,32 @@ describe('CommunicationService', () => {
             verifyWebhookSecret: jest.fn().mockReturnValue(true),
             sendMessage: jest.fn().mockResolvedValue({ ok: true, externalMessageId: '200' }),
             sendPhoto: jest.fn().mockResolvedValue({ ok: true, externalMessageId: '201' }),
+            downloadFile: jest.fn().mockResolvedValue({
+              ok: true,
+              data: Buffer.from('telegram-file'),
+              filePath: 'photos/file_1.jpg',
+              contentType: 'image/jpeg',
+            }),
           } satisfies Partial<TelegramAdapter>,
         },
         {
           provide: IntegrationsService,
           useValue: {
             getChannelSettings: jest.fn().mockResolvedValue(null),
+            getSecret: jest.fn().mockResolvedValue(null),
           } satisfies Partial<IntegrationsService>,
+        },
+        {
+          provide: DatabaseService,
+          useValue: {
+            admin: {
+              storage: {
+                getBucket: jest.fn().mockResolvedValue({ data: { id: 'eva-media' } }),
+                createBucket: jest.fn().mockResolvedValue({ data: null, error: null }),
+                from: jest.fn().mockReturnValue(bucket),
+              },
+            },
+          } as unknown as Partial<DatabaseService>,
         },
       ],
     }).compile();
@@ -146,6 +172,14 @@ describe('CommunicationService', () => {
     telegram = module.get(TelegramAdapter);
     events = module.get(EventBusService);
     integrations = module.get(IntegrationsService);
+    db = module.get(DatabaseService);
+    jest.spyOn(global, 'fetch' as never).mockReset();
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_TRANSCRIPTION_MODEL;
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 
   it('creates a task from a linked Telegram webhook and publishes message.received event', async () => {
@@ -172,6 +206,103 @@ describe('CommunicationService', () => {
     // No immediate "Recibido" ack — the agent delivers the real answer directly
     expect(telegram.sendMessage).not.toHaveBeenCalled();
     expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({ type: 'communication.message.received', orgId: ORG }));
+  });
+
+  it('creates a task from a Telegram photo and stores a safe EVA media URL for analysis', async () => {
+    integrations.getChannelSettings.mockResolvedValue({
+      status: 'active',
+      config: {},
+      secret: 'bot-token',
+      webhookSecret: 'hook-secret',
+    });
+
+    const result = await service.handleTelegramWebhook(ORG, 'hook-secret', {
+      update_id: 3,
+      message: {
+        message_id: 12,
+        caption: 'Que dice esta imagen?',
+        photo: [
+          { file_id: 'small-photo', width: 320, height: 240, file_size: 10_000 },
+          { file_id: 'big-photo', width: 1280, height: 960, file_size: 200_000 },
+        ],
+        chat: { id: 100, type: 'private' },
+        from: { id: 42 },
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(telegram.downloadFile).toHaveBeenCalledWith('big-photo', 'bot-token');
+    const storage = db.admin.storage.from('eva-media');
+    expect(storage.upload).toHaveBeenCalledWith(
+      expect.stringContaining(`${ORG}/telegram/12/`),
+      Buffer.from('telegram-file'),
+      expect.objectContaining({ contentType: 'image/jpeg', upsert: true }),
+    );
+    expect(repo.createMessage).toHaveBeenCalledWith(expect.objectContaining({
+      messageType: 'image',
+      body: expect.stringContaining('image_analyze'),
+      payload: expect.objectContaining({
+        eva_attachments: [expect.objectContaining({
+          kind: 'image',
+          url: 'https://bucket/eva-media/telegram-media.jpg',
+        })],
+      }),
+    }));
+    expect(tasks.createTask).toHaveBeenCalledWith(expect.objectContaining({
+      description: expect.stringContaining('https://bucket/eva-media/telegram-media.jpg'),
+      metadata: expect.objectContaining({
+        inbound_media: [expect.objectContaining({ kind: 'image', fileId: 'big-photo' })],
+      }),
+    }), USER, ORG);
+  });
+
+  it('transcribes Telegram voice notes before creating the agent task', async () => {
+    integrations.getChannelSettings.mockResolvedValue({
+      status: 'active',
+      config: {},
+      secret: 'bot-token',
+      webhookSecret: 'hook-secret',
+    });
+    integrations.getSecret.mockResolvedValue('openai-key');
+    telegram.downloadFile.mockResolvedValue({
+      ok: true,
+      data: Buffer.from('voice-bytes'),
+      filePath: 'voice/file_2.oga',
+      contentType: 'audio/ogg',
+    });
+    jest.spyOn(global, 'fetch' as never).mockResolvedValue({
+      ok: true,
+      json: async () => ({ text: 'Recuérdame comprar café mañana.' }),
+    } as never);
+
+    await service.handleTelegramWebhook(ORG, 'hook-secret', {
+      update_id: 4,
+      message: {
+        message_id: 13,
+        voice: { file_id: 'voice-file', mime_type: 'audio/ogg', file_size: 1234 },
+        chat: { id: 100, type: 'private' },
+        from: { id: 42 },
+      },
+    });
+
+    expect(telegram.downloadFile).toHaveBeenCalledWith('voice-file', 'bot-token');
+    expect(fetch).toHaveBeenCalledWith(
+      'https://api.openai.com/v1/audio/transcriptions',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer openai-key' }),
+      }),
+    );
+    expect(tasks.createTask).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'audio',
+      description: expect.stringContaining('Recuérdame comprar café mañana.'),
+      metadata: expect.objectContaining({
+        inbound_media: [expect.objectContaining({
+          kind: 'audio',
+          transcript: 'Recuérdame comprar café mañana.',
+        })],
+      }),
+    }), USER, ORG);
   });
 
   it('rejects Telegram webhooks with invalid secret', async () => {

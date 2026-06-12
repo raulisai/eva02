@@ -1,4 +1,5 @@
 import { ForbiddenException, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { DatabaseService } from '../database/database.service';
 import { EvaEvent, EventBusService } from '../events/event-bus.service';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { TasksService } from '../tasks/tasks.service';
@@ -12,9 +13,23 @@ import {
   TelegramWebhookUpdate,
 } from './communication.types';
 
+const INBOUND_MEDIA_BUCKET = 'eva-media';
+const MAX_TELEGRAM_FILE_BYTES = 20 * 1024 * 1024;
+
+interface TelegramInboundAttachment {
+  kind: 'image' | 'audio';
+  fileId: string;
+  fileName: string;
+  contentType: string;
+  url?: string;
+  transcript?: string;
+  error?: string;
+}
+
 @Injectable()
 export class CommunicationService implements OnApplicationBootstrap {
   private readonly logger = new Logger(CommunicationService.name);
+  private inboundBucketReady = false;
 
   constructor(
     private readonly repo: CommunicationRepository,
@@ -22,6 +37,7 @@ export class CommunicationService implements OnApplicationBootstrap {
     private readonly events: EventBusService,
     private readonly telegram: TelegramAdapter,
     private readonly integrations: IntegrationsService,
+    private readonly db: DatabaseService,
   ) {}
 
   onApplicationBootstrap() {
@@ -101,11 +117,11 @@ export class CommunicationService implements OnApplicationBootstrap {
     }
 
     const message = update.message;
-    const text = message?.text?.trim();
+    const text = this.telegramMessageText(message);
     const externalUserId = message?.from?.id ? String(message.from.id) : null;
     const chatId = message?.chat?.id ? String(message.chat.id) : null;
 
-    if (!message || !text || !externalUserId || !chatId) {
+    if (!message || !externalUserId || !chatId) {
       return { ok: true, ignored: true, reason: 'unsupported_telegram_update' };
     }
 
@@ -127,7 +143,7 @@ export class CommunicationService implements OnApplicationBootstrap {
         channel: 'dashboard',
         notificationType: 'communication.telegram_unlinked',
         title: 'Unlinked Telegram message',
-        body: text,
+        body: text || this.telegramAttachmentFallbackText(message),
         target: { external_user_id: externalUserId, chat_id: chatId },
         status: 'skipped',
       });
@@ -140,6 +156,11 @@ export class CommunicationService implements OnApplicationBootstrap {
         );
       }
       return { ok: false, ignored: true, reason: 'telegram_account_not_linked' };
+    }
+
+    const inbound = await this.buildTelegramInboundMessage(orgId, message, settings?.secret);
+    if (!inbound.description) {
+      return { ok: true, ignored: true, reason: 'unsupported_telegram_update' };
     }
 
     const conversation = await this.repo.getOrCreateConversation({
@@ -155,19 +176,25 @@ export class CommunicationService implements OnApplicationBootstrap {
       userId: account.user_id,
       channel: 'telegram',
       direction: 'inbound',
-      body: text,
+      messageType: inbound.messageType,
+      body: inbound.description,
       externalMessageId: String(message.message_id),
-      payload: update as unknown as Record<string, unknown>,
+      payload: {
+        ...(update as unknown as Record<string, unknown>),
+        eva_attachments: inbound.attachments,
+      },
     });
 
     const task = await this.tasks.createTask({
-      title: this.titleFromTelegram(text),
-      description: text,
+      title: this.titleFromTelegram(inbound.title),
+      description: inbound.description,
       metadata: {
         source: 'telegram',
         conversation_id: conversation.id,
         external_chat_id: chatId,
         update_id: update.update_id,
+        telegram_message_id: message.message_id,
+        inbound_media: inbound.attachments,
       },
     }, account.user_id, orgId);
 
@@ -400,5 +427,284 @@ export class CommunicationService implements OnApplicationBootstrap {
 
   private titleFromTelegram(text: string) {
     return text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  }
+
+  private async buildTelegramInboundMessage(
+    orgId: string,
+    message: NonNullable<TelegramWebhookUpdate['message']>,
+    botToken?: string | null,
+  ): Promise<{
+    title: string;
+    description: string;
+    messageType: string;
+    attachments: TelegramInboundAttachment[];
+  }> {
+    const text = this.telegramMessageText(message);
+    const attachments = await this.processTelegramAttachments(orgId, message, botToken);
+    const parts: string[] = [];
+    if (text) parts.push(text);
+
+    for (const attachment of attachments) {
+      if (attachment.kind === 'image') {
+        if (attachment.url) {
+          parts.push(
+            `Imagen recibida por Telegram: ${attachment.url}\n`
+            + 'Analiza la imagen con image_analyze antes de responder; describe lo que ves y usa el texto del usuario como contexto.',
+          );
+        } else {
+          parts.push(`Imagen recibida por Telegram, pero no se pudo preparar para analisis: ${attachment.error ?? 'error desconocido'}.`);
+        }
+      }
+
+      if (attachment.kind === 'audio') {
+        if (attachment.transcript) {
+          parts.push(`Transcripcion del audio recibido por Telegram:\n${attachment.transcript}`);
+        } else if (attachment.url) {
+          parts.push(
+            `Audio recibido por Telegram: ${attachment.url}\n`
+            + `No se pudo transcribir automaticamente: ${attachment.error ?? 'no hay transcriptor configurado'}. `
+            + 'Pide una version en texto si necesitas el contenido exacto.',
+          );
+        } else {
+          parts.push(`Audio recibido por Telegram, pero no se pudo preparar: ${attachment.error ?? 'error desconocido'}.`);
+        }
+      }
+    }
+
+    const description = parts.join('\n\n').trim();
+    const title = text || attachments.map((attachment) => attachment.kind).join(' + ') || 'Mensaje de Telegram';
+    const messageType = attachments.length
+      ? Array.from(new Set(attachments.map((attachment) => attachment.kind))).join('+')
+      : 'text';
+
+    return { title, description, messageType, attachments };
+  }
+
+  private async processTelegramAttachments(
+    orgId: string,
+    message: NonNullable<TelegramWebhookUpdate['message']>,
+    botToken?: string | null,
+  ): Promise<TelegramInboundAttachment[]> {
+    const candidates = this.telegramAttachmentCandidates(message);
+    const attachments: TelegramInboundAttachment[] = [];
+
+    for (const candidate of candidates) {
+      const attachment: TelegramInboundAttachment = {
+        kind: candidate.kind,
+        fileId: candidate.fileId,
+        fileName: candidate.fileName,
+        contentType: candidate.contentType,
+      };
+      attachments.push(attachment);
+
+      if (candidate.fileSize && candidate.fileSize > MAX_TELEGRAM_FILE_BYTES) {
+        attachment.error = `archivo demasiado grande (${candidate.fileSize} bytes)`;
+        continue;
+      }
+
+      const downloaded = await this.telegram.downloadFile(candidate.fileId, botToken);
+      if (!downloaded.ok || !downloaded.data) {
+        attachment.error = downloaded.error ?? 'no se pudo descargar desde Telegram';
+        continue;
+      }
+
+      const contentType = candidate.contentType || downloaded.contentType || this.contentTypeFromPath(downloaded.filePath);
+      attachment.contentType = contentType;
+      attachment.fileName = candidate.fileName || this.fileNameFromPath(downloaded.filePath, candidate.kind, contentType);
+      attachment.url = await this.uploadInboundTelegramMedia(
+        orgId,
+        message.message_id,
+        attachment.fileName,
+        downloaded.data,
+        contentType,
+      ) ?? undefined;
+
+      if (!attachment.url) {
+        attachment.error = 'no se pudo subir a eva-media';
+      }
+
+      if (candidate.kind === 'audio') {
+        attachment.transcript = await this.transcribeTelegramAudio(orgId, downloaded.data, attachment.fileName, contentType);
+        if (!attachment.transcript && !attachment.error) {
+          attachment.error = 'transcripcion no disponible';
+        }
+      }
+    }
+
+    return attachments;
+  }
+
+  private telegramAttachmentCandidates(message: NonNullable<TelegramWebhookUpdate['message']>): Array<{
+    kind: 'image' | 'audio';
+    fileId: string;
+    fileName: string;
+    contentType: string;
+    fileSize?: number;
+  }> {
+    const candidates: Array<{
+      kind: 'image' | 'audio';
+      fileId: string;
+      fileName: string;
+      contentType: string;
+      fileSize?: number;
+    }> = [];
+
+    const photo = [...(message.photo ?? [])].sort((a, b) => (b.file_size ?? 0) - (a.file_size ?? 0))[0];
+    if (photo) {
+      candidates.push({
+        kind: 'image',
+        fileId: photo.file_id,
+        fileName: `telegram-photo-${message.message_id}.jpg`,
+        contentType: 'image/jpeg',
+        fileSize: photo.file_size,
+      });
+    }
+
+    const document = message.document;
+    if (document?.file_id && this.isSupportedImageContentType(document.mime_type)) {
+      candidates.push({
+        kind: 'image',
+        fileId: document.file_id,
+        fileName: document.file_name ?? `telegram-image-${message.message_id}.${this.extensionForContentType(document.mime_type ?? 'image/jpeg')}`,
+        contentType: document.mime_type ?? 'image/jpeg',
+        fileSize: document.file_size,
+      });
+    }
+
+    const voice = message.voice;
+    if (voice?.file_id) {
+      candidates.push({
+        kind: 'audio',
+        fileId: voice.file_id,
+        fileName: `telegram-voice-${message.message_id}.ogg`,
+        contentType: voice.mime_type ?? 'audio/ogg',
+        fileSize: voice.file_size,
+      });
+    }
+
+    const audio = message.audio;
+    if (audio?.file_id) {
+      candidates.push({
+        kind: 'audio',
+        fileId: audio.file_id,
+        fileName: audio.file_name ?? `telegram-audio-${message.message_id}.${this.extensionForContentType(audio.mime_type ?? 'audio/mpeg')}`,
+        contentType: audio.mime_type ?? 'audio/mpeg',
+        fileSize: audio.file_size,
+      });
+    }
+
+    return candidates;
+  }
+
+  private telegramMessageText(message?: TelegramWebhookUpdate['message']): string {
+    return String(message?.text ?? message?.caption ?? '').trim();
+  }
+
+  private telegramAttachmentFallbackText(message: NonNullable<TelegramWebhookUpdate['message']>): string {
+    const kinds = this.telegramAttachmentCandidates(message).map((candidate) => candidate.kind);
+    return kinds.length ? `[${Array.from(new Set(kinds)).join('+')} recibido por Telegram]` : '';
+  }
+
+  private async uploadInboundTelegramMedia(
+    orgId: string,
+    telegramMessageId: number,
+    filename: string,
+    data: Buffer,
+    contentType: string,
+  ): Promise<string | null> {
+    await this.ensureInboundMediaBucket();
+    const safeName = filename.replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'telegram-media';
+    const path = `${orgId}/telegram/${telegramMessageId}/${Date.now()}-${safeName}`;
+    const { error } = await this.db.admin.storage.from(INBOUND_MEDIA_BUCKET).upload(path, data, {
+      contentType,
+      upsert: true,
+    });
+    if (error) {
+      this.logger.warn(`telegram inbound media upload failed: ${error.message}`);
+      return null;
+    }
+    const { data: pub } = this.db.admin.storage.from(INBOUND_MEDIA_BUCKET).getPublicUrl(path);
+    return pub.publicUrl;
+  }
+
+  private async ensureInboundMediaBucket(): Promise<void> {
+    if (this.inboundBucketReady) return;
+    try {
+      const { data } = await this.db.admin.storage.getBucket(INBOUND_MEDIA_BUCKET);
+      if (!data) {
+        await this.db.admin.storage.createBucket(INBOUND_MEDIA_BUCKET, { public: true });
+      }
+    } catch {
+      await this.db.admin.storage.createBucket(INBOUND_MEDIA_BUCKET, { public: true }).catch(() => undefined);
+    }
+    this.inboundBucketReady = true;
+  }
+
+  private async transcribeTelegramAudio(
+    orgId: string,
+    data: Buffer,
+    filename: string,
+    contentType: string,
+  ): Promise<string | undefined> {
+    const key = (await this.integrations.getSecret(orgId, 'model', 'openai').catch(() => null))
+      ?? process.env.OPENAI_API_KEY;
+    if (!key) return undefined;
+
+    try {
+      const form = new FormData();
+      const fileBytes = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+      form.append('model', process.env.OPENAI_TRANSCRIPTION_MODEL ?? 'gpt-4o-mini-transcribe');
+      form.append('file', new Blob([fileBytes], { type: contentType }), filename);
+      const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}` },
+        body: form,
+      });
+      if (!res.ok) {
+        this.logger.warn(`telegram audio transcription failed: HTTP ${res.status}`);
+        return undefined;
+      }
+      const body = (await res.json()) as { text?: string };
+      return body.text?.trim() || undefined;
+    } catch (error) {
+      this.logger.warn(`telegram audio transcription failed: ${(error as Error).message}`);
+      return undefined;
+    }
+  }
+
+  private isSupportedImageContentType(contentType?: string): boolean {
+    return /^image\/(png|jpe?g|webp|gif)$/i.test(contentType ?? '');
+  }
+
+  private contentTypeFromPath(path?: string): string {
+    if (!path) return 'application/octet-stream';
+    const lower = path.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.ogg')) return 'audio/ogg';
+    if (lower.endsWith('.m4a')) return 'audio/mp4';
+    if (lower.endsWith('.mp3')) return 'audio/mpeg';
+    if (lower.endsWith('.wav')) return 'audio/wav';
+    return 'application/octet-stream';
+  }
+
+  private fileNameFromPath(path: string | undefined, kind: 'image' | 'audio', contentType: string): string {
+    const fromPath = path?.split('/').pop();
+    if (fromPath) return fromPath;
+    return `telegram-${kind}.${this.extensionForContentType(contentType)}`;
+  }
+
+  private extensionForContentType(contentType: string): string {
+    if (/jpeg|jpg/i.test(contentType)) return 'jpg';
+    if (/png/i.test(contentType)) return 'png';
+    if (/webp/i.test(contentType)) return 'webp';
+    if (/gif/i.test(contentType)) return 'gif';
+    if (/ogg/i.test(contentType)) return 'ogg';
+    if (/mp4|m4a/i.test(contentType)) return 'm4a';
+    if (/wav/i.test(contentType)) return 'wav';
+    if (/mpeg|mp3/i.test(contentType)) return 'mp3';
+    return 'bin';
   }
 }

@@ -203,14 +203,18 @@ describe('SkillLibraryService', () => {
   describe('learning graph and concurrency', () => {
     let upserts: Array<{ table: string; row: Record<string, unknown> }>;
     let inserts: Array<{ table: string; row: Record<string, unknown> }>;
+    let updates: Array<{ table: string; row: Record<string, unknown> }>;
 
     async function buildForLearning() {
       upserts = [];
       inserts = [];
+      updates = [];
       from = jest.fn((table: string) => {
         const builder: Record<string, jest.Mock> = {};
         builder.select = jest.fn().mockReturnValue(builder);
         builder.eq = jest.fn().mockReturnValue(builder);
+        builder.order = jest.fn().mockReturnValue(builder);
+        builder.limit = jest.fn().mockResolvedValue({ data: null, error: null });
         builder.maybeSingle = jest.fn().mockResolvedValue({ data: null, error: null });
         builder.upsert = jest.fn((row: Record<string, unknown>) => {
           upserts.push({ table, row });
@@ -219,6 +223,10 @@ describe('SkillLibraryService', () => {
         builder.insert = jest.fn((row: Record<string, unknown>) => {
           inserts.push({ table, row });
           return Promise.resolve({ error: null });
+        });
+        builder.update = jest.fn((row: Record<string, unknown>) => {
+          updates.push({ table, row });
+          return builder;
         });
         return builder;
       });
@@ -264,6 +272,95 @@ describe('SkillLibraryService', () => {
       expect(inserts.filter((entry) => entry.table === 'skill_selection_events')).toHaveLength(2);
       expect(upserts.some((entry) => entry.table === 'skill_graph_edges' && entry.row.from_skill_slug === 'plan' && entry.row.to_skill_slug === 'test-driven-development')).toBe(true);
       expect(upserts.every((entry) => entry.row.org_id === ORG)).toBe(true);
+    });
+
+    it('applies user reward feedback to selected skill stats and graph edges', async () => {
+      upserts = [];
+      inserts = [];
+      updates = [];
+      const selectionRows = [
+        {
+          id: 'sel-1',
+          skill_slug: 'plan',
+          source: 'bundled',
+          context_key: 'feature:plan',
+          selected_score: 4,
+          outcome: 'success',
+          metadata: { role: 'planner' },
+        },
+        {
+          id: 'sel-2',
+          skill_slug: 'test-driven-development',
+          source: 'bundled',
+          context_key: 'feature:plan',
+          selected_score: 3,
+          outcome: 'success',
+          metadata: {},
+        },
+        {
+          id: 'sel-3',
+          skill_slug: 'unused',
+          source: 'bundled',
+          context_key: 'feature:plan',
+          selected_score: 1,
+          outcome: 'skipped',
+          metadata: {},
+        },
+      ];
+      from = jest.fn((table: string) => {
+        const builder: Record<string, jest.Mock> = {};
+        builder.select = jest.fn().mockReturnValue(builder);
+        builder.eq = jest.fn().mockReturnValue(builder);
+        builder.order = jest.fn().mockReturnValue(builder);
+        builder.limit = jest.fn().mockResolvedValue(
+          table === 'skill_selection_events'
+            ? { data: selectionRows, error: null }
+            : { data: null, error: null },
+        );
+        builder.maybeSingle = jest.fn().mockResolvedValue({ data: null, error: null });
+        builder.upsert = jest.fn((row: Record<string, unknown>) => {
+          upserts.push({ table, row });
+          return Promise.resolve({ error: null });
+        });
+        builder.insert = jest.fn((row: Record<string, unknown>) => {
+          inserts.push({ table, row });
+          return Promise.resolve({ error: null });
+        });
+        builder.update = jest.fn((row: Record<string, unknown>) => {
+          updates.push({ table, row });
+          return builder;
+        });
+        return builder;
+      });
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          SkillLibraryService,
+          { provide: DatabaseService, useValue: { admin: { from } } },
+        ],
+      }).compile();
+      service = module.get(SkillLibraryService);
+
+      const result = await service.recordUserFeedback(ORG, {
+        taskId: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+        userId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+        rating: 5,
+        comment: 'Muy bien',
+      });
+
+      expect(result).toMatchObject({ reward: 1, appliedSkills: 2 });
+      const statRows = upserts.filter((entry) => entry.table === 'skill_usage_stats').map((entry) => entry.row);
+      expect(statRows).toHaveLength(4);
+      expect(statRows.every((row) => row.org_id === ORG && row.positive_feedback === 1)).toBe(true);
+      expect(upserts.some((entry) => entry.table === 'skill_graph_edges' && entry.row.weight === 0.12)).toBe(true);
+      expect(updates).toHaveLength(2);
+      expect(updates[0].row.metadata).toMatchObject({
+        user_feedback: {
+          user_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+          rating: 5,
+          reward: 1,
+          comment: 'Muy bien',
+        },
+      });
     });
   });
 });

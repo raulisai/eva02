@@ -2,6 +2,14 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 10:51Z
+C: communication/telegram: accept photo/image documents plus voice/audio webhooks, upload inbound files to eva-media, transcribe audio via org OpenAI key, and create agent-ready tasks without storing Telegram token URLs; files=apps/eva-core/src/communication/communication.service.ts,apps/eva-core/src/communication/communication.types.ts,apps/eva-core/src/communication/telegram.adapter.ts,apps/eva-core/src/communication/__tests__/communication.service.spec.ts,apps/eva-core/src/communication/__tests__/telegram.adapter.spec.ts; tests=cd apps/eva-core && npm test -- communication/__tests__/communication.service.spec.ts communication/__tests__/telegram.adapter.spec.ts --runInBand && npm run build && npm test -- --runInBand && npm run lint
+P: pending/improve -> real Telegram webhook smoke test with a live bot should verify file download size limits, OpenAI transcription model availability, and vision response quality on uploaded photos
+
+### 2026-06-12 10:44Z
+C: dashboard/mcp: added bundled MCP repository presets with one-click connect actions in the MCP page; files=apps/eva-dashboard/components/mcp/mcp-client.tsx,apps/eva-dashboard/lib/mcp-catalog.ts,apps/eva-dashboard/__tests__/mcp.test.tsx; tests=cd apps/eva-dashboard && npm test -- --runInBand __tests__/mcp.test.tsx && npm run lint && npm test -- --runInBand && npm run build
+P: pending/improve -> verify catalog endpoint freshness and OAuth flows before adding more remote MCP providers
+
 ### 2026-06-12 10:18Z
 C: agent: integrated runtime skill catalog selection with usage/concurrency stats, learned graph outcomes, delegated roles, and org-scoped learning tables; files=apps/eva-core/src/agent/bundled-skills.catalog.ts,apps/eva-core/src/agent/skill-library.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,supabase/migrations/027_skill_learning_graph.sql; tests=npm test -- agent/__tests__/skill-library.service.spec.ts agent/__tests__/agent-loop.service.spec.ts --runInBand && npm run build && npm test -- --runInBand && npm run lint
 P: pending/improve -> add RLS_TEST coverage for skill_usage_stats/skill_graph_edges/skill_selection_events after applying migration 027 to the real Supabase project

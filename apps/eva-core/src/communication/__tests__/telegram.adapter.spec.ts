@@ -56,4 +56,32 @@ describe('TelegramAdapter', () => {
     }));
     expect(body).not.toHaveProperty('parse_mode');
   });
+
+  it('downloads Telegram files through getFile without exposing the bot token in callers', async () => {
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: jest.fn().mockResolvedValue({ ok: true, result: { file_path: 'photos/file_1.jpg' } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: { get: jest.fn().mockReturnValue('image/jpeg') },
+        arrayBuffer: jest.fn().mockResolvedValue(Buffer.from('image-bytes')),
+      });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const adapter = new TelegramAdapter();
+    const result = await adapter.downloadFile('photo-id', 'bot-token');
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: true,
+      filePath: 'photos/file_1.jpg',
+      contentType: 'image/jpeg',
+      data: Buffer.from('image-bytes'),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(1, 'https://api.telegram.org/botbot-token/getFile', expect.objectContaining({
+      method: 'POST',
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, 'https://api.telegram.org/file/botbot-token/photos/file_1.jpg');
+  });
 });

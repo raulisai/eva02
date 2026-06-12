@@ -12,6 +12,7 @@ import { ModelRouterModule } from '../model-router/model-router.module';
 import { TasksModule } from '../tasks/tasks.module';
 import { ToolRouterModule } from '../tool-router/tool-router.module';
 import { AgentLoopService } from './agent-loop.service';
+import { AgentFeedbackController } from './agent-feedback.controller';
 import { AgentRunnerService } from './agent-runner.service';
 import { ConversationDigesterService } from './conversation-digester.service';
 import { GmailService } from './gmail.service';
@@ -51,6 +52,7 @@ import { CommunicationModule } from '../communication/communication.module';
     MemoryRecallService,
     ConversationDigesterService,
   ],
+  controllers: [AgentFeedbackController],
   exports: [
     AgentRunnerService,
     MediaService,

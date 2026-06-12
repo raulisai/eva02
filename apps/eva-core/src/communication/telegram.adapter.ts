@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { SecretCipher } from '../common/secret-cipher';
-import { ChannelSendResult } from './communication.types';
+import { ChannelSendResult, TelegramFileDownload } from './communication.types';
 
 @Injectable()
 export class TelegramAdapter {
@@ -74,5 +74,41 @@ export class TelegramAdapter {
 
     const body = (await response.json()) as { result?: { message_id?: number } };
     return { ok: true, externalMessageId: body.result?.message_id ? String(body.result.message_id) : null };
+  }
+
+  async downloadFile(fileId: string, token?: string | null): Promise<TelegramFileDownload> {
+    const botToken = token ?? this.envToken;
+    if (!botToken) return { ok: false, error: 'No Telegram bot token configured' };
+
+    const metadataResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: fileId }),
+    });
+    if (!metadataResponse.ok) {
+      return { ok: false, error: await metadataResponse.text() };
+    }
+
+    const metadata = (await metadataResponse.json()) as {
+      ok?: boolean;
+      description?: string;
+      result?: { file_path?: string };
+    };
+    const filePath = metadata.result?.file_path;
+    if (!metadata.ok || !filePath) {
+      return { ok: false, error: metadata.description ?? 'Telegram did not return file_path' };
+    }
+
+    const fileResponse = await fetch(`https://api.telegram.org/file/bot${botToken}/${filePath}`);
+    if (!fileResponse.ok) {
+      return { ok: false, error: await fileResponse.text() };
+    }
+
+    return {
+      ok: true,
+      filePath,
+      contentType: fileResponse.headers.get('content-type') ?? undefined,
+      data: Buffer.from(await fileResponse.arrayBuffer()),
+    };
   }
 }

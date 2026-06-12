@@ -56,6 +56,22 @@ export interface SkillSelectionInput {
   selected: SkillSummary[];
 }
 
+export type UserFeedbackReaction = 'positive' | 'negative' | 'neutral';
+
+export interface UserFeedbackInput {
+  taskId: string;
+  userId: string;
+  reaction?: UserFeedbackReaction;
+  rating?: number;
+  comment?: string;
+}
+
+export interface UserFeedbackResult {
+  taskId: string;
+  reward: number;
+  appliedSkills: number;
+}
+
 interface SkillUsageStat {
   skill_slug: string;
   source: SkillSource;
@@ -75,6 +91,16 @@ interface SkillGraphEdge {
   relation: string;
   weight: number;
   evidence_count: number;
+}
+
+interface SkillSelectionEventRow {
+  id: string;
+  skill_slug: string;
+  source: SkillSource;
+  context_key: string;
+  selected_score: number;
+  outcome: 'success' | 'failure' | 'skipped';
+  metadata: Record<string, unknown> | null;
 }
 
 /** Palabras vacías que no aportan señal al matching de skills. */
@@ -292,6 +318,42 @@ export class SkillLibraryService {
       await this.adjustActiveRuns(orgId, skill, '__global__', 1, now);
       await this.adjustActiveRuns(orgId, skill, contextKey, 1, now);
     }));
+  }
+
+  async recordUserFeedback(orgId: string, input: UserFeedbackInput): Promise<UserFeedbackResult> {
+    const reward = this.feedbackReward(input);
+    const now = new Date().toISOString();
+
+    try {
+      const { data, error } = await this.db.admin
+        .from('skill_selection_events')
+        .select('id, skill_slug, source, context_key, selected_score, outcome, metadata')
+        .eq('org_id', orgId)
+        .eq('task_id', input.taskId)
+        .order('created_at', { ascending: false })
+        .limit(20);
+      if (error || !data) return { taskId: input.taskId, reward, appliedSkills: 0 };
+
+      const rows = (data as SkillSelectionEventRow[]).filter((row) => row.outcome !== 'skipped');
+      await Promise.all(rows.map(async (row) => {
+        await this.applyFeedbackToStat(orgId, row, '__global__', reward, now);
+        await this.applyFeedbackToStat(orgId, row, row.context_key, reward, now);
+        await this.annotateSelectionFeedback(orgId, row, input, reward, now);
+      }));
+
+      for (let i = 0; i < rows.length; i += 1) {
+        for (let j = i + 1; j < rows.length; j += 1) {
+          const delta = reward * 0.12;
+          await this.reinforceGraphEdge(orgId, rows[i].skill_slug, rows[j].skill_slug, delta, now);
+          await this.reinforceGraphEdge(orgId, rows[j].skill_slug, rows[i].skill_slug, delta, now);
+        }
+      }
+
+      return { taskId: input.taskId, reward, appliedSkills: rows.length };
+    } catch (err) {
+      this.logger.debug(`user feedback skipped: ${(err as Error).message}`);
+      return { taskId: input.taskId, reward, appliedSkills: 0 };
+    }
   }
 
   private slugify(raw: string): string {
@@ -623,6 +685,89 @@ export class SkillLibraryService {
       }, { onConflict: 'org_id,from_skill_slug,to_skill_slug,relation' });
     } catch (err) {
       this.logger.debug(`skill graph edge skipped: ${(err as Error).message}`);
+    }
+  }
+
+  private feedbackReward(input: UserFeedbackInput): number {
+    if (typeof input.rating === 'number') {
+      return Math.max(-1, Math.min(1, (input.rating - 3) / 2));
+    }
+    if (input.reaction === 'positive') return 1;
+    if (input.reaction === 'negative') return -1;
+    return 0;
+  }
+
+  private async applyFeedbackToStat(
+    orgId: string,
+    event: SkillSelectionEventRow,
+    contextKey: string,
+    reward: number,
+    now: string,
+  ): Promise<void> {
+    try {
+      const { data } = await this.db.admin
+        .from('skill_usage_stats')
+        .select('attempts, successes, failures, positive_feedback, negative_feedback, active_runs, avg_score')
+        .eq('org_id', orgId)
+        .eq('source', event.source)
+        .eq('skill_slug', event.skill_slug)
+        .eq('context_key', contextKey)
+        .maybeSingle();
+      const current = (data ?? {}) as Partial<SkillUsageStat>;
+      const attempts = Number(current.attempts ?? 0);
+      const priorAvg = Number(current.avg_score ?? event.selected_score ?? 0);
+      const avgScore = attempts > 0
+        ? (priorAvg * 0.85) + ((event.selected_score ?? 0) + reward) * 0.15
+        : (event.selected_score ?? 0) + reward;
+
+      await this.db.admin.from('skill_usage_stats').upsert({
+        org_id: orgId,
+        source: event.source,
+        skill_slug: event.skill_slug,
+        context_key: contextKey,
+        attempts,
+        successes: Number(current.successes ?? 0),
+        failures: Number(current.failures ?? 0),
+        positive_feedback: Number(current.positive_feedback ?? 0) + (reward > 0 ? 1 : 0),
+        negative_feedback: Number(current.negative_feedback ?? 0) + (reward < 0 ? 1 : 0),
+        active_runs: Math.max(0, Number(current.active_runs ?? 0)),
+        avg_score: avgScore,
+        last_used_at: now,
+        updated_at: now,
+      }, { onConflict: 'org_id,source,skill_slug,context_key' });
+    } catch (err) {
+      this.logger.debug(`skill feedback stat skipped: ${(err as Error).message}`);
+    }
+  }
+
+  private async annotateSelectionFeedback(
+    orgId: string,
+    event: SkillSelectionEventRow,
+    input: UserFeedbackInput,
+    reward: number,
+    now: string,
+  ): Promise<void> {
+    try {
+      const feedback = {
+        user_id: input.userId,
+        reaction: input.reaction ?? null,
+        rating: input.rating ?? null,
+        reward,
+        comment: input.comment?.slice(0, 500) ?? null,
+        recorded_at: now,
+      };
+      await this.db.admin
+        .from('skill_selection_events')
+        .update({
+          metadata: {
+            ...(event.metadata ?? {}),
+            user_feedback: feedback,
+          },
+        })
+        .eq('org_id', orgId)
+        .eq('id', event.id);
+    } catch (err) {
+      this.logger.debug(`skill feedback annotation skipped: ${(err as Error).message}`);
     }
   }
 }
