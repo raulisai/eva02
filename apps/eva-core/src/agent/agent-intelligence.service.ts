@@ -37,6 +37,7 @@ interface RuntimeSettings {
   sandboxNetworkAllowlist: string[];
   heartbeatEnabled: boolean;
   heartbeatHour: number;
+  maxStepsByTier: Record<'chat' | 'quick' | 'medium' | 'long', number>;
 }
 
 const DEFAULT_SETTINGS: RuntimeSettings = {
@@ -48,6 +49,12 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
     .filter(Boolean),
   heartbeatEnabled: process.env.EVA_AGENT_HEARTBEAT_ENABLED === 'true',
   heartbeatHour: Number(process.env.EVA_AGENT_HEARTBEAT_HOUR ?? 7) || 7,
+  maxStepsByTier: {
+    chat: Number(process.env.EVA_AGENT_CHAT_MAX_STEPS ?? 2) || 2,
+    quick: Number(process.env.EVA_AGENT_QUICK_MAX_STEPS ?? 4) || 4,
+    medium: Number(process.env.EVA_AGENT_MEDIUM_MAX_STEPS ?? 4) || 4,
+    long: Number(process.env.EVA_AGENT_LONG_MAX_STEPS ?? 8) || 8,
+  },
 };
 
 @Injectable()
@@ -96,7 +103,7 @@ export class AgentIntelligenceService implements OnApplicationBootstrap, OnAppli
   async settings(orgId: string): Promise<RuntimeSettings> {
     const { data } = await this.db.admin
       .from('org_agent_settings')
-      .select('token_cap_per_task, tool_rate_limit_per_minute, sandbox_network_allowlist, heartbeat_enabled, heartbeat_hour')
+      .select('token_cap_per_task, tool_rate_limit_per_minute, sandbox_network_allowlist, heartbeat_enabled, heartbeat_hour, max_steps_by_tier')
       .eq('org_id', orgId)
       .maybeSingle();
 
@@ -110,7 +117,13 @@ export class AgentIntelligenceService implements OnApplicationBootstrap, OnAppli
         : DEFAULT_SETTINGS.sandboxNetworkAllowlist,
       heartbeatEnabled: Boolean(row.heartbeat_enabled ?? DEFAULT_SETTINGS.heartbeatEnabled),
       heartbeatHour: Number(row.heartbeat_hour ?? DEFAULT_SETTINGS.heartbeatHour),
+      maxStepsByTier: this.normalizeMaxStepsByTier(row.max_steps_by_tier),
     };
+  }
+
+  async maxStepsForTier(orgId: string, tier: 'chat' | 'quick' | 'medium' | 'long'): Promise<number> {
+    const settings = await this.settings(orgId);
+    return settings.maxStepsByTier[tier];
   }
 
   async enforceTokenCap(orgId: string, taskId: string, currentTokens = 0): Promise<string | null> {
@@ -151,6 +164,24 @@ export class AgentIntelligenceService implements OnApplicationBootstrap, OnAppli
     const denied = hosts.filter((host) => !settings.sandboxNetworkAllowlist.some((allowed) => host === allowed || host.endsWith(`.${allowed}`)));
     if (denied.length === 0) return null;
     return `Dominio(s) no permitidos para sandbox con red: ${denied.join(', ')}. Allowlist: ${settings.sandboxNetworkAllowlist.join(', ')}.`;
+  }
+
+  private normalizeMaxStepsByTier(value: unknown): RuntimeSettings['maxStepsByTier'] {
+    const input = (value && typeof value === 'object' && !Array.isArray(value))
+      ? value as Partial<Record<'chat' | 'quick' | 'medium' | 'long', unknown>>
+      : {};
+    return {
+      chat: this.clampSteps(input.chat, DEFAULT_SETTINGS.maxStepsByTier.chat, 1, 4),
+      quick: this.clampSteps(input.quick, DEFAULT_SETTINGS.maxStepsByTier.quick, 1, 6),
+      medium: this.clampSteps(input.medium, DEFAULT_SETTINGS.maxStepsByTier.medium, 2, 8),
+      long: this.clampSteps(input.long, DEFAULT_SETTINGS.maxStepsByTier.long, 3, 10),
+    };
+  }
+
+  private clampSteps(value: unknown, fallback: number, min: number, max: number): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(Math.max(Math.round(parsed), min), max);
   }
 
   async createInitialPlan(orgId: string, taskId: string, goal: string, capabilityModel?: string): Promise<AgentPlanItem[]> {

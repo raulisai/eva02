@@ -84,6 +84,14 @@ describe('classifyTier', () => {
     expect(classifyTier('puedes descargar un video de youtube de platzi y mandarmelo por telegram?').tier).toBe('long');
     expect(classifyTier('descárgame el video').tier).toBe('long');
     expect(classifyTier('bájalo de youtube').tier).toBe('long');
+    expect(classifyTier('descárgamelo de youtube y mándamelo por telegram').tier).toBe('long');
+    expect(classifyTier('envíaselo a mi mamá por whatsapp').tier).toBe('long');
+  });
+
+  it('handles Spanish verbs with trailing pronouns without taking the chat shortcut', () => {
+    expect(classifyTier('recuérdamelo mañana').tier).toBe('quick');
+    expect(classifyTier('mándaselo a Luis').tier).toBe('long');
+    expect(classifyTier('descargámelo en mp3').tier).toBe('long');
   });
 
   it('never lets sensitive actions take the chat shortcut', () => {
@@ -491,6 +499,7 @@ describe('AgentRunnerService', () => {
             buildRetryContext: jest.fn().mockResolvedValue(null),
             registerCapabilityGap: jest.fn().mockResolvedValue(undefined),
             getCapabilityGapsDigest: jest.fn().mockResolvedValue(null),
+            maxStepsForTier: jest.fn().mockResolvedValue(4),
           },
         },
       ],
@@ -655,6 +664,32 @@ describe('AgentRunnerService', () => {
     expect(logs.some((message) => message.includes('tier=medium'))).toBe(true);
     expect(agentLoop.run).toHaveBeenCalledWith(ORG, TASK, 'todo bien cual es el clima de los siguientes 3 dias', expect.objectContaining({ maxSteps: 4 }));
     expect(publishedTypes()).toContain('task.result');
+  });
+
+  it('uses org max step settings for long agent-loop work', async () => {
+    const intelligence = module.get(AgentIntelligenceService) as jest.Mocked<AgentIntelligenceService>;
+    intelligence.maxStepsForTier.mockResolvedValueOnce(9);
+    tasks.getTask.mockResolvedValue(makeTask({
+      title: 'Investiga',
+      description: 'investiga a fondo este tema y prepara un reporte completo',
+    }));
+    agentLoop.run.mockResolvedValue({
+      ok: true,
+      text: 'Reporte listo.',
+      steps: [],
+      tokensUsed: 90,
+      toolsUsed: [],
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(intelligence.maxStepsForTier).toHaveBeenCalledWith(ORG, 'long');
+    expect(agentLoop.run).toHaveBeenCalledWith(
+      ORG,
+      TASK,
+      'investiga a fondo este tema y prepara un reporte completo',
+      expect.objectContaining({ maxSteps: 9 }),
+    );
   });
 
   it('runs recipe requests through public APIs without planner tokens', async () => {

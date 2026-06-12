@@ -11,13 +11,13 @@ export interface TierDecision {
   reason: string;
 }
 
-const LONG_SIGNALS = /\b(script|c[oó]digo|programa|automatiz|bot\b|scrap|docker|deploy|desplieg|proyect|integr|monitor|cron\b|cada (hora|d[ií]a|semana)|paso a paso|varios pasos|informe completo|reporte completo|migr|refactoriz|descarg|download|youtube|youtu\.be|platzi|udemy|vimeo|video|v[ií]deo|mp3|mp4|yt-dlp|m[aá]nd(?:a|e|o|ar)|env[ií](?:a|e|o|ar)|comprim|convert|extra[eí])/i;
+const LONG_SIGNALS = /\b(script|c[oó]digo|programa|automatiz|bot\b|scrap|docker|deploy|desplieg|proyect|integr|monitor|cron\b|cada (hora|d[ií]a|semana)|paso a paso|varios pasos|informe completo|reporte completo|migr|refactoriz|descarg(?:a|ar|ue|uen|ando|ad[ao]s?)?(?:melo|mela|noslo|nosla|selo|sela|lo|la|me|nos)?|download|youtube|youtu\.be|platzi|udemy|vimeo|video|v[ií]deo|mp3|mp4|yt-dlp|m[aá]nd(?:a|e|o|ar|alo|ala|ame|eme|amelo|amela|aselo|asela|eselo|esela)|env[ií](?:a|e|o|ar|alo|ala|ame|eme|amelo|amela|aselo|asela|eselo|esela)|comprim|convert|extra[eí])/i;
 
 // Medium signals indicate tasks requiring reasoning, multi-day/range queries,
 // comparisons, or conditional step-by-step logic.
 const MEDIUM_SIGNALS = /\b(compara|comparar|diferencia|vs|versus|siguientes?\s+\d+|pr[oó]ximos?\s+\d+|\d+\s+d[ií]as?|tres\s+d[ií]as?|cinco\s+d[ií]as?|semana|semanal|fin de semana|luego|despu[eé]s|y tambi[eé]n|y despu[eé]s|adem[aá]s|si\b.*\bentonces|analiza|analizar|eval[uú]a|evaluar|resume y|busca y|[uú]ltimos?\s+\d+|pr[oó]ximos?\s+\d+)\b|\by\s+(?:resum|revis|busc|compar|analiz|eval|dame|muestr|crea|env[ií]|escrib|pide|haz|hacer)[a-z]*\b|\b(?:hoy|ma[nñ]ana|ayer)\s+y\s+(?:hoy|ma[nñ]ana|ayer)\b/i;
 
-const QUICK_SIGNALS = /\b(b[uú]sc|clima|tiempo en|precio|cotiz|noticias|tipo de cambio|convert|conviert|cu[aá]nto (cuesta|vale|es)|resum|revis|traduc|correo|email|notificaciones|agenda|recu[eé]rd|defin|qu[eé] es|actual|hoy|ma[nñ]ana|ayer|[uú]ltim[ao]s?|reciente|en vivo|ahora|recet|recipe|cocin|ingrediente|mundial|munidal|world cup|fifa|partido|jugar[aá]|calendario|fixture|selecci[oó]n|grupo|imagen|im[aá]gen|foto|dibuj|ilustr|logo|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomiend|drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|archivo|carpeta|telegram)/i;
+const QUICK_SIGNALS = /\b(b[uú]sc|clima|tiempo en|precio|cotiz|noticias|tipo de cambio|convert|conviert|cu[aá]nto (cuesta|vale|es)|resum|revis|traduc|correo|email|notificaciones|agenda|recu[eé]rd(?:a|ame|eme|amelo|amela|aselo|asela|eselo|esela|alo|ala|ar)?|defin|qu[eé] es|actual|hoy|ma[nñ]ana|ayer|[uú]ltim[ao]s?|reciente|en vivo|ahora|recet|recipe|cocin|ingrediente|mundial|munidal|world cup|fifa|partido|jugar[aá]|calendario|fixture|selecci[oó]n|grupo|imagen|im[aá]gen|foto|dibuj|ilustr|logo|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomiend|drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|archivo|carpeta|telegram)/i;
 
 const GREETING = /^(hola|hey|buenas|buenos d[ií]as|buenas tardes|buenas noches|qu[eé] tal|c[oó]mo est[aá]s|gracias|ok|vale|jaja|adi[oó]s|bye)\b/i;
 
@@ -45,4 +45,3 @@ export function classifyTier(text: string): TierDecision {
   }
   return { tier: 'quick', estimateSec: 30, reason: 'default medium' };
 }
-

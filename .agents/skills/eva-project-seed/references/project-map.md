@@ -116,7 +116,7 @@ Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_
 - `middleware.ts` refreshes Supabase auth with `getUser()`, redirects unauthenticated users to `/login`, authenticated root/login users to `/tasks`.
 - API client: `lib/core-api.ts` uses client Supabase session and Bearer token.
 - Server org context: `lib/supabase/org.ts` gets `users.org_id`; keep org-scoped Supabase reads.
-- UI components: `components/tasks`, `approvals`, `billing`, `events`, `jobs`, `mcp`, `nodes`, `playground`, `skills`, `soul`, `settings`, `layout`, `ui`. Soul editor separates agent identity, user profile, relationship aliases, cowork context, and encrypted private context sent through `POST /agent/soul/private-context`. Playground final answers have thumbs feedback wired to `POST /agent/feedback`; Topbar polls public `/health` to show core/sandbox readiness.
+- UI components: `components/tasks`, `approvals`, `billing`, `events`, `jobs`, `mcp`, `nodes`, `playground`, `skills`, `soul`, `settings`, `layout`, `ui`. Soul editor is a segmented workspace with `Agente EVA`, `Mi perfil`, and `Privado` sections; user profile/relationship aliases/cowork context stay separate from agent identity, and private vault fields go through `POST /agent/soul/private-context`. Playground final answers have thumbs feedback wired to `POST /agent/feedback`; Topbar polls public `/health` to show core/sandbox readiness.
 
 ## Local Drift / Watchlist
 

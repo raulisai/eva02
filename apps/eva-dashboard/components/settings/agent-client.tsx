@@ -26,6 +26,13 @@ export function AgentClient({ orgId, initialSettings, efficiency, defense, toolM
   const [allowlistText, setAllowlistText] = useState<string>((initialSettings?.sandbox_network_allowlist ?? []).join(', '));
   const [heartbeatEnabled, setHeartbeatEnabled] = useState<boolean>(initialSettings?.heartbeat_enabled ?? false);
   const [heartbeatHour, setHeartbeatHour] = useState<number>(initialSettings?.heartbeat_hour ?? 7);
+  const initialMaxSteps = (initialSettings?.max_steps_by_tier ?? {}) as Record<string, unknown>;
+  const [maxStepsByTier, setMaxStepsByTier] = useState({
+    chat: Number(initialMaxSteps.chat ?? 2),
+    quick: Number(initialMaxSteps.quick ?? 4),
+    medium: Number(initialMaxSteps.medium ?? 4),
+    long: Number(initialMaxSteps.long ?? 8),
+  });
 
   async function saveSettings() {
     setBusy(true);
@@ -47,6 +54,12 @@ export function AgentClient({ orgId, initialSettings, efficiency, defense, toolM
           sandbox_network_allowlist,
           heartbeat_enabled: heartbeatEnabled,
           heartbeat_hour: Math.min(Math.max(Number(heartbeatHour), 0), 23),
+          max_steps_by_tier: {
+            chat: clampStep(maxStepsByTier.chat, 1, 4),
+            quick: clampStep(maxStepsByTier.quick, 1, 6),
+            medium: clampStep(maxStepsByTier.medium, 2, 8),
+            long: clampStep(maxStepsByTier.long, 3, 10),
+          },
           updated_at: new Date().toISOString(),
         });
 
@@ -121,6 +134,41 @@ export function AgentClient({ orgId, initialSettings, efficiency, defense, toolM
                 rows={2}
                 className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-cyan-500/60 font-mono resize-none"
               />
+            </div>
+          </div>
+
+          {/* Card: Planning depth by tier */}
+          <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-5 space-y-4">
+            <div className="flex items-center gap-2 border-b border-zinc-800 pb-3">
+              <Settings className="w-5 h-5 text-sky-400" />
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-100">Planning Depth by Tier</h3>
+                <p className="text-xs text-zinc-500">Control how many agent-loop steps EVA may spend before falling back or summarizing.</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              {([
+                ['chat', 'Chat', '1-4'],
+                ['quick', 'Quick', '1-6'],
+                ['medium', 'Medium', '2-8'],
+                ['long', 'Long', '3-10'],
+              ] as const).map(([key, label, range]) => (
+                <label key={key} className="space-y-1 rounded border border-zinc-800 bg-zinc-900/30 p-3">
+                  <span className="flex items-center justify-between gap-2 text-xs text-zinc-300">
+                    {label}
+                    <span className="text-[10px] font-mono text-zinc-600">{range}</span>
+                  </span>
+                  <input
+                    type="number"
+                    min={key === 'chat' || key === 'quick' ? 1 : key === 'medium' ? 2 : 3}
+                    max={key === 'chat' ? 4 : key === 'quick' ? 6 : key === 'medium' ? 8 : 10}
+                    value={maxStepsByTier[key]}
+                    onChange={(event) => setMaxStepsByTier((prev) => ({ ...prev, [key]: parseInt(event.target.value) || 0 }))}
+                    className="w-full bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-cyan-500/60"
+                  />
+                </label>
+              ))}
             </div>
           </div>
 
@@ -294,4 +342,9 @@ export function AgentClient({ orgId, initialSettings, efficiency, defense, toolM
       </div>
     </ScrollArea>
   );
+}
+
+function clampStep(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(Math.max(Math.round(value), min), max);
 }

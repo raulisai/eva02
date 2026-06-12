@@ -689,7 +689,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             ctx.startedAt,
             ctx.task.created_by,
             ctx.soulContext,
-            4,
+            await this.maxStepsForTier(ctx.orgId, 'medium'),
           );
           if (handled) return true;
           await this.log(ctx.orgId, ctx.taskId, 'agent-loop no resolvió — usando pipeline clásico', 'loop');
@@ -703,7 +703,16 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         matches: (ctx) => ctx.tier.tier === 'long',
         handler: async (ctx) => {
           this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'agent_loop');
-          const handled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          const handled = await this.runAgentLoop(
+            ctx.orgId,
+            ctx.taskId,
+            ctx.input,
+            ctx.conversationContext,
+            ctx.startedAt,
+            ctx.task.created_by,
+            ctx.soulContext,
+            await this.maxStepsForTier(ctx.orgId, 'long'),
+          );
           if (handled) return true;
           await this.log(ctx.orgId, ctx.taskId, 'agent-loop no resolvió — usando pipeline clásico', 'loop');
           return false;
@@ -2517,6 +2526,12 @@ Responde directamente al usuario en español, con un tono amable y natural.
       // El workspace de la tarea muere con el loop; el sandbox es por-tarea.
       void this.sandbox.release(taskId).catch(() => undefined);
     }
+  }
+
+  private async maxStepsForTier(orgId: string, tier: 'chat' | 'quick' | 'medium' | 'long'): Promise<number> {
+    return this.intelligence.maxStepsForTier(orgId, tier).catch(() => (
+      tier === 'long' ? 8 : tier === 'medium' ? 4 : tier === 'quick' ? 4 : 2
+    ));
   }
 
   // rawInput = current user message; input here may be the full contextualInput

@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 23:20Z
+C: dashboard/soul: redesigned Soul editor into separated Agente EVA, Mi perfil, and Privado sections with vault-style private context fields; files=apps/eva-dashboard/components/soul/soul-editor.tsx,apps/eva-dashboard/__tests__/soul-editor.test.tsx,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-dashboard && npm test -- --runInBand __tests__/soul-editor.test.tsx; cd apps/eva-dashboard && npm run build; npm run docs:check
+P: pending/improve -> verify Soul segmented workspace in a real browser session after migration 031 is applied
+
 ### 2026-06-12 23:15Z
 C: dashboard/docs: implemented high-impact backlog items: Playground thumbs feedback, Topbar core/sandbox health indicator, and project-map freshness checker; files=apps/eva-dashboard/components/playground/playground-client.tsx,apps/eva-dashboard/__tests__/playground.test.tsx,apps/eva-dashboard/components/layout/topbar.tsx,scripts/check-project-map-freshness.mjs,package.json,docs/backlog.md,docs/architecture.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm run docs:check; cd apps/eva-dashboard && npm test -- --runInBand __tests__/playground.test.tsx; cd apps/eva-dashboard && npm run build; cd apps/eva-core && npm run build; cd apps/eva-core && npm test -- src/agent/__tests__/soul-context.service.spec.ts --runInBand
 P: pending/improve -> add docs:check to CI and consider a Topbar unit test with mocked /health states
