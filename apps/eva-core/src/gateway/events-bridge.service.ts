@@ -11,6 +11,7 @@ const BROADCAST_EVENTS: EvaEventType[] = [
   'task.failed',
   'task.cancelled',
   'task.waiting_approval',
+  'task.waiting_input',
   'task.say',
   'task.log',
   'task.result',

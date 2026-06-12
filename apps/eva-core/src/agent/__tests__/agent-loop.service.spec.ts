@@ -14,6 +14,7 @@ import { ScheduleService } from '../schedule.service';
 import { ScriptForgeService } from '../script-forge.service';
 import { SkillLibraryService } from '../skill-library.service';
 import { TelegramAdapter } from '../../communication/telegram.adapter';
+import { AgentTrajectoryService } from '../agent-trajectory.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -52,6 +53,7 @@ describe('AgentLoopService', () => {
   let approvals: jest.Mocked<ApprovalsService>;
   let drive: jest.Mocked<GoogleDriveService>;
   let telegram: jest.Mocked<TelegramAdapter>;
+  let trajectories: jest.Mocked<AgentTrajectoryService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -133,6 +135,14 @@ describe('AgentLoopService', () => {
           },
         },
         {
+          provide: AgentTrajectoryService,
+          useValue: {
+            checkpoint: jest.fn().mockResolvedValue(undefined),
+            complete: jest.fn().mockResolvedValue(undefined),
+            metrics: jest.fn().mockResolvedValue({}),
+          },
+        },
+        {
           provide: SkillLibraryService,
           useValue: {
             findRelevant: jest.fn().mockResolvedValue([]),
@@ -166,6 +176,7 @@ describe('AgentLoopService', () => {
     approvals = module.get(ApprovalsService);
     drive = module.get(GoogleDriveService);
     telegram = module.get(TelegramAdapter);
+    trajectories = module.get(AgentTrajectoryService);
   });
 
   it('returns the final answer when the model answers directly', async () => {
@@ -196,6 +207,72 @@ describe('AgentLoopService', () => {
     expect(result.text).toBe('Hace 22°C.');
     expect(result.toolsUsed).toEqual(['web_search']);
     expect(result.tokensUsed).toBe(80);
+  });
+
+  it('checkpoints and completes an org-scoped trajectory for root runs', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"buscar","tool":"web_search","args":{"query":"clima CDMX"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"listo","tool":"final_answer","args":{"text":"Hace 22°C."}}'));
+
+    await service.run(ORG, TASK, 'clima en CDMX');
+    await new Promise((r) => setImmediate(r));
+
+    expect(trajectories.checkpoint).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG,
+      taskId: TASK,
+      goal: 'clima en CDMX',
+      outcome: 'running',
+    }));
+    expect(trajectories.complete).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG,
+      taskId: TASK,
+      outcome: 'ok',
+      toolsUsed: ['web_search'],
+      modelBudgetPerStep: expect.arrayContaining([
+        expect.objectContaining({ step: 1, budget: 'cheap' }),
+      ]),
+    }));
+  });
+
+  it('escalates decide budget after a tool error and records the budget trail', async () => {
+    research.answer.mockRejectedValueOnce(new Error('API caída'));
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"buscar","tool":"web_search","args":{"query":"x"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"cierro","tool":"final_answer","args":{"text":"No se pudo por API caída."}}'));
+
+    await service.run(ORG, TASK, 'busca x');
+    await new Promise((r) => setImmediate(r));
+
+    expect(modelRouter.generate.mock.calls[0][1]!.budget).toBe('cheap');
+    expect(modelRouter.generate.mock.calls[1][1]!.budget).toBe('balanced');
+    expect(trajectories.complete).toHaveBeenCalledWith(expect.objectContaining({
+      modelBudgetPerStep: [
+        expect.objectContaining({ budget: 'cheap', reason: 'initial' }),
+        expect.objectContaining({ budget: 'balanced', reason: 'tool_error' }),
+      ],
+    }));
+  });
+
+  it('executes multiple native read-only tool calls concurrently in one loop cycle', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce({
+        ...modelReply('', 50),
+        toolCalls: [
+          { id: 'tc_1', name: 'web_search', input: { query: 'clima CDMX' } },
+          { id: 'tc_2', name: 'gmail_read', input: {} },
+        ],
+        stopReason: 'tool_use' as const,
+      })
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"Listo."}}'));
+
+    const result = await service.run(ORG, TASK, 'revisa clima y correo');
+
+    expect(research.answer).toHaveBeenCalledWith('clima CDMX', ORG);
+    expect(gmail.fetchLatest).toHaveBeenCalledWith(ORG, 3);
+    expect(result.steps.map((s) => s.tool)).toEqual(['web_search', 'gmail_read']);
+    const secondPrompt = modelRouter.generate.mock.calls[1][0] as string;
+    expect(secondPrompt).toContain('Clima: 22°C despejado');
+    expect(secondPrompt).toContain('1 correo de Banco');
   });
 
   it('reports unknown tools as observations and keeps going', async () => {

@@ -1,0 +1,227 @@
+[
+  {
+    "id": "calc-sum-code",
+    "goal": "calcula 37 + 5 usando código",
+    "decisions": [
+      { "tool": "code_execute", "args": { "language": "python", "code": "print(37 + 5)" } },
+      { "tool": "final_answer", "args": { "text": "El resultado es 42." } }
+    ],
+    "expectedTools": ["code_execute"],
+    "expectedFinalIncludes": ["42"],
+    "maxSteps": 3
+  },
+  {
+    "id": "weather-read",
+    "goal": "busca el clima de CDMX",
+    "decisions": [
+      { "tool": "web_search", "args": { "query": "clima CDMX hoy" } },
+      { "tool": "final_answer", "args": { "text": "En CDMX hace 22°C y está despejado." } }
+    ],
+    "expectedTools": ["web_search"],
+    "expectedFinalIncludes": ["22°C"],
+    "maxSteps": 3
+  },
+  {
+    "id": "gmail-latest",
+    "goal": "revisa mis últimos correos",
+    "decisions": [
+      { "tool": "gmail_read", "args": {} },
+      { "tool": "final_answer", "args": { "text": "Tienes un correo reciente de Banco." } }
+    ],
+    "expectedTools": ["gmail_read"],
+    "expectedFinalIncludes": ["Banco"],
+    "maxSteps": 3
+  },
+  {
+    "id": "gmail-search",
+    "goal": "busca correos de Ana",
+    "decisions": [
+      { "tool": "gmail_read", "args": { "query": "from:ana" } },
+      { "tool": "final_answer", "args": { "text": "Encontré un correo de Ana." } }
+    ],
+    "expectedTools": ["gmail_read"],
+    "expectedFinalIncludes": ["Ana"],
+    "maxSteps": 3
+  },
+  {
+    "id": "calendar-week",
+    "goal": "qué tengo en mi calendario esta semana",
+    "decisions": [
+      { "tool": "calendar_read", "args": { "days": 7 } },
+      { "tool": "final_answer", "args": { "text": "Esta semana tienes una junta a las 10am." } }
+    ],
+    "expectedTools": ["calendar_read"],
+    "expectedFinalIncludes": ["10am"],
+    "maxSteps": 3
+  },
+  {
+    "id": "drive-query",
+    "goal": "busca el contrato en mi drive",
+    "decisions": [
+      { "tool": "drive_read", "args": { "query": "contrato" } },
+      { "tool": "final_answer", "args": { "text": "Encontré 3 archivos relacionados con contrato." } }
+    ],
+    "expectedTools": ["drive_read"],
+    "expectedFinalIncludes": ["3 archivos"],
+    "maxSteps": 3
+  },
+  {
+    "id": "memory-recall",
+    "goal": "recuerda qué café prefiero",
+    "decisions": [
+      { "tool": "memory_recall", "args": { "query": "café preferido" } },
+      { "tool": "final_answer", "args": { "text": "Prefieres café americano." } }
+    ],
+    "expectedTools": ["memory_recall"],
+    "expectedFinalIncludes": ["americano"],
+    "maxSteps": 3
+  },
+  {
+    "id": "code-fix-after-error",
+    "goal": "corrige un cálculo con código",
+    "decisions": [
+      { "tool": "code_execute", "args": { "language": "python", "code": "print(1/0)" } },
+      { "tool": "code_execute", "args": { "language": "python", "code": "print(7)" } },
+      { "tool": "final_answer", "args": { "text": "El cálculo corregido da 7." } }
+    ],
+    "expectedTools": ["code_execute"],
+    "expectedFinalIncludes": ["7"],
+    "maxSteps": 4
+  },
+  {
+    "id": "sandbox-list",
+    "goal": "lista los archivos descargados",
+    "decisions": [
+      { "tool": "sandbox_ls", "args": {} },
+      { "tool": "final_answer", "args": { "text": "Hay un archivo report.pdf." } }
+    ],
+    "expectedTools": ["sandbox_ls"],
+    "expectedFinalIncludes": ["report.pdf"],
+    "maxSteps": 3
+  },
+  {
+    "id": "script-forge",
+    "goal": "genera un script para sumar ventas",
+    "decisions": [
+      { "tool": "script_forge", "args": { "spec": "sumar ventas" } },
+      { "tool": "final_answer", "args": { "text": "El script calculó 42." } }
+    ],
+    "expectedTools": ["script_forge"],
+    "expectedFinalIncludes": ["42"],
+    "maxSteps": 3
+  },
+  {
+    "id": "skill-run",
+    "goal": "reutiliza una skill para limpiar datos",
+    "decisions": [
+      { "tool": "skill_run", "args": { "slug": "clean-data" } },
+      { "tool": "final_answer", "args": { "text": "La limpieza terminó correctamente." } }
+    ],
+    "expectedTools": ["skill_run"],
+    "expectedFinalIncludes": ["limpieza"],
+    "maxSteps": 3
+  },
+  {
+    "id": "skill-save",
+    "goal": "guarda un script probado como skill",
+    "decisions": [
+      { "tool": "skill_save", "args": { "name": "sumador", "description": "suma números", "language": "python", "code": "print(sum([1,2,3]))" } },
+      { "tool": "final_answer", "args": { "text": "Guardé la skill sumador." } }
+    ],
+    "expectedTools": ["skill_save"],
+    "expectedFinalIncludes": ["skill"],
+    "maxSteps": 3
+  },
+  {
+    "id": "delegate-research",
+    "goal": "delega una investigación breve",
+    "decisions": [
+      { "tool": "delegate", "args": { "goal": "resume el hallazgo", "role": "investigador" } },
+      { "tool": "final_answer", "args": { "text": "Resumen del sub-agente listo." } },
+      { "tool": "final_answer", "args": { "text": "El sub-agente entregó el resumen." } }
+    ],
+    "expectedTools": ["delegate"],
+    "expectedFinalIncludes": ["resumen"],
+    "maxSteps": 3
+  },
+  {
+    "id": "parallel-read",
+    "goal": "consulta clima y calendario",
+    "nativeToolCalls": [
+      { "name": "web_search", "input": { "query": "clima CDMX" } },
+      { "name": "calendar_read", "input": { "days": 1 } }
+    ],
+    "decisions": [
+      { "tool": "final_answer", "args": { "text": "Hace 22°C y tienes una junta a las 10am." } }
+    ],
+    "expectedTools": ["web_search", "calendar_read"],
+    "expectedFinalIncludes": ["22°C", "10am"],
+    "maxSteps": 3
+  },
+  {
+    "id": "unknown-tool-recover",
+    "goal": "recupera de herramienta inválida",
+    "decisions": [
+      { "tool": "bad_tool", "args": {} },
+      { "tool": "final_answer", "args": { "text": "Detecté herramienta inválida y cerré honestamente." } }
+    ],
+    "expectedTools": ["bad_tool"],
+    "expectedFinalIncludes": ["herramienta"],
+    "maxSteps": 3
+  },
+  {
+    "id": "dod-honest-failure",
+    "goal": "reporta fallo de código honestamente",
+    "decisions": [
+      { "tool": "code_execute", "args": { "language": "python", "code": "raise PermissionError('denied')" } },
+      { "tool": "final_answer", "args": { "text": "No se pudo ejecutar por falta de permisos." } }
+    ],
+    "expectedTools": ["code_execute"],
+    "expectedFinalIncludes": ["permisos"],
+    "maxSteps": 3
+  },
+  {
+    "id": "terminal-run",
+    "goal": "ejecuta un comando terminal",
+    "decisions": [
+      { "tool": "terminal_run", "args": { "cmd": "echo ok" } },
+      { "tool": "final_answer", "args": { "text": "El comando terminó ok." } }
+    ],
+    "expectedTools": ["terminal_run"],
+    "expectedFinalIncludes": ["ok"],
+    "maxSteps": 3
+  },
+  {
+    "id": "terminal-output",
+    "goal": "lee salida de background",
+    "decisions": [
+      { "tool": "terminal_output", "args": {} },
+      { "tool": "final_answer", "args": { "text": "La salida acumulada dice bg log." } }
+    ],
+    "expectedTools": ["terminal_output"],
+    "expectedFinalIncludes": ["bg log"],
+    "maxSteps": 3
+  },
+  {
+    "id": "image-analyze",
+    "goal": "analiza una captura",
+    "decisions": [
+      { "tool": "image_analyze", "args": { "path": "https://example.com/screen.png", "prompt": "lee texto" } },
+      { "tool": "final_answer", "args": { "text": "La captura dice OK." } }
+    ],
+    "expectedTools": ["image_analyze"],
+    "expectedFinalIncludes": ["OK"],
+    "maxSteps": 3
+  },
+  {
+    "id": "recovery-options",
+    "goal": "entrega opciones si todo falla",
+    "decisions": [
+      { "tool": "web_search", "args": { "query": "api caída" } },
+      { "tool": "gmail_read", "args": { "query": "x" } }
+    ],
+    "expectedTools": ["web_search", "gmail_read"],
+    "expectedFinalIncludes": ["Opciones"],
+    "maxSteps": 2
+  }
+]

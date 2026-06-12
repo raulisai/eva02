@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 19:21Z
+C: agent intelligence: trajectory persistence, metrics endpoint, adaptive budget, parallel read-only tool calls, golden eval harness; files=apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/agent-trajectory.service.ts,apps/eva-core/src/agent/agent-metrics.controller.ts,apps/eva-core/evals/golden-tasks.json,apps/eva-core/scripts/agent-evals.ts,supabase/migrations/028_agent_intelligence_metrics.sql,supabase/migrations/014_rls_policies.sql; tests=cd apps/eva-core && npm test -- --runInBand && npm run eval:agent && npm run lint && npm run build
+P: pending/improve -> implement full ask_user resume channel and automatic startup resume from running agent_trajectories checkpoints
+
 ### 2026-06-12 17:14Z
 C: agent: fallback telegram chatId resolution to communication_accounts when metadata is empty; files=apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts; tests=npm test -- agent-loop.service.spec.ts
 P: pending/improve -> add e2e or integration test verifying playground task fallback for communication accounts

@@ -5,7 +5,7 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { MemoryAgentService } from '../memory/memory-agent.service';
 import { ModelRouterService } from '../model-router/model-router.service';
-import { GenerateResult, ToolDefinition } from '../model-router/model-router.types';
+import { GenerateResult, ModelBudget, ToolDefinition } from '../model-router/model-router.types';
 import { GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
 import { GoogleDriveService } from './google-drive.service';
@@ -19,6 +19,7 @@ import { SkillLibraryService, SkillSummary } from './skill-library.service';
 import { EventBusService } from '../events/event-bus.service';
 import { TelegramAdapter } from '../communication/telegram.adapter';
 import { AgentProfile, DELEGATE_ROLE_CATALOG, resolveAgentProfile } from './agent-profiles';
+import { AgentTrajectoryService, ModelBudgetStep } from './agent-trajectory.service';
 
 
 /** One executed cycle of the loop: what the model decided + what the tool observed. */
@@ -56,6 +57,7 @@ export interface AgentLoopOptions {
 }
 
 type ToolExecutor = (orgId: string, taskId: string, args: Record<string, unknown>) => Promise<string>;
+type AgentDecision = { thought: string; tool: string; args: Record<string, unknown> };
 
 interface ToolSpec {
   name: string;
@@ -98,6 +100,8 @@ const STALL_THRESHOLD = 2;
 const MAX_DOD_REJECTIONS = 2;
 /** Texto que indica reporte honesto de fallo — no aplicar DoD a respuestas honestas. */
 const HONEST_FAILURE_RE = /\b(no se pudo|no pude|no fue posible|bloqueado|error|falló|fall[oó]|no logr[eé]|no dispon|no encontr|no hay|no tengo acceso|requiere|pendiente de aprobaci[oó]n|sin [eé]xito)\b/i;
+/** Herramientas de solo lectura que se pueden ejecutar en paralelo sin carreras sobre /work. */
+const PARALLEL_READ_ONLY_TOOLS = new Set(['web_search', 'gmail_read', 'calendar_read', 'drive_read', 'memory_recall', 'sandbox_ls']);
 
 /**
  * AgentLoopService — bucle agéntico genérico (estilo agent-zero):
@@ -131,6 +135,7 @@ export class AgentLoopService {
     @Optional() private readonly integrations?: IntegrationsService,
     @Optional() private readonly events?: EventBusService,
     @Optional() private readonly telegram?: TelegramAdapter,
+    @Optional() private readonly trajectories?: AgentTrajectoryService,
   ) {
     this.tools = this.buildToolCatalog();
   }
@@ -150,14 +155,20 @@ export class AgentLoopService {
     const systemPrompt = this.buildSystemPrompt(opts, available, extras, profile);
     // Tool definitions para tool-use nativo — se construyen UNA vez por run.
     const toolDefinitions = this.buildToolDefinitions(available);
+    const startedAt = Date.now();
 
     const steps: AgentLoopStep[] = [];
     let tokensUsed = 0;
     let parseFailures = 0;
     let formatHint: string | undefined;
     let dodRejections = 0;
+    let stallCount = 0;
+    let currentBudget: ModelBudget = 'cheap';
+    let budgetReason = 'initial';
+    const modelBudgetPerStep: ModelBudgetStep[] = [];
 
     await log(`agent-loop${depth > 0 ? ` (sub-agente d${depth})` : ''}: objetivo "${goal.slice(0, 120)}" — máx ${maxSteps} pasos`, 'loop');
+    this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
     if (extras.skills.length > 0) {
       await log(`agent-loop: ${extras.skills.length} skills relevantes disponibles [${extras.skills.map((s) => s.slug).join(', ')}]`, 'loop');
       if (depth === 0) {
@@ -176,10 +187,12 @@ export class AgentLoopService {
         .maybeSingle();
 
       if (currentTask?.status === 'cancelled') {
+        this.recordTrajectory(orgId, taskId, goal, steps, 'cancelled', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         throw new TaskCancelledError();
       }
 
-      let decision: { thought: string; tool: string; args: Record<string, unknown> } | null = null;
+      let decision: AgentDecision | null = null;
+      let parallelDecisions: AgentDecision[] = [];
       let res: GenerateResult | undefined = undefined;
       try {
         res = await this.modelRouter.generate(
@@ -188,7 +201,7 @@ export class AgentLoopService {
             orgId,
             taskId,
             requestType: 'reasoning',
-            budget: 'balanced',
+            budget: currentBudget,
             responseFormat: 'json',
             temperature: 0,
             maxTokens: DECIDE_MAX_TOKENS,
@@ -199,15 +212,22 @@ export class AgentLoopService {
           },
         );
         tokensUsed += res.usage.totalTokens;
+        modelBudgetPerStep.push({ step: i + 1, budget: currentBudget, reason: budgetReason });
 
         // A — Tool-use nativo: leer toolCalls primero, fallback a JSON parsing.
         if (res.toolCalls && res.toolCalls.length > 0) {
-          const tc = res.toolCalls[0];
-          decision = {
-            thought: (res.text || tc.name).slice(0, 300),
+          const responseText = res.text;
+          const nativeDecisions = res.toolCalls.map((tc) => ({
+            thought: (responseText || tc.name).slice(0, 300),
             tool: tc.name,
             args: tc.input,
-          };
+          }));
+          if (nativeDecisions.length > 1 && nativeDecisions.every((d) => PARALLEL_READ_ONLY_TOOLS.has(d.tool))) {
+            parallelDecisions = nativeDecisions;
+            decision = nativeDecisions[0];
+          } else {
+            decision = nativeDecisions[0];
+          }
         } else {
           decision = this.parseDecision(res.text);
         }
@@ -217,11 +237,13 @@ export class AgentLoopService {
 
       if (!decision) {
         parseFailures += 1;
+        ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'parse_failure'));
         const rawResText = res?.text ? ` (Respuesta del modelo: ${this.truncate(res.text, 200)})` : '';
         await log(`agent-loop: fallo de parseo JSON ${parseFailures}/${MAX_PARSE_FAILURES}${rawResText}`, 'loop');
         if (parseFailures >= MAX_PARSE_FAILURES) {
           await log('agent-loop: el modelo no produjo decisiones válidas — abortando bucle', 'loop');
           this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
+          this.recordTrajectory(orgId, taskId, goal, steps, 'failed', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
           return { ok: false, text: '', steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
         }
         formatHint = `Tu respuesta anterior no fue JSON válido${res?.text ? ` (empezaba: ${this.truncate(res.text, 120)})` : ''}. Responde SOLO el objeto {"thought":"...","tool":"...","args":{...}} sin texto adicional.`;
@@ -244,11 +266,13 @@ export class AgentLoopService {
 
         if (dodViolation) {
           dodRejections += 1;
+          ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'dod_rejection'));
           await log(`agent-loop: DoD rechazó final_answer (${dodRejections}/${MAX_DOD_REJECTIONS}): ${dodViolation.slice(0, 80)}`, 'loop');
           steps.push({
             tool: decision.tool, args: decision.args, thought: decision.thought,
             observation: `VERIFICACIÓN FALLIDA: ${dodViolation} Corrige el problema antes de declarar éxito.`,
           });
+          this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
           continue;
         }
 
@@ -256,6 +280,7 @@ export class AgentLoopService {
         const refinedText = depth === 0 ? await this.refineAndValidateResponse(orgId, taskId, goal, text) : text;
         this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, refinedText);
         this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
+        this.recordTrajectory(orgId, taskId, goal, steps, 'ok', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
       }
 
@@ -265,6 +290,8 @@ export class AgentLoopService {
           tool: decision.tool, args: decision.args, thought: decision.thought,
           observation: `ERROR: herramienta desconocida "${decision.tool}". Usa una de: ${available.map((t) => t.name).join(', ')}, final_answer.`,
         });
+        ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'unknown_tool'));
+        this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         continue;
       }
 
@@ -275,17 +302,55 @@ export class AgentLoopService {
           tool: spec.name, args: decision.args, thought: decision.thought,
           observation: 'ERROR: acción repetida idéntica al paso anterior. Cambia de herramienta/args o entrega final_answer con lo que ya tienes.',
         });
+        ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'repeated_action'));
+        this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         continue;
       }
 
       // D — Detección de estancamiento semántico (ciclos A→B→A y errores repetidos).
       const stallMsg = this.detectStall(steps);
       if (stallMsg) {
+        stallCount += 1;
         steps.push({
           tool: spec.name, args: decision.args, thought: decision.thought,
           observation: `ERROR: ${stallMsg}`,
         });
+        ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, stallCount >= 2 ? 'persistent_stall' : 'stall'));
+        this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         continue;
+      }
+
+      if (parallelDecisions.length > 1) {
+        const runnable = parallelDecisions
+          .map((d) => ({ decision: d, spec: available.find((t) => t.name === d.tool) }))
+          .filter((item): item is { decision: AgentDecision; spec: ToolSpec } => !!item.spec && PARALLEL_READ_ONLY_TOOLS.has(item.spec.name));
+
+        if (runnable.length === parallelDecisions.length) {
+          await log(`agent-loop paso ${i + 1}/${maxSteps}: ${runnable.length} lecturas en paralelo (${runnable.map((r) => r.spec.name).join(', ')})`, 'loop');
+          const results = await Promise.all(runnable.map(async ({ decision: d, spec: tool }) => {
+            await this.announceAction(orgId, taskId, tool.name, d.args);
+            try {
+              const observation = await tool.execute(orgId, taskId, d.args);
+              return { tool, decision: d, observation };
+            } catch (error) {
+              if (error instanceof MissingInformationError) throw error;
+              return { tool, decision: d, observation: `ERROR: ${(error as Error).message.slice(0, 300)}` };
+            }
+          }));
+          for (const result of results) {
+            steps.push({
+              tool: result.tool.name,
+              args: result.decision.args,
+              thought: result.decision.thought,
+              observation: this.truncate(result.observation, OBSERVATION_LIMIT),
+            });
+          }
+          if (results.some((r) => r.observation.startsWith('ERROR:'))) {
+            ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'tool_error'));
+          }
+          this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
+          continue;
+        }
       }
 
       await log(`agent-loop paso ${i + 1}/${maxSteps}: ${spec.name}(${JSON.stringify(decision.args).slice(0, 160)}) — ${decision.thought.slice(0, 120)}`, 'loop');
@@ -311,6 +376,10 @@ export class AgentLoopService {
         thought: decision.thought,
         observation: this.truncate(observation, OBSERVATION_LIMIT),
       });
+      if (observation.startsWith('ERROR:')) {
+        ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'tool_error'));
+      }
+      this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
     }
 
     // Out of steps — synthesise an answer from what was gathered instead of failing dry.
@@ -322,12 +391,14 @@ export class AgentLoopService {
           tokensUsed += recovery.usage.totalTokens;
           await log(`agent-loop: todos los pasos fallaron — entregando respuesta de recuperación con opciones (${tokensUsed} tokens)`, 'loop');
           this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, recovery.text);
+          this.recordTrajectory(orgId, taskId, goal, steps, 'degraded', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
           return { ok: true, degraded: true, text: recovery.text.trim(), steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
         } catch (error) {
           await log(`agent-loop: síntesis de recuperación falló — ${(error as Error).message}`, 'loop');
         }
       }
       this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
+      this.recordTrajectory(orgId, taskId, goal, steps, 'failed', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
       return { ok: false, text: '', steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     }
     try {
@@ -340,10 +411,12 @@ export class AgentLoopService {
       await log(`agent-loop: pasos agotados — sintetizando respuesta con ${gathered.length} hallazgos (${tokensUsed} tokens)`, 'loop');
       this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, refinedText);
       this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
+      this.recordTrajectory(orgId, taskId, goal, steps, 'ok', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
       return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     } catch (error) {
       await log(`agent-loop: síntesis falló — ${(error as Error).message}`, 'loop');
       this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
+      this.recordTrajectory(orgId, taskId, goal, steps, 'failed', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
       return { ok: false, text: '', steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     }
   }
@@ -1289,6 +1362,46 @@ Genera la respuesta final corregida y pulida en español. No incluyas ninguna ex
 
   private toolsUsed(steps: AgentLoopStep[]): string[] {
     return [...new Set(steps.map((s) => s.tool))];
+  }
+
+  private recordTrajectory(
+    orgId: string,
+    taskId: string,
+    goal: string,
+    steps: AgentLoopStep[],
+    outcome: 'running' | 'ok' | 'failed' | 'degraded' | 'cancelled',
+    tokensUsed: number,
+    depth: number,
+    startedAt: number,
+    stallCount: number,
+    dodRejections: number,
+    modelBudgetPerStep: ModelBudgetStep[],
+  ): void {
+    if (!this.trajectories || depth > 0) return;
+    const snapshot = {
+      orgId,
+      taskId,
+      goal,
+      steps: steps.map((s) => ({ ...s, args: { ...s.args } })),
+      outcome,
+      tokensUsed,
+      toolsUsed: this.toolsUsed(steps),
+      depth,
+      durationMs: Date.now() - startedAt,
+      stallCount,
+      dodRejections,
+      modelBudgetPerStep: modelBudgetPerStep.map((s) => ({ ...s })),
+    };
+    const op = outcome === 'running'
+      ? this.trajectories.checkpoint(snapshot)
+      : this.trajectories.complete(snapshot);
+    void op.catch((err) => this.logger.debug(`trajectory record skipped: ${(err as Error).message}`));
+  }
+
+  private escalateBudget(current: ModelBudget, reason: string): { currentBudget: ModelBudget; budgetReason: string } {
+    if (current === 'cheap') return { currentBudget: 'balanced', budgetReason: reason };
+    if (reason === 'persistent_stall' && current === 'balanced') return { currentBudget: 'powerful', budgetReason: reason };
+    return { currentBudget: current, budgetReason: reason };
   }
 
   private truncate(text: string, limit: number): string {

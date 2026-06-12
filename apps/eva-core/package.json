@@ -7,6 +7,7 @@
     "start": "node dist/main",
     "start:dev": "nest start --watch",
     "lint": "eslint \"{src,test}/**/*.ts\" --fix",
+    "eval:agent": "ts-node scripts/agent-evals.ts",
     "test": "jest --passWithNoTests",
     "test:watch": "jest --watch",
     "test:e2e": "jest --config ./test/jest-e2e.json --forceExit --passWithNoTests"

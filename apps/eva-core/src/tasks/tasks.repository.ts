@@ -57,7 +57,7 @@ export class TasksRepository {
       .select('*')
       .or(
         `and(status.eq.pending,created_at.lt.${pendingSince}),` +
-        `and(status.in.(planning,running),created_at.lt.${runningSince})`,
+        `and(status.in.(planning,running,waiting_for_input),created_at.lt.${runningSince})`,
       );
     if (error) {
       this.logger.error('tasks.findStuck', error);

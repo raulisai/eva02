@@ -10,6 +10,7 @@ export type EvaEventType =
   | 'task.failed'
   | 'task.cancelled'
   | 'task.waiting_approval'
+  | 'task.waiting_input'
   | 'task.say'      // immediate acknowledgment EVA speaks while working
   | 'task.log'      // transparent step-by-step action log
   | 'task.result'   // final answer text

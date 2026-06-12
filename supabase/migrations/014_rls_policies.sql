@@ -403,6 +403,31 @@ CREATE POLICY "fast_path_policies_update" ON fast_path_policies
   USING (org_id = ANY(public.user_org_ids()))
   WITH CHECK (org_id = ANY(public.user_org_ids()));
 
+-- ── Agent Intelligence ───────────────────────────────────
+DO $$
+BEGIN
+  IF to_regclass('public.agent_trajectories') IS NOT NULL THEN
+    EXECUTE 'ALTER TABLE agent_trajectories ENABLE ROW LEVEL SECURITY';
+
+    EXECUTE 'DROP POLICY IF EXISTS "agent_trajectories_select" ON agent_trajectories';
+    EXECUTE 'DROP POLICY IF EXISTS "agent_trajectories_insert" ON agent_trajectories';
+    EXECUTE 'DROP POLICY IF EXISTS "agent_trajectories_update" ON agent_trajectories';
+
+    EXECUTE 'CREATE POLICY "agent_trajectories_select" ON agent_trajectories
+      FOR SELECT USING (org_id = ANY(public.user_org_ids()))';
+
+    EXECUTE 'CREATE POLICY "agent_trajectories_insert" ON agent_trajectories
+      FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()))';
+
+    EXECUTE 'CREATE POLICY "agent_trajectories_update" ON agent_trajectories
+      FOR UPDATE
+      USING (org_id = ANY(public.user_org_ids()))
+      WITH CHECK (org_id = ANY(public.user_org_ids()))';
+
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON agent_trajectories TO authenticated';
+  END IF;
+END $$;
+
 -- ── Grants: allow authenticated role to access tables via Data API ─────────
 GRANT USAGE ON SCHEMA public TO authenticated, anon;
 

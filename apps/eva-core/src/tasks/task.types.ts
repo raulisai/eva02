@@ -3,6 +3,7 @@ export type TaskStatus =
   | 'planning'
   | 'running'
   | 'waiting_for_approval'
+  | 'waiting_for_input'
   | 'completed'
   | 'failed'
   | 'cancelled';
@@ -27,8 +28,9 @@ export interface Task {
 const TRANSITIONS: Partial<Record<TaskStatus, TaskStatus[]>> = {
   pending:              ['planning', 'cancelled'],
   planning:             ['running', 'failed', 'cancelled'],
-  running:              ['waiting_for_approval', 'completed', 'failed', 'cancelled'],
+  running:              ['waiting_for_approval', 'waiting_for_input', 'completed', 'failed', 'cancelled'],
   waiting_for_approval: ['running', 'completed', 'failed', 'cancelled'],
+  waiting_for_input:    ['running', 'completed', 'failed', 'cancelled'],
   failed:               ['pending'],
   cancelled:            ['pending'],
   completed:            ['pending'],

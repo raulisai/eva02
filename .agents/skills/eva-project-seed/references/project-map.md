@@ -27,6 +27,7 @@ Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Tru
 
 - Root: `npm run build`, `npm test`, `npm run test:e2e`, `npm run lint`.
 - Core: `cd apps/eva-core && npm test`; e2e `npm run test:e2e`; real RLS add `RLS_TEST=true npm run test:e2e`; dev `npm run start:dev`.
+- Core agent evals: `cd apps/eva-core && npm run eval:agent` runs deterministic golden tasks from `evals/golden-tasks.json`.
 - Dashboard: `cd apps/eva-dashboard && npm run dev`; test `npm test`; lint `npm run lint`; build `npm run build`.
 - Infra: `docker compose up -d redis`; only run migrations/deploy/destructive actions with approval.
 
@@ -50,6 +51,7 @@ Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Tru
 - `CommunicationModule`: accounts/conversations/messages/notifications/Telegram webhook; records Telegram final outbound messages with `task_id` and infers short praise/correction as agent feedback for the latest outbound task in that conversation.
 - `IntegrationsModule`: org integrations, MCP connections, credential/model/channel tests.
 - `AgentModule`: agent loop/runner, skill library, sandbox, media, research, Gmail/Calendar/Drive, soul, schedule, behavior patterns.
+- Agent intelligence telemetry: `AgentTrajectoryService` persists `agent_trajectories` checkpoints/finals; `GET /agent/metrics` reads org-scoped metrics views.
 - `ApprovalsModule`: approval request/resolve/validate.
 - `WearFastPathModule`: ephemeral watch tokens, request path, policy.
 - `JobsModule`: scheduled jobs + scheduler.
@@ -63,8 +65,8 @@ Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Tru
 
 ## Task/Event Model
 
-- Task statuses: `pending`, `planning`, `running`, `waiting_for_approval`, `completed`, `failed`, `cancelled`.
-- Transitions: `pending -> planning|cancelled`; `planning -> running|failed|cancelled`; `running -> waiting_for_approval|completed|failed|cancelled`; `waiting_for_approval -> running|completed|failed|cancelled`; terminal statuses can reset to `pending`.
+- Task statuses: `pending`, `planning`, `running`, `waiting_for_approval`, `waiting_for_input`, `completed`, `failed`, `cancelled`.
+- Transitions: `pending -> planning|cancelled`; `planning -> running|failed|cancelled`; `running -> waiting_for_approval|waiting_for_input|completed|failed|cancelled`; `waiting_for_approval|waiting_for_input -> running|completed|failed|cancelled`; terminal statuses can reset to `pending`.
 - `TasksRepository` is service-role Supabase and must filter by `org_id`; watch `findStuck(...)`, currently cross-org by age/status and should be handled carefully.
 - `EventBusService.publish` writes Redis stream and persists `task_events` when `taskId` exists.
 - Event types include task lifecycle/log/media/form/setup, approvals, dev tasks, browser screenshots, communication, `agent.feedback.inferred`, wear fast path/tokens.
@@ -73,7 +75,7 @@ Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Tru
 
 - Public: `GET /health`, `POST /communication/webhooks/telegram/:orgId`.
 - Tasks: `POST /tasks`, `GET /tasks/:id`, `PATCH /tasks/:id/status`.
-- Agent learning: `POST /agent/feedback` records explicit user reaction/rating for a task and reweights skill stats/graph selections.
+- Agent learning/metrics: `POST /agent/feedback` records explicit user reaction/rating for a task and reweights skill stats/graph selections; `GET /agent/metrics` returns trajectory/tool/goal/defense/skill/efficiency metrics for `req.user.orgId`.
 - Approvals: `POST /approvals/request`, `POST /approvals/:id/approve|reject|validate`.
 - Jobs: `GET/POST /jobs`, `GET /jobs/:id`, `POST /jobs/:id/pause|resume`, `DELETE /jobs/:id`.
 - Memory: `POST /memories`, `POST /memories/search`, `POST /memories/recall`, `GET /memories/:id`.
@@ -86,12 +88,12 @@ Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Tru
 
 ## Supabase Schema Groups
 
-Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_events`, `005_memories`, `006_intent_routes`, `007_communication`, `008_skills`, `009_browser`, `010_dev_manager`, `011_wear_fast_path`, `012_nodes_devices`, `013_approvals`, `014_rls_policies`, `015_wear_ui`, `016_integrations_soul_artifacts`, `017_credentials_skill_seed`, `018_tasks_schema_align`, `019_fix_missing_rls_and_grants`, `020_soul_v2`, `021_schedule_places_patterns`, `022_scheduled_jobs`, `023_token_logs`, `024_fix_billing_stats_rpc`, `025_add_task_id_to_token_logs`, `026_fix_task_events_event_nullable`, `027_skill_learning_graph`.
+Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_events`, `005_memories`, `006_intent_routes`, `007_communication`, `008_skills`, `009_browser`, `010_dev_manager`, `011_wear_fast_path`, `012_nodes_devices`, `013_approvals`, `014_rls_policies`, `015_wear_ui`, `016_integrations_soul_artifacts`, `017_credentials_skill_seed`, `018_tasks_schema_align`, `019_fix_missing_rls_and_grants`, `020_soul_v2`, `021_schedule_places_patterns`, `022_scheduled_jobs`, `023_token_logs`, `024_fix_billing_stats_rpc`, `025_add_task_id_to_token_logs`, `026_fix_task_events_event_nullable`, `027_skill_learning_graph`, `028_agent_intelligence_metrics`.
 
 - Identity/org: `organizations`, `users`.
 - Tasks/events: `tasks`, `task_events`; `014` references `task_steps` but no `CREATE TABLE` was found in current scan.
 - Memory/soul: `memories`, `memory_embeddings`, `agent_souls`; RPC `match_memories`.
-- Routing/planning/tools: `intent_routes`, `skills`, `skill_versions`, `tools`, `tool_calls`, `skill_usage_stats`, `skill_graph_edges`, `skill_selection_events`.
+- Routing/planning/tools/agent intelligence: `intent_routes`, `skills`, `skill_versions`, `tools`, `tool_calls`, `skill_usage_stats`, `skill_graph_edges`, `skill_selection_events`, `agent_trajectories`; views `agent_tool_success_metrics`, `agent_goal_success_metrics`, `agent_defense_metrics`, `agent_skill_funnel_metrics`, `agent_task_efficiency_metrics`.
 - Browser: `browser_profiles`, `browser_sessions`, `browser_screenshots`, `browser_action_preparations`.
 - Dev manager: `projects`, `dev_tasks`, `claude_code_sessions`, `build_runs`, `test_runs`, `code_reviews`, `roadmap_items`.
 - Wear/devices: `wear_sessions`, `wear_tokens`, `wear_fast_path_logs`, `fast_path_policies`, `wear_capabilities`, `wear_directives`, `wear_form_responses`, `wear_sensor_consents`, `nodes`, `node_capabilities`, `devices`.

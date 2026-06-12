@@ -13,7 +13,9 @@ import { TasksModule } from '../tasks/tasks.module';
 import { ToolRouterModule } from '../tool-router/tool-router.module';
 import { AgentLoopService } from './agent-loop.service';
 import { AgentFeedbackController } from './agent-feedback.controller';
+import { AgentMetricsController } from './agent-metrics.controller';
 import { AgentRunnerService } from './agent-runner.service';
+import { AgentTrajectoryService } from './agent-trajectory.service';
 import { ConversationDigesterService } from './conversation-digester.service';
 import { GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
@@ -38,6 +40,7 @@ import { CommunicationModule } from '../communication/communication.module';
   providers: [
     AgentLoopService,
     AgentRunnerService,
+    AgentTrajectoryService,
     MediaService,
     ResearchToolsService,
     SandboxService,
@@ -52,7 +55,7 @@ import { CommunicationModule } from '../communication/communication.module';
     MemoryRecallService,
     ConversationDigesterService,
   ],
-  controllers: [AgentFeedbackController],
+  controllers: [AgentFeedbackController, AgentMetricsController],
   exports: [
     AgentRunnerService,
     MediaService,

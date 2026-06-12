@@ -71,12 +71,13 @@ export class TasksService {
       });
     }
 
-    const eventTypeMap: Partial<Record<TaskStatus, 'task.started' | 'task.completed' | 'task.failed' | 'task.cancelled' | 'task.waiting_approval'>> = {
+    const eventTypeMap: Partial<Record<TaskStatus, 'task.started' | 'task.completed' | 'task.failed' | 'task.cancelled' | 'task.waiting_approval' | 'task.waiting_input'>> = {
       running:   'task.started',
       completed: 'task.completed',
       failed:    'task.failed',
       cancelled: 'task.cancelled',
       waiting_for_approval: 'task.waiting_approval',
+      waiting_for_input: 'task.waiting_input',
     };
 
     const eventType = eventTypeMap[nextStatus];
