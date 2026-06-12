@@ -2,6 +2,18 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 09:26Z
+C: whatsapp: added vision OCR analysis fallback to read/reason from screenshots, updated input/send button selectors, and support suffix verbs/implicit drafting; files=apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/integrations/whatsapp-web.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts; tests=npm test -- src/agent/__tests__/agent-runner.service.spec.ts src/integrations/__tests__/whatsapp-web.service.spec.ts
+P: pending/improve -> add actual E2E testing of the vision OCR fallback on real screenshots
+
+### 2026-06-12 09:10Z
+C: whatsapp: added robust contact cleaning and fuzzy matching scoring logic to ignore headers/section sections; files=apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/integrations/whatsapp-web.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts,apps/eva-core/src/integrations/__tests__/whatsapp-web.service.spec.ts; tests=npm test -- src/agent/__tests__/agent-runner.service.spec.ts src/integrations/__tests__/whatsapp-web.service.spec.ts
+P: pending/improve -> add actual E2E testing of the fuzzy matching algorithm on real WhatsApp Web layouts
+
+### 2026-06-12 09:02Z
+C: agent: active tool session tracking and compressing conversation history memory; files=apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts; tests=npm test -- src/agent/__tests__/agent-runner.service.spec.ts
+P: pending/improve -> reconcile task metadata vs db-loaded task history across other channels
+
 ### 2026-06-12 08:47Z
 C: whatsapp: fixed active chat header targeting to prevent matching sidebar header, robust innerText name fallback, and extracted visible search results list on selection failure; files=apps/eva-core/src/integrations/whatsapp-web.service.ts,apps/eva-core/src/integrations/__tests__/whatsapp-web.service.spec.ts; tests=npm test -- src/integrations/__tests__/whatsapp-web.service.spec.ts
 P: pending/improve -> add actual integration/E2E test suite using true chrome profiles for WhatsApp Web flow

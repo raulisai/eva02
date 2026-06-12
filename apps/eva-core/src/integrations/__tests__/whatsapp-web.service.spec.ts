@@ -266,4 +266,76 @@ describe('WhatsAppWebService', () => {
       expect(result.text).toContain('Michael Sec, Luis');
     });
   });
+
+  describe('browser-side contact matching scoring', () => {
+    // Exact copy of browser-evaluated getMatchScore logic for testing
+    function getMatchScore(chatName: string | null | undefined, query: string | null | undefined): number {
+      if (!chatName || !query) return 0;
+      const clean = (s: string) => s.normalize("NFD")
+                                     .replace(/[\u0300-\u036f]/g, "")
+                                     .toLowerCase()
+                                     .replace(/[^a-z0-9\s]/gi, " ")
+                                     .replace(/\s+/g, " ")
+                                     .trim();
+      const c = clean(chatName);
+      const q = clean(query);
+      if (!c || !q) return 0;
+      if (c === q) return 1.0;
+      if (c.includes(q)) {
+        return 0.8 + (q.length / c.length) * 0.15;
+      }
+      const cWords = c.split(/\s+/);
+      const qWords = q.split(/\s+/);
+      const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.includes(qw)));
+      if (allMatched) {
+        return 0.7 + (qWords.length / cWords.length) * 0.1;
+      }
+      const initials = cWords.map((w: string) => w[0]).join('');
+      if (initials.startsWith(q)) return 0.6;
+      
+      const s1 = c.replace(/\s+/g, '');
+      const s2 = q.replace(/\s+/g, '');
+      if (s1 === s2) return 0.95;
+      if (s1.length < 2 || s2.length < 2) return 0;
+      
+      const getBigrams = (s: string) => {
+        const bigrams = new Set<string>();
+        for (let i = 0; i < s.length - 1; i++) {
+          bigrams.add(s.substring(i, i + 2));
+        }
+        return bigrams;
+      };
+      const bigrams1 = getBigrams(s1);
+      const bigrams2 = getBigrams(s2);
+      let intersection = 0;
+      for (const b of bigrams1) {
+        if (bigrams2.has(b)) intersection++;
+      }
+      const dice = (2 * intersection) / (bigrams1.size + bigrams2.size);
+      return dice > 0.45 ? dice * 0.7 : 0;
+    }
+
+    it('matches exact case-insensitive names and ignores accents/emojis', () => {
+      expect(getMatchScore('Jair Monr 🚀', 'jair monr')).toBe(1.0);
+      expect(getMatchScore('Sofía', 'sofia')).toBe(1.0);
+    });
+
+    it('assigns high score for substring matches', () => {
+      const score = getMatchScore('Jair Monr', 'jair mon');
+      expect(score).toBeGreaterThanOrEqual(0.8);
+      expect(score).toBeLessThan(1.0);
+    });
+
+    it('assigns moderate score for fuzzy matching close names (Dice)', () => {
+      const score = getMatchScore('Jair Monr', 'jayr monr');
+      expect(score).toBeGreaterThanOrEqual(0.35); // Above threshold
+    });
+
+    it('returns 0 or low score for completely unrelated names', () => {
+      expect(getMatchScore('Contacts', 'jair monr')).toBe(0);
+      expect(getMatchScore('Messages', 'jair monr')).toBe(0);
+      expect(getMatchScore('Ana', 'jair monr')).toBeLessThan(0.35);
+    });
+  });
 });
+

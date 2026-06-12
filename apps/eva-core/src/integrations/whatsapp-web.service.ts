@@ -456,9 +456,12 @@ export class WhatsAppWebService {
 
     // Now type the message in the input field
     const inputSelectors = [
+      '[data-testid="conversation-compose-box-input"]',
       '#main footer div[contenteditable="true"]',
       '#main footer div[contenteditable="true"][data-tab="10"]',
       '#main footer div.lexical-rich-text-input div[contenteditable="true"]',
+      'div.lexical-rich-text-input div[contenteditable="true"]',
+      '#main footer div.lexical-rich-text-input p',
       '#main div[contenteditable="true"][data-tab="10"]',
       'div[contenteditable="true"][data-tab="10"]',
       '#main footer input[type="text"]',
@@ -503,6 +506,12 @@ export class WhatsAppWebService {
 
     // Click the send button
     const sendButtonSelectors = [
+      'button[data-tab="11"]',
+      'span[data-testid="wds-ic-send-filled"]',
+      'span[data-icon="wds-ic-send-filled"]',
+      'button:has(span[data-icon="wds-ic-send-filled"])',
+      'button:has(span[data-testid="wds-ic-send-filled"])',
+      '#main footer span[data-icon="wds-ic-send-filled"]',
       '#main footer button span[data-testid="send"]',
       '#main footer button[data-testid="compose-btn-send"]',
       '#main footer button:has(span[data-icon="send"])',
@@ -849,19 +858,50 @@ export class WhatsAppWebService {
       sessionId,
       orgId,
       (contactNameLower) => {
-        function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
-          if (!chatName || !query) return false;
-          const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+        function getMatchScore(chatName: string | null | undefined, query: string | null | undefined): number {
+          if (!chatName || !query) return 0;
+          const clean = (s: string) => s.normalize("NFD")
+                                         .replace(/[\u0300-\u036f]/g, "")
+                                         .toLowerCase()
+                                         .replace(/[^a-z0-9\s]/gi, " ")
+                                         .replace(/\s+/g, " ")
+                                         .trim();
           const c = clean(chatName);
           const q = clean(query);
-          if (c.includes(q)) return true;
+          if (!c || !q) return 0;
+          if (c === q) return 1.0;
+          if (c.includes(q)) {
+            return 0.8 + (q.length / c.length) * 0.15;
+          }
           const cWords = c.split(/\s+/);
           const qWords = q.split(/\s+/);
-          const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.endsWith(qw) || cw.includes(qw)));
-          if (allMatched) return true;
+          const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.includes(qw)));
+          if (allMatched) {
+            return 0.7 + (qWords.length / cWords.length) * 0.1;
+          }
           const initials = cWords.map((w: string) => w[0]).join('');
-          if (initials.startsWith(q)) return true;
-          return false;
+          if (initials.startsWith(q)) return 0.6;
+          
+          const s1 = c.replace(/\s+/g, '');
+          const s2 = q.replace(/\s+/g, '');
+          if (s1 === s2) return 0.95;
+          if (s1.length < 2 || s2.length < 2) return 0;
+          
+          const getBigrams = (s: string) => {
+            const bigrams = new Set<string>();
+            for (let i = 0; i < s.length - 1; i++) {
+              bigrams.add(s.substring(i, i + 2));
+            }
+            return bigrams;
+          };
+          const bigrams1 = getBigrams(s1);
+          const bigrams2 = getBigrams(s2);
+          let intersection = 0;
+          for (const b of bigrams1) {
+            if (bigrams2.has(b)) intersection++;
+          }
+          const dice = (2 * intersection) / (bigrams1.size + bigrams2.size);
+          return dice > 0.45 ? dice * 0.7 : 0;
         }
 
         const header = document.querySelector('#main header, [data-testid="conversation-panel"] header, [role="region"] header');
@@ -875,7 +915,7 @@ export class WhatsAppWebService {
             const firstLine = (htmlHeader.innerText || '').split('\n')[0];
             headerText = firstLine ? firstLine.trim() : '';
           }
-          if (isMatch(headerText, contactNameLower)) {
+          if (getMatchScore(headerText, contactNameLower) >= 0.35) {
             return { opened: true, actualContactName: headerText };
           }
           return { opened: false, actualContactName: headerText };
@@ -981,32 +1021,70 @@ export class WhatsAppWebService {
 
     // 2. Try to click on the contact if it's already visible in the list using native Playwright click
     const rowSelector = await this.browser.evaluate<string | null, string>(sessionId, orgId, (contactNameLower) => {
-      function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
-        if (!chatName || !query) return false;
-        const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+      function getMatchScore(chatName: string | null | undefined, query: string | null | undefined): number {
+        if (!chatName || !query) return 0;
+        const clean = (s: string) => s.normalize("NFD")
+                                       .replace(/[\u0300-\u036f]/g, "")
+                                       .toLowerCase()
+                                       .replace(/[^a-z0-9\s]/gi, " ")
+                                       .replace(/\s+/g, " ")
+                                       .trim();
         const c = clean(chatName);
         const q = clean(query);
-        if (c.includes(q)) return true;
+        if (!c || !q) return 0;
+        if (c === q) return 1.0;
+        if (c.includes(q)) {
+          return 0.8 + (q.length / c.length) * 0.15;
+        }
         const cWords = c.split(/\s+/);
         const qWords = q.split(/\s+/);
-        const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.endsWith(qw) || cw.includes(qw)));
-        if (allMatched) return true;
+        const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.includes(qw)));
+        if (allMatched) {
+          return 0.7 + (qWords.length / cWords.length) * 0.1;
+        }
         const initials = cWords.map((w: string) => w[0]).join('');
-        if (initials.startsWith(q)) return true;
-        return false;
+        if (initials.startsWith(q)) return 0.6;
+        
+        const s1 = c.replace(/\s+/g, '');
+        const s2 = q.replace(/\s+/g, '');
+        if (s1 === s2) return 0.95;
+        if (s1.length < 2 || s2.length < 2) return 0;
+        
+        const getBigrams = (s: string) => {
+          const bigrams = new Set<string>();
+          for (let i = 0; i < s.length - 1; i++) {
+            bigrams.add(s.substring(i, i + 2));
+          }
+          return bigrams;
+        };
+        const bigrams1 = getBigrams(s1);
+        const bigrams2 = getBigrams(s2);
+        let intersection = 0;
+        for (const b of bigrams1) {
+          if (bigrams2.has(b)) intersection++;
+        }
+        const dice = (2 * intersection) / (bigrams1.size + bigrams2.size);
+        return dice > 0.45 ? dice * 0.7 : 0;
       }
 
       const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
       const elements = Array.from(pane.querySelectorAll('[role="row"], [data-testid^="list-item-"]'));
+      let bestEl = null;
+      let maxScore = 0;
       for (const el of elements) {
         const titleEl = el.querySelector('[data-testid="cell-frame-title"] span[dir="auto"], [data-testid="cell-frame-title"] [title], [class*="title"] [title]');
         const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.textContent || '') : el.textContent || '';
-        if (isMatch(chatName, contactNameLower)) {
-          const clickable = el.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || el;
-          const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-          clickable.setAttribute('data-eva-click-target', clickId);
-          return `[data-eva-click-target="${clickId}"]`;
+        const score = getMatchScore(chatName, contactNameLower);
+        if (score > maxScore) {
+          maxScore = score;
+          bestEl = el;
         }
+      }
+      if (maxScore >= 0.35 && bestEl) {
+        const clickable = bestEl.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || bestEl;
+        const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        clickable.setAttribute('data-eva-click-target', clickId);
+        return `[data-eva-click-target="${clickId}"]`;
       }
       return null;
     }, contactLower);
@@ -1072,40 +1150,69 @@ export class WhatsAppWebService {
 
       // Click the matching search result natively
       const searchRowSelector = await this.browser.evaluate<string | null, string>(sessionId, orgId, (contactNameLower) => {
-        function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
-          if (!chatName || !query) return false;
-          const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+        function getMatchScore(chatName: string | null | undefined, query: string | null | undefined): number {
+          if (!chatName || !query) return 0;
+          const clean = (s: string) => s.normalize("NFD")
+                                         .replace(/[\u0300-\u036f]/g, "")
+                                         .toLowerCase()
+                                         .replace(/[^a-z0-9\s]/gi, " ")
+                                         .replace(/\s+/g, " ")
+                                         .trim();
           const c = clean(chatName);
           const q = clean(query);
-          if (c.includes(q)) return true;
+          if (!c || !q) return 0;
+          if (c === q) return 1.0;
+          if (c.includes(q)) {
+            return 0.8 + (q.length / c.length) * 0.15;
+          }
           const cWords = c.split(/\s+/);
           const qWords = q.split(/\s+/);
-          const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.endsWith(qw) || cw.includes(qw)));
-          if (allMatched) return true;
+          const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.includes(qw)));
+          if (allMatched) {
+            return 0.7 + (qWords.length / cWords.length) * 0.1;
+          }
           const initials = cWords.map((w: string) => w[0]).join('');
-          if (initials.startsWith(q)) return true;
-          return false;
+          if (initials.startsWith(q)) return 0.6;
+          
+          const s1 = c.replace(/\s+/g, '');
+          const s2 = q.replace(/\s+/g, '');
+          if (s1 === s2) return 0.95;
+          if (s1.length < 2 || s2.length < 2) return 0;
+          
+          const getBigrams = (s: string) => {
+            const bigrams = new Set<string>();
+            for (let i = 0; i < s.length - 1; i++) {
+              bigrams.add(s.substring(i, i + 2));
+            }
+            return bigrams;
+          };
+          const bigrams1 = getBigrams(s1);
+          const bigrams2 = getBigrams(s2);
+          let intersection = 0;
+          for (const b of bigrams1) {
+            if (bigrams2.has(b)) intersection++;
+          }
+          const dice = (2 * intersection) / (bigrams1.size + bigrams2.size);
+          return dice > 0.45 ? dice * 0.7 : 0;
         }
 
         const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
         const elements = Array.from(pane.querySelectorAll('[role="row"], [data-testid^="list-item-"]'));
         
-        // Try matching first
+        let bestEl = null;
+        let maxScore = 0;
         for (const el of elements) {
           const titleEl = el.querySelector('[data-testid="cell-frame-title"] span[dir="auto"], [data-testid="cell-frame-title"] [title], [class*="title"] [title]');
           const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.textContent || '') : el.textContent || '';
-          if (isMatch(chatName, contactNameLower)) {
-            const clickable = el.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || el;
-            const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-            clickable.setAttribute('data-eva-click-target', clickId);
-            return `[data-eva-click-target="${clickId}"]`;
+          const score = getMatchScore(chatName, contactNameLower);
+          if (score > maxScore) {
+            maxScore = score;
+            bestEl = el;
           }
         }
         
-        // Fallback to first search result if elements exist
-        if (elements.length > 0) {
-          const el = elements[0];
-          const clickable = el.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || el;
+        if (maxScore >= 0.35 && bestEl) {
+          const clickable = bestEl.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || bestEl;
           const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
           clickable.setAttribute('data-eva-click-target', clickId);
           return `[data-eva-click-target="${clickId}"]`;
@@ -1162,38 +1269,69 @@ export class WhatsAppWebService {
         await this.browser.wait(sessionId, orgId, 2000);
 
         const secondAttemptSelector = await this.browser.evaluate<string | null, string>(sessionId, orgId, (contactNameLower) => {
-          function isMatch(chatName: string | null | undefined, query: string | null | undefined): boolean {
-            if (!chatName || !query) return false;
-            const clean = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+          function getMatchScore(chatName: string | null | undefined, query: string | null | undefined): number {
+            if (!chatName || !query) return 0;
+            const clean = (s: string) => s.normalize("NFD")
+                                           .replace(/[\u0300-\u036f]/g, "")
+                                           .toLowerCase()
+                                           .replace(/[^a-z0-9\s]/gi, " ")
+                                           .replace(/\s+/g, " ")
+                                           .trim();
             const c = clean(chatName);
             const q = clean(query);
-            if (c.includes(q)) return true;
+            if (!c || !q) return 0;
+            if (c === q) return 1.0;
+            if (c.includes(q)) {
+              return 0.8 + (q.length / c.length) * 0.15;
+            }
             const cWords = c.split(/\s+/);
             const qWords = q.split(/\s+/);
-            const allMatched = qWords.every(qw => cWords.some(cw => cw.startsWith(qw)));
-            if (allMatched) return true;
-            const initials = cWords.map(w => w[0]).join('');
-            if (initials.startsWith(q)) return true;
-            return false;
+            const allMatched = qWords.every((qw: string) => cWords.some((cw: string) => cw.startsWith(qw) || cw.includes(qw)));
+            if (allMatched) {
+              return 0.7 + (qWords.length / cWords.length) * 0.1;
+            }
+            const initials = cWords.map((w: string) => w[0]).join('');
+            if (initials.startsWith(q)) return 0.6;
+            
+            const s1 = c.replace(/\s+/g, '');
+            const s2 = q.replace(/\s+/g, '');
+            if (s1 === s2) return 0.95;
+            if (s1.length < 2 || s2.length < 2) return 0;
+            
+            const getBigrams = (s: string) => {
+              const bigrams = new Set<string>();
+              for (let i = 0; i < s.length - 1; i++) {
+                bigrams.add(s.substring(i, i + 2));
+              }
+              return bigrams;
+            };
+            const bigrams1 = getBigrams(s1);
+            const bigrams2 = getBigrams(s2);
+            let intersection = 0;
+            for (const b of bigrams1) {
+              if (bigrams2.has(b)) intersection++;
+            }
+            const dice = (2 * intersection) / (bigrams1.size + bigrams2.size);
+            return dice > 0.45 ? dice * 0.7 : 0;
           }
 
           const pane = document.querySelector('#pane-side') || document.querySelector('[aria-label="Chat list"]') || document.querySelector('[aria-label="Lista de chats"]') || document.body;
           const elements = Array.from(pane.querySelectorAll('[role="row"], [data-testid^="list-item-"]'));
           
+          let bestEl = null;
+          let maxScore = 0;
           for (const el of elements) {
             const titleEl = el.querySelector('[data-testid="cell-frame-title"] span[dir="auto"], [data-testid="cell-frame-title"] [title], [class*="title"] [title]');
             const chatName = titleEl ? (titleEl.getAttribute('title') || titleEl.textContent || '') : el.textContent || '';
-            if (isMatch(chatName, contactNameLower)) {
-              const clickable = el.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || el;
-              const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-              clickable.setAttribute('data-eva-click-target', clickId);
-              return `[data-eva-click-target="${clickId}"]`;
+            const score = getMatchScore(chatName, contactNameLower);
+            if (score > maxScore) {
+              maxScore = score;
+              bestEl = el;
             }
           }
 
-          if (elements.length > 0) {
-            const el = elements[0];
-            const clickable = el.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || el;
+          if (maxScore >= 0.35 && bestEl) {
+            const clickable = bestEl.querySelector('[role="gridcell"], [data-testid="cell-frame-container"], [role="button"]') || bestEl;
             const clickId = `click-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
             clickable.setAttribute('data-eva-click-target', clickId);
             return `[data-eva-click-target="${clickId}"]`;

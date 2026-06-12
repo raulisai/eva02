@@ -8,6 +8,7 @@ import { IntentRouterService } from '../../intent-router/intent-router.service';
 import { ModelRouterService } from '../../model-router/model-router.service';
 import { ApprovalsService } from '../../approvals/approvals.service';
 import { TasksService } from '../../tasks/tasks.service';
+import { DatabaseService } from '../../database/database.service';
 import { ToolRouterService } from '../../tool-router/tool-router.service';
 import { AgentLoopService } from '../agent-loop.service';
 import { AgentRunnerService } from '../agent-runner.service';
@@ -99,11 +100,24 @@ describe('AgentRunnerService', () => {
   let agentLoop: jest.Mocked<AgentLoopService>;
   let forge: jest.Mocked<ScriptForgeService>;
   let soul: jest.Mocked<SoulContextService>;
+  let db: any;
 
   beforeEach(async () => {
     module = await Test.createTestingModule({
       providers: [
         AgentRunnerService,
+        {
+          provide: DatabaseService,
+          useValue: {
+            admin: {
+              from: jest.fn().mockReturnThis(),
+              select: jest.fn().mockReturnThis(),
+              eq: jest.fn().mockReturnThis(),
+              order: jest.fn().mockReturnThis(),
+              limit: jest.fn().mockResolvedValue({ data: [], error: null }),
+            },
+          },
+        },
         {
           provide: EventBusService,
           useValue: { publish: jest.fn().mockResolvedValue('0-1'), on: jest.fn() },
@@ -468,6 +482,7 @@ describe('AgentRunnerService', () => {
     research = module.get(ResearchToolsService);
     forge = module.get(ScriptForgeService);
     soul = module.get(SoulContextService);
+    db = module.get(DatabaseService);
   });
 
   function publishedTypes() {
@@ -1579,6 +1594,71 @@ describe('AgentRunnerService', () => {
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval', expect.anything());
   });
 
+  it('correctly cleans WhatsApp contact names and strips trailing instructions', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'muestrame el chat de jair Monr en whatsapp y dime el ultimo mensaje que se envio' }));
+    const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+
+    await service.run(ORG, TASK);
+
+    expect(whatsapp.fetchContactMessages).toHaveBeenCalledWith(ORG, 'jair Monr', TASK);
+  });
+
+  it('correctly extracts and cleans contact from message reply drafts with trailing actions', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      created_by: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      description: 'responde por watsap a jair Monr y dile que llegue bien',
+    }));
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+
+    await service.run(ORG, TASK);
+
+    expect(approvals.requestForPreparedAction).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({
+        contact: 'jair Monr',
+        text: 'llegue bien',
+      }),
+    }));
+  });
+
+  it('correctly extracts drafts with suffix verbs and diciendo conjunctions', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      created_by: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      description: 'mandale mensaje por whatsap a joce diciendo hola fea',
+    }));
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+
+    await service.run(ORG, TASK);
+
+    expect(approvals.requestForPreparedAction).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({
+        contact: 'joce',
+        text: 'hola fea',
+      }),
+    }));
+  });
+
+  it('correctly resolves implicit drafting using active session contact fallback', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      created_by: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      description: 'mandale un hola',
+    }));
+    (service as any).activeToolSessions.set(`${ORG}:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb`, {
+      tool: 'whatsapp',
+      details: { contact: 'Jair Monr' },
+      updatedAt: Date.now(),
+    });
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+
+    await service.run(ORG, TASK);
+
+    expect(approvals.requestForPreparedAction).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({
+        contact: 'Jair Monr',
+        text: 'hola',
+      }),
+    }));
+  });
+
   // ── Gmail write operations ────────────────────────────────────────────────
 
   it('rejects bulk email operations immediately without creating approvals', async () => {
@@ -1833,5 +1913,71 @@ describe('AgentRunnerService', () => {
     expect(whatsapp.sendMessage).toHaveBeenCalledWith(ORG, 'Michael Sec', 'Hola', TASK);
     const result = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.result');
     expect(result?.payload).toEqual(expect.objectContaining({ text: expect.stringContaining('Mensaje enviado con éxito') }));
+  });
+
+  describe('Compressing Memory & Active Tool routing context', () => {
+    it('queries DB for history and compresses turns based on distance from newest', async () => {
+      const mockTasks = Array.from({ length: 35 }, (_, i) => ({
+        id: `task-${i}`,
+        title: `User prompt ${i}`,
+        description: `User description ${i}`,
+        result: { text: `Assistant reply ${i}` },
+        created_at: new Date(Date.now() - i * 60000).toISOString(),
+      }));
+
+      db.admin.limit.mockResolvedValueOnce({ data: mockTasks, error: null });
+
+      const conversationContext = await (service as any).getConversationContext(makeTask({ id: 'current-task-id' }));
+
+      expect(conversationContext.length).toBe(30);
+
+      expect(conversationContext[29].text).toBe('Assistant reply 0');
+      expect(conversationContext[29].text.includes('[resumido]')).toBe(false);
+
+      const longMockTasks = Array.from({ length: 20 }, (_, i) => ({
+        id: `task-${i}`,
+        title: `User prompt ${i}`,
+        description: 'a'.repeat(1500),
+        result: { text: 'b'.repeat(1500) },
+        created_at: new Date(Date.now() - i * 60000).toISOString(),
+      }));
+      db.admin.limit.mockResolvedValueOnce({ data: longMockTasks, error: null });
+
+      const compressedContext = await (service as any).getConversationContext(makeTask({ id: 'current-task-id' }));
+
+      expect(compressedContext[compressedContext.length - 1].text.length).toBe(1200);
+
+      expect(compressedContext[19].text.length).toBe(264);
+      expect(compressedContext[19].text.endsWith('... [resumido]')).toBe(true);
+
+      expect(compressedContext[9].text.length).toBe(96);
+      expect(compressedContext[9].text.endsWith('... [comprimido]')).toBe(true);
+    });
+
+    it('routes WhatsApp follow-ups correctly when in WhatsApp context', async () => {
+      (service as any).updateActiveToolSession(ORG, 'user-1', 'whatsapp', { contact: 'Jair Monr' });
+
+      tasks.getTask.mockResolvedValueOnce(makeTask({ description: 'si abre ese' }));
+      db.admin.limit.mockResolvedValueOnce({ data: [], error: null });
+      intentRouter.classify.mockResolvedValueOnce({ intent: 'fast_path', confidence: 0.9, classifier: 'rules', reasons: [] });
+
+      const mockSession = {
+        session_id: 'wa-session-1',
+        state: 'logged_in',
+        current_url: 'https://web.whatsapp.com/',
+        screenshot: { image_base64: 'base64' },
+      };
+      (service as any).whatsapp.startSession = jest.fn().mockResolvedValue(mockSession);
+      (service as any).whatsapp.fetchContactMessages = jest.fn().mockResolvedValue({
+        ok: true,
+        session: mockSession,
+        contact: 'Jair Monr',
+        text: 'Hola Jair',
+      });
+
+      await service.run(ORG, TASK);
+
+      expect((service as any).whatsapp.fetchContactMessages).toHaveBeenCalledWith(ORG, 'Jair Monr', TASK);
+    });
   });
 });

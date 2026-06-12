@@ -9,6 +9,7 @@ import { ModelRouterService } from '../model-router/model-router.service';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { ToolRouterService } from '../tool-router/tool-router.service';
 import { TasksService } from '../tasks/tasks.service';
+import { DatabaseService } from '../database/database.service';
 import { Task, TaskCancelledError } from '../tasks/task.types';
 import { ConversationDigesterService } from './conversation-digester.service';
 import { DriveFetchResult, GoogleDriveService } from './google-drive.service';
@@ -141,7 +142,7 @@ const WHATSAPP_SIGNALS = /\b(whatsapp|whatsap|watsapp|watsap|whats app|guasap|gu
 const WHATSAPP_READ_SIGNALS = /\b([uú]ltim[oa]s?|mensajes?|chats?|revisa|revisar|consulta|consultar|leer|lee|qu[eé] tengo)\b/i;
 const WHATSAPP_UNREAD_SIGNALS = /\b(sin leer|no le[ií]dos?|unread)\b/i;
 const WHATSAPP_UNANSWERED_SIGNALS = /\b(sin responder|sin contestar|por responder|por contestar|pendientes? de (?:responder|contestar)|no (?:he|has|han|est[aá]n)?\s*(?:respondid[oa]s?|contestad[oa]s?))\b/i;
-const WHATSAPP_SEND_SIGNALS = /\b(responde|responder|contesta|contestar|env[ií]a|enviar|manda|mandar|escribe|escribir)\b/i;
+const WHATSAPP_SEND_SIGNALS = /\b(responde|responder|contesta|contestar|env[ií]a|enviar|manda|mandar|escribe|escribir|env[ií]ale|m[aá]ndale|escr[ií]bele|dile|decirle)\b/i;
 const WHATSAPP_SCREENSHOT_SIGNALS = /\b(captura(?:me)?|pantallazo|screenshot|screen\s*shot|scre+ns?h?o+t|scre+sh?o+t|screeshoot|svcreshoot|screenshoot|ss)\b/i;
 const CHAT_CONTEXT_SIGNALS = /\b(conversaciones?|chats?|mensajes?|whatsapp|whatsap|watsapp|watsap|guasap|wa\b)\b/i;
 
@@ -211,8 +212,11 @@ export class AgentRunnerService implements OnApplicationBootstrap {
   // Per-task cross-channel routing context: populated when user requests delivery to another channel.
   // Map key = taskId. Cleared after task completes or fails.
   private readonly crossChannelCtx = new Map<string, { channel: CommunicationChannel; userId: string }>();
+  private readonly activeToolSessions = new Map<string, { tool: string; details?: any; updatedAt: number }>();
+  private readonly TOOL_SESSION_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
   constructor(
+    private readonly db: DatabaseService,
     private readonly events: EventBusService,
     private readonly tasks: TasksService,
     private readonly intentRouter: IntentRouterService,
@@ -322,7 +326,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         return;
       }
     }
-    const conversationContext = this.getConversationContext(task);
+    const conversationContext = await this.getConversationContext(task);
 
     // Fetch soul, schedule, patterns, and memory recall in parallel — none blocks response
     const [soulContext, localScheduleBlock, gcalBlock, patternBlock, proactiveTriggers, recallResult] = await Promise.all([
@@ -411,6 +415,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         await this.tasks.transition(taskId, orgId, 'running');
         await this.say(orgId, taskId, 'Abro Uber Web solo para cotizar y te mando screenshot antes de cualquier acción.');
         await this.log(orgId, taskId, 'uber quote request — opening Uber Web profile (quote-only)', 'tools');
+        this.updateActiveToolSession(orgId, task.created_by, 'uber');
         await this.handleUberQuoteRequest(orgId, taskId, input, startedAt, conversationContext);
         return;
       }
@@ -418,7 +423,12 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       // ── WhatsApp Web fast-path — browser profile + QR handoff ─────────────
       // Runs before chat triage so short prompts like "abre watsap" never fall
       // into a generic model answer.
-      if (WHATSAPP_SIGNALS.test(input) || this.isImplicitWhatsAppScreenshotRequest(input, conversationContext)) {
+      const isWhatsAppContext = this.checkActiveToolContext(orgId, task.created_by, 'whatsapp');
+      if (
+        WHATSAPP_SIGNALS.test(input) ||
+        this.isImplicitWhatsAppScreenshotRequest(input, conversationContext) ||
+        (isWhatsAppContext && this.isWhatsAppFollowUp(input, conversationContext))
+      ) {
         await this.tasks.transition(taskId, orgId, 'planning');
         await this.tasks.transition(taskId, orgId, 'running');
         await this.say(orgId, taskId, 'Abro WhatsApp Web con tu perfil local. Si falta login, te paso el QR.');
@@ -448,9 +458,11 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         }
         if (this.isGmailWriteIntent(input)) {
           await this.say(orgId, taskId, 'Preparo la operación y te pido confirmación antes de ejecutarla 🛡️');
+          this.updateActiveToolSession(orgId, task.created_by, 'gmail');
           await this.handleGmailWriteIntent(orgId, taskId, task, input, startedAt);
         } else {
           await this.say(orgId, taskId, 'Preparo el cambio en tu agenda y te pido confirmación 🗓️');
+          this.updateActiveToolSession(orgId, task.created_by, 'calendar');
           await this.handleCalendarWriteIntent(orgId, taskId, task, input, startedAt);
         }
         return;
@@ -461,6 +473,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         await this.tasks.transition(taskId, orgId, 'planning');
         await this.tasks.transition(taskId, orgId, 'running');
         await this.log(orgId, taskId, `tier=chat (${tier.reason}) — direct model, cheap tier`, 'pipeline');
+        this.updateActiveToolSession(orgId, task.created_by, 'chat');
         if (this.isPersonalProfileQuestion(input)) {
           const handled = await this.answerPersonalProfileQuestion(orgId, taskId, input, startedAt);
           if (handled) return;
@@ -551,6 +564,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
       // Long + code/automation → EVA writes and sandboxes her own script
       if (tier.tier === 'long' && this.forge.isScriptTask(input)) {
+        this.updateActiveToolSession(orgId, task.created_by, 'script');
         const outcome = await this.forge.forge(orgId, taskId, contextualInput, (message, scope) => this.log(orgId, taskId, message, scope));
         const summary = [
           `Generé el script **${outcome.filename}** (${outcome.language}): ${outcome.description}`,
@@ -570,6 +584,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       // delegación a sub-agente) hasta resolver. Si el bucle no puede
       // (sin keys, sin decisiones válidas), cae al pipeline clásico.
       if (tier.tier === 'long') {
+        this.updateActiveToolSession(orgId, task.created_by, 'agent_loop');
         const handled = await this.runAgentLoop(orgId, taskId, input, conversationContext, startedAt, task.created_by, soulContext);
         if (handled) return;
         await this.log(orgId, taskId, 'agent-loop no resolvió — usando pipeline clásico', 'loop');
@@ -579,6 +594,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       // NOTE: always test raw `input`, never routingInput — routingInput
       // includes conversation history that may contain "correo" from prior turns.
       if (ack.hint === 'email' || EMAIL_SIGNALS.test(input)) {
+        this.updateActiveToolSession(orgId, task.created_by, 'gmail');
         await this.log(orgId, taskId, 'email request — querying Gmail API', 'tools');
 
         const searchQuery = this.extractEmailSearch(input);
@@ -618,6 +634,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
       // ── Calendar fast-path — use local schedule + GCal when configured ────
       if (ack.hint === 'calendar' || CALENDAR_SIGNALS_PERSONAL.test(input)) {
+        this.updateActiveToolSession(orgId, task.created_by, 'calendar');
         await this.log(orgId, taskId, 'calendar request — querying local schedule + Google Calendar', 'tools');
         const [localBlock, gcalBlock] = await Promise.all([
           this.schedule.formatUpcomingForSoul(orgId, 7).catch(() => null),
@@ -637,6 +654,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       // ── Drive fast-path — use Drive API when configured ───────────────────
       // NOTE: always test raw `input`, never routingInput — history contamination.
       if (ack.hint === 'drive' || DRIVE_SIGNALS.test(input)) {
+        this.updateActiveToolSession(orgId, task.created_by, 'drive');
         await this.log(orgId, taskId, 'drive request — querying Google Drive API', 'tools');
         const driveResult = await this.drive.fetchForQuery(orgId, input);
 
@@ -671,6 +689,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       }
 
       if (shouldUseResearch) {
+        this.updateActiveToolSession(orgId, task.created_by, directPublicApi ? 'api' : 'search');
         await this.log(
           orgId,
           taskId,
@@ -695,6 +714,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
       // Model call — quick rides the cheap tier for speed
       const budget = tier.tier === 'quick' ? 'cheap' : 'balanced';
+      this.updateActiveToolSession(orgId, task.created_by, 'model');
       await this.log(orgId, taskId, `calling model (budget=${budget}, org keys first, env fallback)…`, 'model');
       const t0 = Date.now();
       const result = await this.modelRouter.generate(contextualInput, {
@@ -810,6 +830,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       return;
     }
 
+    const activeSession = this.activeToolSessions.get(`${orgId}:${task.created_by}`);
     const wantsUnansweredStatus = WHATSAPP_UNANSWERED_SIGNALS.test(input);
     if (WHATSAPP_SEND_SIGNALS.test(input) && !wantsUnansweredStatus) {
       const session = await this.whatsapp.startSession(orgId, taskId);
@@ -820,8 +841,18 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         return;
       }
 
-      const draft = this.extractWhatsAppDraft(input);
-      if (!draft) {
+      let draft = this.extractWhatsAppDraft(input);
+      if (draft) {
+        const isPronoun = !draft.contact || /^(le|la|lo|el|ese|él|ella|ellos|contacto|chat)$/i.test(draft.contact);
+        if (isPronoun) {
+          const fallback = activeSession?.tool === 'whatsapp' ? activeSession.details?.contact : null;
+          if (fallback) {
+            draft = { contact: fallback, text: draft.text };
+          }
+        }
+      }
+
+      if (!draft || !draft.contact) {
         const text = 'WhatsApp Web está listo. Para responder necesito que me digas el contacto y el texto exacto; cualquier envío real tendrá que pasar por Approval Engine.';
         await this.deliver(orgId, taskId, text, 'whatsapp-web', Date.now() - startedAt);
         return;
@@ -847,13 +878,17 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         taskId,
         payload: { text, model: 'whatsapp-web', latency_ms: Date.now() - startedAt },
       });
+      this.updateActiveToolSession(orgId, task.created_by, 'whatsapp', { contact: draft.contact });
       await this.tasks.transition(taskId, orgId, 'waiting_for_approval', {
         result: { text, model: 'whatsapp-web', approval_id: approval.id },
       });
       return;
     }
 
-    const shouldRead = WHATSAPP_READ_SIGNALS.test(input) || wantsUnansweredStatus;
+    const contactToRead = this.extractWhatsAppContactToRead(input);
+    const resolvedContact = contactToRead || (activeSession?.tool === 'whatsapp' ? activeSession.details?.contact : null);
+
+    const shouldRead = WHATSAPP_READ_SIGNALS.test(input) || wantsUnansweredStatus || !!resolvedContact;
     if (!shouldRead) {
       const session = await this.whatsapp.startSession(orgId, taskId);
       await this.maybePublishWhatsAppQr(orgId, taskId, session.screenshot);
@@ -864,23 +899,59 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       return;
     }
 
-    const contactToRead = this.extractWhatsAppContactToRead(input);
     const result = wantsUnansweredStatus
       ? await this.whatsapp.fetchUnansweredMessages(orgId, taskId)
-      : contactToRead
-        ? await this.whatsapp.fetchContactMessages(orgId, contactToRead, taskId)
+      : resolvedContact
+        ? await this.whatsapp.fetchContactMessages(orgId, resolvedContact, taskId)
         : WHATSAPP_UNREAD_SIGNALS.test(input)
           ? await this.whatsapp.fetchUnreadMessages(orgId, taskId)
           : await this.whatsapp.fetchLatestMessage(orgId, taskId);
-    if (contactToRead) {
+    if (resolvedContact) {
       await this.maybePublishBrowserScreenshot(orgId, taskId, result.session.screenshot, 'WhatsApp Web');
     } else {
       await this.maybePublishWhatsAppQr(orgId, taskId, result.session.screenshot);
     }
-    await this.deliver(orgId, taskId, result.text, 'whatsapp-web', Date.now() - startedAt);
+
+    let replyText = result.text;
+    if (result.session.screenshot?.image_base64 && (resolvedContact || !wantsUnansweredStatus)) {
+      try {
+        await this.log(orgId, taskId, 'Analyzing WhatsApp Web screenshot with Vision model for context...', 'pipeline');
+        const visionPrompt = `
+El usuario hizo la siguiente petición sobre este chat de WhatsApp: "${input}"
+
+Aquí tienes la lista de mensajes extraídos por DOM (puede estar incompleta o vacía):
+${('messages' in result && result.messages) ? result.messages.join('\n') : '(Ninguno extraído por DOM)'}
+
+Analiza la captura de pantalla de WhatsApp Web provista para:
+1. Leer los mensajes del chat que sean visibles (tanto entrantes como salientes).
+2. Complementar la lista de mensajes extraídos si falta alguno.
+3. Responder con precisión y de forma conversacional a la petición del usuario (por ejemplo, si pide el último mensaje, indícalo claramente indicando quién lo envió, la hora y el contenido).
+4. Si la petición es solo mostrar el chat, resume brevemente la última parte de la conversación.
+
+Responde directamente al usuario en español, con un tono amable y natural.
+`;
+        const visionRes = await this.modelRouter.generate(visionPrompt, {
+          orgId,
+          taskId,
+          imageBase64: result.session.screenshot.image_base64,
+          imageMimeType: result.session.screenshot.mime_type || 'image/png',
+          systemPrompt: 'Eres EVA, una asistente de IA capaz de ver y analizar capturas de pantalla para responder a las solicitudes de los usuarios.',
+        });
+        if (visionRes?.text) {
+          replyText = visionRes.text;
+          await this.log(orgId, taskId, 'Vision model analysis successful, replaced response text', 'pipeline');
+        }
+      } catch (visionErr) {
+        this.logger.warn(`Failed to analyze screenshot with Vision model: ${(visionErr as Error).message}`);
+      }
+    }
+
+    await this.deliver(orgId, taskId, replyText, 'whatsapp-web', Date.now() - startedAt);
     await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
     if (result.ok) {
-      this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: result.text, conversationContext });
+      this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: replyText, conversationContext });
+      const actualContact = 'contact' in result ? result.contact : resolvedContact;
+      this.updateActiveToolSession(orgId, task.created_by, 'whatsapp', actualContact ? { contact: actualContact } : undefined);
     }
   }
 
@@ -1368,18 +1439,53 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     await this.log(orgId, taskId, `${label} screenshot uploaded and sent to the conversation`, 'tools');
   }
 
-  private extractWhatsAppDraft(input: string): { contact: string; text: string } | null {
-    const patterns = [
-      /\b(?:responde|responder|contesta|contestar)\s+(?:por\s+)?(?:whatsapp|whatsap|watsapp|watsap|guasap|wa)?\s*(?:a\s+)?(.+?)\s+(?:que|:)\s+(.+)$/i,
-      /\b(?:env[ií]a|enviar|manda|mandar|escribe|escribir)\s+(?:un\s+)?(?:whatsapp|whatsap|watsapp|watsap|guasap|wa)?\s*(?:a\s+)?(.+?)\s+(?:que|:)\s+(.+)$/i,
+  private cleanWhatsAppContactName(contact: string): string {
+    if (!contact) return '';
+    // 1. Remove trailing instruction/action clauses starting with "y" followed by a verb (dime, dile, lee, etc.)
+    let cleaned = contact.replace(/\s+y\s+(?:dime|dile|lee|revisa|escribe|manda|envia|preguntale|ver|buscar|mostrar|enviar|mandar|escribir|contestar|responder|verificar|captura|haz|hacer|toma|tomar|tomarle|hacerle|mandarle|enviarle|decirle|leerle|preguntarle|deci|decir)\b.*/gi, '');
+    
+    // 2. Remove common WhatsApp platform words and any preceding prepositions (en, de, por, a)
+    cleaned = cleaned.replace(/\b(?:en|de|por|a)?\s*(?:whatsapp|whatsap|watsapp|watsap|guasap|guasapp|wa)\b/gi, '');
+    
+    // 3. Trim extra whitespace
+    cleaned = cleaned.trim();
+    
+    // 4. Remove trailing prepositions/conjunctions that might be left over (de, con, en, para, a, y)
+    cleaned = cleaned.replace(/\s+(?:de|con|en|para|a|y)$/i, '');
+    
+    return cleaned.trim();
+  }
+
+  private extractWhatsAppDraft(input: string): { contact: string | null; text: string } | null {
+    // 1. Explicit contact + text patterns
+    const explicitPatterns = [
+      /\b(?:responde|responder|contesta|contestar|dile|decirle)\s+(?:por\s+)?(?:whatsapp|whatsap|watsapp|watsap|guasap|wa)?\s*(?:a\s+)?(.+?)\s+(?:que|diciendo|:)\s+(.+)$/i,
+      /\b(?:env[ií]a|enviar|manda|mandar|escribe|escribir|env[ií]ale|m[aá]ndale|escr[ií]bele)\s+(?:un\s+)?(?:mensaje\s+(?:por\s+)?(?:whatsapp|whatsap|watsapp|watsap|guasap|wa)?\s*)?(?:a\s+)?(.+?)\s+(?:que|diciendo|:)\s+(.+)$/i,
     ];
-    for (const pattern of patterns) {
+    for (const pattern of explicitPatterns) {
       const match = input.match(pattern);
-      if (!match) continue;
-      const contact = match[1].replace(/\b(por\s+)?(whatsapp|whatsap|watsapp|watsap|guasap|wa)\b/ig, '').trim();
-      const text = match[2].trim();
-      if (contact && text) return { contact, text };
+      if (match) {
+        const contact = this.cleanWhatsAppContactName(match[1]);
+        const text = match[2].trim();
+        if (contact && text) return { contact, text };
+      }
     }
+
+    // 2. Implicit contact patterns (just dile / enviale / mandale + text)
+    const implicitPatterns = [
+      /\b(?:dile|decirle|env[ií]ale|m[aá]ndale|escr[ií]bele)\s+(?:por\s+)?(?:whatsapp|whatsap|watsapp|watsap|guasap|wa)?\s*(?:que|diciendo|:)?\s*(.+)$/i,
+    ];
+    for (const pattern of implicitPatterns) {
+      const match = input.match(pattern);
+      if (match) {
+        let text = match[1].trim();
+        // Clean up leading "un " or "mensaje diciendo "
+        text = text.replace(/^(?:un\s+mensaje|un\s+whatsapp|un\s+wa|un|una)\s+/i, '');
+        text = text.replace(/^(?:diciendo|que)\s+/i, '');
+        if (text) return { contact: null, text: text.trim() };
+      }
+    }
+
     return null;
   }
 
@@ -1392,10 +1498,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     for (const pattern of patterns) {
       const match = input.match(pattern);
       if (match) {
-        let contact = match[1]
-          .replace(/\b(por\s+)?(whatsapp|whatsap|watsapp|watsap|guasap|wa)\b/ig, '')
-          .trim();
-        contact = contact.replace(/\s+(?:de|con|en|para)$/i, '').trim();
+        const contact = this.cleanWhatsAppContactName(match[1]);
         const genericPhrases = /^(mis?|el|los|un|una|la|ultimo\s+chat|el\s+ultimo\s+chat|los\s+ultimo\s+chats|mensajes?|chats?|conversaci[oó]n|conversaciones?|mensajes?\s+sin\s+(?:leer|responder|contestar))$/i;
         if (contact && contact.length > 1 && !genericPhrases.test(contact)) {
           return contact;
@@ -1403,6 +1506,58 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       }
     }
     return null;
+  }
+
+  private checkActiveToolContext(orgId: string, userId: string, toolName: string): boolean {
+    const session = this.activeToolSessions.get(`${orgId}:${userId}`);
+    if (!session) return false;
+    const isExpired = Date.now() - session.updatedAt > this.TOOL_SESSION_TTL_MS;
+    if (isExpired) {
+      this.activeToolSessions.delete(`${orgId}:${userId}`);
+      return false;
+    }
+    return session.tool === toolName;
+  }
+
+  private updateActiveToolSession(orgId: string, userId: string, toolName: string, details?: any): void {
+    this.activeToolSessions.set(`${orgId}:${userId}`, {
+      tool: toolName,
+      details,
+      updatedAt: Date.now(),
+    });
+    this.logger.log(`Active tool session updated for user ${userId} in org ${orgId}: ${toolName}`);
+  }
+
+  private isWhatsAppFollowUp(input: string, conversationContext: ConversationContextTurn[]): boolean {
+    const normalized = input.toLowerCase().trim();
+
+    // 1. Explicit read or send or status signals
+    if (
+      WHATSAPP_READ_SIGNALS.test(input) ||
+      WHATSAPP_SEND_SIGNALS.test(input) ||
+      WHATSAPP_UNREAD_SIGNALS.test(input) ||
+      WHATSAPP_UNANSWERED_SIGNALS.test(input) ||
+      WHATSAPP_SCREENSHOT_SIGNALS.test(input)
+    ) {
+      return true;
+    }
+
+    // 2. Pronouns or phrases referring to a chat/message/screenshot/contact
+    const confirmationPatterns = [
+      /\b(abre\s+ese|entra\s+(?:a\s+)?ese|si\s+abre\s+ese|si\s+ese|ese\s+mismo|ver\s+ese|lee\s+ese|entra|abrir|dale|abre|abrirlo|abrir\s+el\s+chat|ver\s+el\s+chat)\b/i,
+      /\b(mandame|m[aá]ndame|dame|lee|revisa|escribe|escr[ií]bele|dile|preg[uú]ntale|enviarle|enviar|contestar|responder|mostrar|muestra|ver)\b/i,
+    ];
+    if (confirmationPatterns.some(pat => pat.test(normalized))) {
+      return true;
+    }
+
+    // 3. Conversation context has WhatsApp mentions in recent turns
+    const lastTurns = conversationContext.slice(-3);
+    if (lastTurns.some(turn => WHATSAPP_SIGNALS.test(turn.text))) {
+      return true;
+    }
+
+    return false;
   }
 
   private wantsWhatsAppScreenshot(input: string, conversationContext: ConversationContextTurn[]): boolean {
@@ -1427,21 +1582,86 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     return USELESS_ANSWER_PATTERNS.some((pattern) => pattern.test(text));
   }
 
-  private getConversationContext(task: Task): ConversationContextTurn[] {
-    const raw = task.metadata?.conversation_context;
-    if (!Array.isArray(raw)) return [];
+  private async getConversationContextFromDb(orgId: string, userId: string, currentTaskId: string): Promise<ConversationContextTurn[]> {
+    try {
+      const { data, error } = await this.db.admin
+        .from('tasks')
+        .select('id, title, description, result')
+        .eq('org_id', orgId)
+        .eq('created_by', userId)
+        .order('created_at', { ascending: false })
+        .limit(30);
 
-    return raw
-      .map((item): ConversationContextTurn | null => {
-        if (!item || typeof item !== 'object') return null;
-        const record = item as Record<string, unknown>;
-        const role = record.role === 'user' || record.role === 'assistant' ? record.role : null;
-        const text = typeof record.text === 'string' ? record.text.trim() : '';
-        if (!role || !text) return null;
-        return { role, text: text.slice(0, 1200) };
+      if (error || !data) {
+        this.logger.warn(`Failed to fetch task history for context: ${error?.message || 'no data'}`);
+        return [];
+      }
+
+      const turns: ConversationContextTurn[] = [];
+      const pastTasks = data
+        .filter((t) => t.id !== currentTaskId)
+        .reverse();
+
+      for (const t of pastTasks) {
+        const userText = t.description || t.title || '';
+        const assistantText = (t.result as Record<string, unknown> | null)?.['text'] as string | null;
+        if (userText.trim()) {
+          turns.push({ role: 'user', text: userText.trim() });
+        }
+        if (assistantText && assistantText.trim()) {
+          turns.push({ role: 'assistant', text: assistantText.trim() });
+        }
+      }
+
+      return turns;
+    } catch (err) {
+      this.logger.warn(`Error in getConversationContextFromDb: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
+  private compressConversationContext(turns: ConversationContextTurn[]): ConversationContextTurn[] {
+    const N = turns.length;
+    return turns
+      .map((turn, index) => {
+        const distance = N - 1 - index; // distance from newest (0 is newest)
+        if (distance < 6) {
+          return { role: turn.role, text: turn.text.slice(0, 1200) };
+        } else if (distance < 16) {
+          const truncated = turn.text.slice(0, 250);
+          const suffix = turn.text.length > 250 ? '... [resumido]' : '';
+          return { role: turn.role, text: `${truncated}${suffix}` };
+        } else if (distance < 30) {
+          const truncated = turn.text.slice(0, 80);
+          const suffix = turn.text.length > 80 ? '... [comprimido]' : '';
+          return { role: turn.role, text: `${truncated}${suffix}` };
+        } else {
+          return null;
+        }
       })
-      .filter((item): item is ConversationContextTurn => Boolean(item))
-      .slice(-8);
+      .filter((t): t is ConversationContextTurn => t !== null);
+  }
+
+  private async getConversationContext(task: Task): Promise<ConversationContextTurn[]> {
+    let turns = await this.getConversationContextFromDb(task.org_id, task.created_by, task.id);
+
+    if (turns.length === 0) {
+      const raw = task.metadata?.conversation_context;
+      if (Array.isArray(raw)) {
+        turns = raw
+          .map((item): ConversationContextTurn | null => {
+            if (!item || typeof item !== 'object') return null;
+            const record = item as Record<string, unknown>;
+            const role = record.role === 'user' || record.role === 'assistant' ? record.role : null;
+            const text = typeof record.text === 'string' ? record.text.trim() : '';
+            if (!role || !text) return null;
+            return { role, text };
+          })
+          .filter((item): item is ConversationContextTurn => Boolean(item));
+      }
+    }
+
+    return this.compressConversationContext(turns);
   }
 
   private withConversationContextForRouting(input: string, context: ConversationContextTurn[]): string {
