@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 20:24Z
+C: agent: implemented general planning horizons router supporting short, medium, and long term tiers; files=apps/eva-core/src/agent/tier.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts; tests=npm test -- src/agent/__tests__/agent-runner.service.spec.ts
+P: pending/improve -> add setting controls in agent Settings page to customize maxSteps limits for different tiers
+
 ### 2026-06-12 20:03Z
 C: Refactored EVA Agentic Platform: declarative router, unified loop tools with Zod schemas, DoD acceptance criteria, editable approvals, parallel sub-agents with blackboard, semantic history compression, memory similarity clustering, and dashboard autonomy boundaries + telemetry metrics; files=agent-loop.service.ts, agent-intelligence.service.ts, agent-runner.service.ts, approvals.service.ts, approval-classifier.service.ts, sidebar.tsx, page.tsx, agent-client.tsx, dashboard-view-cache.tsx; tests=npm test in apps/eva-core, npm test in apps/eva-dashboard
 P: pending/improve -> Verify next dashboard integration under real organization traffic, audit RLS logs for memory consolidator batch runs

@@ -246,6 +246,30 @@ export class ResearchToolsService {
     const place = geocode.results?.[0];
     if (!place) throw new Error(`No encontre la ubicacion "${location}" para consultar el clima`);
 
+    let startDate = targetDate;
+    let endDate = targetDate;
+
+    // Detect if multi-day is requested
+    let numDays = 1;
+    const rangeMatch = input.toLowerCase().match(/\b(?:los\s+siguientes\s+)?(\d{1,2})\s+d[ií]as?\b/i) || 
+                       input.toLowerCase().match(/\b(?:pr[oó]ximos\s+)?(\d{1,2})\s+d[ií]as?\b/i);
+    if (rangeMatch?.[1]) {
+      numDays = Math.min(Math.max(parseInt(rangeMatch[1], 10), 1), 7);
+    } else if (/\b(?:semana|semanal)\b/i.test(input)) {
+      numDays = 7;
+    } else if (/\b(tres|3)\s+d[ií]as?\b/i.test(input)) {
+      numDays = 3;
+    } else if (/\b(cinco|5)\s+d[ií]as?\b/i.test(input)) {
+      numDays = 5;
+    }
+
+    if (numDays > 1) {
+      const now = new Date();
+      startDate = now.toISOString().slice(0, 10);
+      now.setDate(now.getDate() + (numDays - 1));
+      endDate = now.toISOString().slice(0, 10);
+    }
+
     const forecastUrl = new URL('https://api.open-meteo.com/v1/forecast');
     forecastUrl.searchParams.set('latitude', String(place.latitude));
     forecastUrl.searchParams.set('longitude', String(place.longitude));
@@ -257,34 +281,40 @@ export class ResearchToolsService {
       'wind_speed_10m_max',
     ].join(','));
     forecastUrl.searchParams.set('timezone', place.timezone ?? 'auto');
-    forecastUrl.searchParams.set('start_date', targetDate);
-    forecastUrl.searchParams.set('end_date', targetDate);
+    forecastUrl.searchParams.set('start_date', startDate);
+    forecastUrl.searchParams.set('end_date', endDate);
 
     const forecast = await this.fetchJson<ForecastResult>(forecastUrl.toString());
     const daily = forecast.daily;
     if (!daily?.time?.length) throw new Error('Open-Meteo no regreso pronostico para esa fecha');
 
     const placeLabel = [place.name, place.admin1, place.country].filter(Boolean).join(', ');
-    const max = daily.temperature_2m_max?.[0];
-    const min = daily.temperature_2m_min?.[0];
-    const rain = daily.precipitation_probability_max?.[0];
-    const wind = daily.wind_speed_10m_max?.[0];
-    const condition = this.weatherCodeLabel(daily.weather_code?.[0]);
+    const lines = [`Pronostico para ${placeLabel}`, ''];
 
-    const details = [
-      max !== undefined && min !== undefined ? `Temperatura: ${Math.round(min)}-${Math.round(max)} °C` : null,
-      rain !== undefined ? `Probabilidad de lluvia: ${Math.round(rain)}%` : null,
-      wind !== undefined ? `Viento maximo: ${Math.round(wind)} km/h` : null,
-    ].filter(Boolean);
-    const text = [
-      `Pronostico para ${placeLabel}`,
-      '',
-      `Fecha: ${this.humanDate(targetDate)}`,
-      `Condicion: ${condition}.`,
-      ...details.map((detail) => `- ${detail}`),
-      '',
-      'Fuente: Open-Meteo.',
-    ].join('\n');
+    for (let dayIdx = 0; dayIdx < daily.time.length; dayIdx++) {
+      const dateStr = daily.time[dayIdx];
+      const max = daily.temperature_2m_max?.[dayIdx];
+      const min = daily.temperature_2m_min?.[dayIdx];
+      const rain = daily.precipitation_probability_max?.[dayIdx];
+      const wind = daily.wind_speed_10m_max?.[dayIdx];
+      const condition = this.weatherCodeLabel(daily.weather_code?.[dayIdx]);
+
+      const details = [
+        max !== undefined && min !== undefined ? `Temperatura: ${Math.round(min)}-${Math.round(max)} °C` : null,
+        rain !== undefined ? `Probabilidad de lluvia: ${Math.round(rain)}%` : null,
+        wind !== undefined ? `Viento maximo: ${Math.round(wind)} km/h` : null,
+      ].filter(Boolean);
+
+      lines.push(
+        `Fecha: ${this.humanDate(dateStr)}`,
+        `Condicion: ${condition}.`,
+        ...details.map((detail) => `- ${detail}`),
+        ''
+      );
+    }
+
+    lines.push('Fuente: Open-Meteo.');
+    const text = lines.join('\n');
 
     return {
       text,

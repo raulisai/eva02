@@ -89,6 +89,14 @@ describe('classifyTier', () => {
     expect(classifyTier('compra el dominio eva.dev').tier).toBe('quick');
     expect(classifyTier('borra la base de datos').tier).toBe('quick');
   });
+
+  it('routes multi-step/range/reasoning requests to medium', () => {
+    expect(classifyTier('clima de los siguientes 3 dias').tier).toBe('medium');
+    expect(classifyTier('busca noticias de bitcoin de hoy y resume el impacto en el precio').tier).toBe('medium');
+    expect(classifyTier('dame el clima de los proximos 5 dias').tier).toBe('medium');
+    expect(classifyTier('revisa mis ultimos 3 correos').tier).toBe('medium');
+    expect(classifyTier('compara el precio de bitcoin vs ethereum').tier).toBe('medium');
+  });
 });
 
 describe('AgentRunnerService', () => {
@@ -614,6 +622,27 @@ describe('AgentRunnerService', () => {
 
     expect(research.answer).toHaveBeenCalledWith('Busca el clima de hoy en CDMX', ORG);
     expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(publishedTypes()).toContain('task.result');
+  });
+
+  it('routes multi-day weather to the agent loop with restricted maxSteps', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      title: 'Clima 3 dias',
+      description: 'todo bien cual es el clima de los siguientes 3 dias',
+    }));
+    agentLoop.run.mockResolvedValue({
+      ok: true,
+      text: 'Clima 3 días: Viernes lluvia, Sábado sol, Domingo templado.',
+      steps: [{ tool: 'web_search', args: { query: 'clima 3 dias' }, thought: 'buscar', observation: 'datos' }],
+      tokensUsed: 120,
+      toolsUsed: ['web_search'],
+    });
+
+    await service.run(ORG, TASK);
+
+    const logs = publishedLogs();
+    expect(logs.some((message) => message.includes('tier=medium'))).toBe(true);
+    expect(agentLoop.run).toHaveBeenCalledWith(ORG, TASK, 'todo bien cual es el clima de los siguientes 3 dias', expect.objectContaining({ maxSteps: 4 }));
     expect(publishedTypes()).toContain('task.result');
   });
 

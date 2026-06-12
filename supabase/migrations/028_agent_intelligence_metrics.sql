@@ -132,7 +132,7 @@ SELECT
   ROUND(AVG(jsonb_array_length(steps)), 2) AS avg_steps,
   ROUND(AVG(tokens_used), 2) AS avg_tokens,
   ROUND(AVG(duration_ms), 2) AS avg_duration_ms,
-  ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY tokens_used), 2) AS p95_tokens
+  ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY tokens_used)::NUMERIC, 2) AS p95_tokens
 FROM agent_trajectories
 WHERE outcome <> 'running'
 GROUP BY org_id;

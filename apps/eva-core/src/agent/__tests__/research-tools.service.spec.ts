@@ -95,6 +95,51 @@ describe('ResearchToolsService', () => {
     fetchMock.mockRestore();
   });
 
+  it('formats multi-day weather range API data correctly', async () => {
+    const fetchMock = jest.spyOn(global, 'fetch' as never)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          results: [{
+            name: 'Ciudad de Mexico',
+            admin1: 'Ciudad de Mexico',
+            country: 'Mexico',
+            latitude: 19.43,
+            longitude: -99.13,
+            timezone: 'America/Mexico_City',
+          }],
+        }),
+      } as never)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          daily: {
+            time: ['2026-06-12', '2026-06-13', '2026-06-14'],
+            weather_code: [61, 0, 3],
+            temperature_2m_min: [15, 16, 17],
+            temperature_2m_max: [24, 25, 26],
+            precipitation_probability_max: [91, 10, 20],
+            wind_speed_10m_max: [12, 11, 10],
+          },
+        }),
+      } as never);
+
+    const result = await (service as unknown as {
+      answerWeatherApi(input: string, extraSources?: string[]): Promise<{ text: string; tool: string }>;
+    }).answerWeatherApi('clima de los siguientes 3 dias en Ciudad de Mexico', []);
+
+    expect(result.tool).toBe('open-meteo');
+    expect(result.text).toContain('Pronostico para Ciudad de Mexico');
+    expect(result.text).toContain('Fecha: viernes, 12 de junio de 2026');
+    expect(result.text).toContain('Fecha: sábado, 13 de junio de 2026');
+    expect(result.text).toContain('Fecha: domingo, 14 de junio de 2026');
+    expect(result.text).toContain('- Temperatura: 15-24 °C');
+    expect(result.text).toContain('- Temperatura: 16-25 °C');
+    expect(result.text).toContain('- Temperatura: 17-26 °C');
+
+    fetchMock.mockRestore();
+  });
+
   it('filters browser search text into readable bullets', () => {
     const raw = [
       'DuckDuckGo',

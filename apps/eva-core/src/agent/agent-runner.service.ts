@@ -645,6 +645,28 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         }
       },
       {
+        name: 'medium-agent-loop',
+        priority: 42,
+        risk: 'medium',
+        matches: (ctx) => ctx.tier.tier === 'medium',
+        handler: async (ctx) => {
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'agent_loop');
+          const handled = await this.runAgentLoop(
+            ctx.orgId,
+            ctx.taskId,
+            ctx.input,
+            ctx.conversationContext,
+            ctx.startedAt,
+            ctx.task.created_by,
+            ctx.soulContext,
+            4,
+          );
+          if (handled) return true;
+          await this.log(ctx.orgId, ctx.taskId, 'agent-loop no resolvió — usando pipeline clásico', 'loop');
+          return false;
+        }
+      },
+      {
         name: 'long-agent-loop',
         priority: 40,
         risk: 'high',
@@ -2362,6 +2384,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
     startedAt: number,
     userId?: string,
     soulContext?: AgentSoulContext,
+    maxSteps?: number,
   ): Promise<boolean> {
     try {
       // Contexto mínimo necesario: identidad del usuario en una línea + últimos
@@ -2382,6 +2405,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
       const outcome = await this.agentLoop.run(orgId, taskId, input, {
         context,
         userId,
+        maxSteps,
         log: (message, scope) => this.log(orgId, taskId, message, scope),
       });
       if (!outcome.ok || !outcome.text) return false;
