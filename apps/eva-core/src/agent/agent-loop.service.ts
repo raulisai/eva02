@@ -1,4 +1,6 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
+import * as fs from 'node:fs/promises';
+import * as pathLib from 'node:path';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { MemoryAgentService } from '../memory/memory-agent.service';
@@ -521,6 +523,75 @@ export class AgentLoopService {
         rootOnly: true,
         // Real execution lives in runDelegate() — needs depth/log from the caller.
         execute: async () => 'ERROR: delegate no disponible',
+      },
+      {
+        name: 'image_analyze',
+        usage: 'image_analyze{"path","prompt"?}: analiza una imagen (captura de pantalla, foto, etc.) guardada en el sandbox (ruta relativa o absoluta) o desde una URL pública, usando un modelo de visión para extraer texto, leer códigos o resolver dudas contextuales.',
+        execute: async (orgId, taskId, args) => {
+          const pathArg = String(args.path ?? '').trim();
+          if (!pathArg) return 'ERROR: image_analyze requiere args.path';
+          const prompt = String(args.prompt ?? 'Extrae todo el texto legible de la imagen con el mayor detalle posible.').trim();
+
+          let buffer: Buffer;
+          let mimeType = 'image/png';
+
+          try {
+            if (pathArg.startsWith('http://') || pathArg.startsWith('https://')) {
+              const res = await fetch(pathArg);
+              if (!res.ok) throw new Error(`HTTP status ${res.status}`);
+              const arrayBuffer = await res.arrayBuffer();
+              buffer = Buffer.from(arrayBuffer);
+              const contentType = res.headers.get('content-type');
+              if (contentType) mimeType = contentType;
+            } else {
+              let resolvedPath = pathArg;
+              if (!pathLib.isAbsolute(resolvedPath)) {
+                let cleanPath = pathArg;
+                if (cleanPath.startsWith('/work/')) {
+                  cleanPath = cleanPath.slice(6);
+                } else if (cleanPath.startsWith('work/')) {
+                  cleanPath = cleanPath.slice(5);
+                }
+
+                const hostDir = this.sandbox.getHostDir(taskId);
+                if (hostDir) {
+                  const sandboxCandidate = pathLib.join(hostDir, cleanPath);
+                  try {
+                    await fs.access(sandboxCandidate);
+                    resolvedPath = sandboxCandidate;
+                  } catch {
+                    // ignore
+                  }
+                }
+
+                if (!pathLib.isAbsolute(resolvedPath)) {
+                  resolvedPath = pathLib.resolve(process.cwd(), cleanPath);
+                }
+              }
+
+              buffer = await fs.readFile(resolvedPath);
+              const ext = pathLib.extname(resolvedPath).toLowerCase();
+              if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
+              else if (ext === '.gif') mimeType = 'image/gif';
+              else if (ext === '.webp') mimeType = 'image/webp';
+            }
+          } catch (err) {
+            return `ERROR al cargar la imagen: ${(err as Error).message}`;
+          }
+
+          try {
+            const result = await this.modelRouter.generate(prompt, {
+              orgId,
+              taskId,
+              imageBase64: buffer.toString('base64'),
+              imageMimeType: mimeType,
+              systemPrompt: 'Eres EVA, una asistente de IA capaz de ver y analizar imágenes y capturas de pantalla para resolver las peticiones del usuario con total precisión.',
+            });
+            return result.text || 'Sin respuesta del modelo de visión.';
+          } catch (err) {
+            return `ERROR al analizar con el modelo de visión: ${(err as Error).message}`;
+          }
+        },
       },
     ];
   }

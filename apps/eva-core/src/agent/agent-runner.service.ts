@@ -163,6 +163,9 @@ const CALENDAR_UPDATE_SIGNALS = /\b(cambia[r]?|mueve[r]?|modifica[r]?|actualiza[
 // Bulk/mass operation guard — reject any write that targets multiple items at once.
 const BULK_GUARD_SIGNALS = /\b(todos(?: mis)?|todas(?: mis)?|masiv[oa]|bulk|en masa|toda la bandeja|todos los correos|todas las citas|todos los eventos)\b/i;
 
+const APPROVE_KEYWORDS = /^\s*(aprovar|aprobar|aprobado|esta\s+bien|está\s+bien|sí|si|yes|dale|autorizado|aprueba|confirmado|confirmo|ok|okay|si,\s*dale|si\s+por\s*favor|sí\s+por\s*favor)\s*$/i;
+const REJECT_KEYWORDS = /^\s*(desaprovar|desaprobar|cancelar|no|rechazar|desaprueba|cancela|rechazo|denegar|denegado|no,\s*gracias)\s*$/i;
+
 // ── Scheduled job intent signals ─────────────────────────────────────────────
 // Detects requests to create / list / manage recurring or one-time scheduled jobs.
 const SCHEDULE_CREATE_SIGNALS =
@@ -303,11 +306,61 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     }
     if (task.status !== 'pending') return;
 
+    const rawInput = task.description ?? task.title;
+
+    // Check if user is replying to a pending approval request
+    const inputForCheck = rawInput ? rawInput.trim().toLowerCase() : '';
+    const isConfirm = APPROVE_KEYWORDS.test(inputForCheck);
+    const isCancel = REJECT_KEYWORDS.test(inputForCheck);
+
+    if (isConfirm || isCancel) {
+      const { data: waitingTasks } = await this.db.admin
+        .from('tasks')
+        .select('*')
+        .eq('org_id', orgId)
+        .eq('created_by', task.created_by)
+        .eq('status', 'waiting_for_approval')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (waitingTasks && waitingTasks.length > 0) {
+        const waitingTask = waitingTasks[0];
+        const { data: pendingApprovals } = await this.db.admin
+          .from('approvals')
+          .select('*')
+          .eq('org_id', orgId)
+          .eq('task_id', waitingTask.id)
+          .eq('status', 'pending')
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (pendingApprovals && pendingApprovals.length > 0) {
+          const approval = pendingApprovals[0];
+
+          await this.tasks.transition(taskId, orgId, 'planning');
+          await this.tasks.transition(taskId, orgId, 'running');
+
+          if (isConfirm) {
+            await this.log(orgId, taskId, `User confirmed approval ${approval.id} via chat: "${rawInput}"`, 'approval');
+            await this.approvals.approve(approval.id, orgId, task.created_by);
+            await this.deliver(orgId, taskId, 'Aprobación recibida. Ejecutando la acción...', 'approval-chat', 0);
+          } else {
+            await this.log(orgId, taskId, `User rejected approval ${approval.id} via chat: "${rawInput}"`, 'approval');
+            await this.approvals.reject(approval.id, orgId, task.created_by, 'Cancelado por el usuario en el chat');
+            await this.tasks.transition(waitingTask.id, orgId, 'cancelled', {
+              result: { text: 'La acción fue desaprobada y la tarea se canceló.', model: 'approval-chat' },
+            });
+            await this.deliver(orgId, taskId, 'Entendido. Cancelé la acción y la tarea pendiente.', 'approval-chat', 0);
+          }
+          return;
+        }
+      }
+    }
+
     // Detect cross-channel routing intent before any other processing.
     // "dame el clima y mándamelo por telegram" → strips the routing clause,
     // runs normally, and the task.result payload carries the cross-channel target
     // so CommunicationService can deliver a copy there.
-    const rawInput = task.description ?? task.title;
     const crossChannel = this.extractCrossChannelTarget(rawInput);
     const input = crossChannel ? this.stripCrossChannelClause(rawInput) : rawInput;
     if (crossChannel) {
@@ -871,7 +924,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         },
         summary: `Enviar WhatsApp a ${draft.contact}: ${draft.text.slice(0, 160)}`,
       });
-      const text = `Preparé el WhatsApp para **${draft.contact}** y lo dejé en Approvals. No se envía automáticamente. Hash: \`${approval.action_hash}\``;
+      const text = `Preparé el WhatsApp para **${draft.contact}** con el texto: **"${draft.text}"**. ¿Me das tu aprobación para enviarlo? (Hash: \`${approval.action_hash}\`)`;
       await this.events.publish({
         type: 'task.result',
         orgId,

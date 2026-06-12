@@ -281,6 +281,10 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
     return this.sessions.has(taskId);
   }
 
+  getHostDir(taskId: string): string | null {
+    return this.sessions.get(taskId)?.hostDir ?? null;
+  }
+
   // ── secrets ───────────────────────────────────────────────────────────────
 
   /**

@@ -583,4 +583,39 @@ describe('AgentLoopService', () => {
     expect(lastUser).toContain('Y'.repeat(900));        // reciente, completo
     expect(lastUser).toContain('Z'.repeat(900));        // reciente, completo
   });
+
+  describe('image_analyze tool', () => {
+    it('executes image_analyze tool with a URL successfully', async () => {
+      const mockFetchResponse = {
+        ok: true,
+        arrayBuffer: jest.fn().mockResolvedValue(Buffer.from('fake-image-bytes')),
+        headers: {
+          get: jest.fn().mockReturnValue('image/png'),
+        },
+      };
+      const originalFetch = global.fetch;
+      global.fetch = jest.fn().mockResolvedValue(mockFetchResponse as any);
+
+      modelRouter.generate.mockResolvedValueOnce(modelReply('Texto extraido de la imagen mock'));
+
+      const tools = (service as any).buildToolCatalog();
+      const imageAnalyzeTool = tools.find((t: any) => t.name === 'image_analyze');
+
+      expect(imageAnalyzeTool).toBeDefined();
+
+      const result = await imageAnalyzeTool.execute(ORG, TASK, {
+        path: 'https://example.com/screenshot.png',
+        prompt: 'lee el texto',
+      });
+
+      expect(result).toBe('Texto extraido de la imagen mock');
+      expect(global.fetch).toHaveBeenCalledWith('https://example.com/screenshot.png');
+      expect(modelRouter.generate).toHaveBeenCalledWith('lee el texto', expect.objectContaining({
+        imageBase64: Buffer.from('fake-image-bytes').toString('base64'),
+        imageMimeType: 'image/png',
+      }));
+
+      global.fetch = originalFetch;
+    });
+  });
 });

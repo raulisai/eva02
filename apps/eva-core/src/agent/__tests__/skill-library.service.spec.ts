@@ -199,4 +199,71 @@ describe('SkillLibraryService', () => {
       expect(upserts).toHaveLength(0);
     });
   });
+
+  describe('learning graph and concurrency', () => {
+    let upserts: Array<{ table: string; row: Record<string, unknown> }>;
+    let inserts: Array<{ table: string; row: Record<string, unknown> }>;
+
+    async function buildForLearning() {
+      upserts = [];
+      inserts = [];
+      from = jest.fn((table: string) => {
+        const builder: Record<string, jest.Mock> = {};
+        builder.select = jest.fn().mockReturnValue(builder);
+        builder.eq = jest.fn().mockReturnValue(builder);
+        builder.maybeSingle = jest.fn().mockResolvedValue({ data: null, error: null });
+        builder.upsert = jest.fn((row: Record<string, unknown>) => {
+          upserts.push({ table, row });
+          return Promise.resolve({ error: null });
+        });
+        builder.insert = jest.fn((row: Record<string, unknown>) => {
+          inserts.push({ table, row });
+          return Promise.resolve({ error: null });
+        });
+        return builder;
+      });
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          SkillLibraryService,
+          { provide: DatabaseService, useValue: { admin: { from } } },
+        ],
+      }).compile();
+      service = module.get(SkillLibraryService);
+    }
+
+    it('tracks selected skills as active with org-scoped rows', async () => {
+      await buildForLearning();
+
+      await service.beginSelection(ORG, {
+        goal: 'debug tests failing',
+        selected: [{ slug: 'systematic-debugging', display_name: 'Systematic Debugging', description: 'Debug', source: 'bundled' }],
+      });
+
+      const statRows = upserts.filter((entry) => entry.table === 'skill_usage_stats').map((entry) => entry.row);
+      expect(statRows).toHaveLength(2);
+      expect(statRows.every((row) => row.org_id === ORG)).toBe(true);
+      expect(statRows.map((row) => row.active_runs)).toEqual([1, 1]);
+    });
+
+    it('records successful outcomes and reinforces co-selected skill graph edges', async () => {
+      await buildForLearning();
+
+      await service.recordOutcome(ORG, {
+        taskId: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
+        goal: 'plan and test feature',
+        selected: [
+          { slug: 'plan', display_name: 'Plan', description: 'Plan', source: 'bundled', useMode: 'prompt', score: 4 },
+          { slug: 'test-driven-development', display_name: 'TDD', description: 'Test', source: 'bundled', useMode: 'prompt', score: 3 },
+        ],
+        usedSlugs: [],
+        toolsUsed: ['delegate'],
+        success: true,
+        finalText: 'done',
+      });
+
+      expect(inserts.filter((entry) => entry.table === 'skill_selection_events')).toHaveLength(2);
+      expect(upserts.some((entry) => entry.table === 'skill_graph_edges' && entry.row.from_skill_slug === 'plan' && entry.row.to_skill_slug === 'test-driven-development')).toBe(true);
+      expect(upserts.every((entry) => entry.row.org_id === ORG)).toBe(true);
+    });
+  });
 });

@@ -428,6 +428,8 @@ describe('AgentRunnerService', () => {
               action_hash: 'a'.repeat(64),
             }),
             consumeApproved: jest.fn().mockRejectedValue(new Error('Not approved')),
+            approve: jest.fn().mockResolvedValue({}),
+            reject: jest.fn().mockResolvedValue({}),
           },
         },
         {
@@ -1978,6 +1980,41 @@ describe('AgentRunnerService', () => {
       await service.run(ORG, TASK);
 
       expect((service as any).whatsapp.fetchContactMessages).toHaveBeenCalledWith(ORG, 'Jair Monr', TASK);
+    });
+
+    it('approves a pending task when the user replies with a confirmation word', async () => {
+      const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+      tasks.getTask.mockResolvedValueOnce(makeTask({ description: 'sí' }));
+
+      const mockWaitingTask = makeTask({ id: 'waiting-task-id', status: 'waiting_for_approval' });
+      db.admin.limit.mockResolvedValueOnce({ data: [mockWaitingTask], error: null });
+
+      const mockApproval = { id: 'app-123', status: 'pending', task_id: 'waiting-task-id' };
+      db.admin.limit.mockResolvedValueOnce({ data: [mockApproval], error: null });
+
+      await service.run(ORG, TASK);
+
+      expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'planning');
+      expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'running');
+      expect(approvals.approve).toHaveBeenCalledWith('app-123', ORG, 'user-1');
+    });
+
+    it('rejects a pending task and cancels it when the user replies with a cancellation word', async () => {
+      const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+      tasks.getTask.mockResolvedValueOnce(makeTask({ description: 'no' }));
+
+      const mockWaitingTask = makeTask({ id: 'waiting-task-id', status: 'waiting_for_approval' });
+      db.admin.limit.mockResolvedValueOnce({ data: [mockWaitingTask], error: null });
+
+      const mockApproval = { id: 'app-123', status: 'pending', task_id: 'waiting-task-id' };
+      db.admin.limit.mockResolvedValueOnce({ data: [mockApproval], error: null });
+
+      await service.run(ORG, TASK);
+
+      expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'planning');
+      expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'running');
+      expect(approvals.reject).toHaveBeenCalledWith('app-123', ORG, 'user-1', expect.any(String));
+      expect(tasks.transition).toHaveBeenCalledWith('waiting-task-id', ORG, 'cancelled', expect.any(Object));
     });
   });
 });
