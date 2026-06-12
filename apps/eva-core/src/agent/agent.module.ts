@@ -13,6 +13,7 @@ import { TasksModule } from '../tasks/tasks.module';
 import { ToolRouterModule } from '../tool-router/tool-router.module';
 import { AgentLoopService } from './agent-loop.service';
 import { AgentFeedbackController } from './agent-feedback.controller';
+import { AgentIntelligenceService } from './agent-intelligence.service';
 import { AgentMetricsController } from './agent-metrics.controller';
 import { AgentRunnerService } from './agent-runner.service';
 import { AgentTrajectoryService } from './agent-trajectory.service';
@@ -41,6 +42,7 @@ import { CommunicationModule } from '../communication/communication.module';
     AgentLoopService,
     AgentRunnerService,
     AgentTrajectoryService,
+    AgentIntelligenceService,
     MediaService,
     ResearchToolsService,
     SandboxService,

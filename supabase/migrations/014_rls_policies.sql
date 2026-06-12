@@ -428,6 +428,37 @@ BEGIN
   END IF;
 END $$;
 
+DO $$
+DECLARE
+  table_name TEXT;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'skill_embeddings',
+    'agent_input_requests',
+    'agent_runtime_artifacts',
+    'org_agent_settings'
+  ]
+  LOOP
+    IF to_regclass('public.' || table_name) IS NOT NULL THEN
+      EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', table_name);
+      EXECUTE format('DROP POLICY IF EXISTS "%s_select" ON %I', table_name, table_name);
+      EXECUTE format('DROP POLICY IF EXISTS "%s_insert" ON %I', table_name, table_name);
+      EXECUTE format('DROP POLICY IF EXISTS "%s_update" ON %I', table_name, table_name);
+      EXECUTE format('DROP POLICY IF EXISTS "%s_delete" ON %I', table_name, table_name);
+
+      IF table_name = 'org_agent_settings' THEN
+        EXECUTE format('CREATE POLICY "%s_select" ON %I FOR SELECT USING (org_id = ANY(public.user_org_ids()))', table_name, table_name);
+        EXECUTE format('CREATE POLICY "%s_insert" ON %I FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()))', table_name, table_name);
+        EXECUTE format('CREATE POLICY "%s_update" ON %I FOR UPDATE USING (org_id = ANY(public.user_org_ids())) WITH CHECK (org_id = ANY(public.user_org_ids()))', table_name, table_name);
+      ELSE
+        EXECUTE format('CREATE POLICY "%s_select" ON %I FOR SELECT USING (org_id = ANY(public.user_org_ids()))', table_name, table_name);
+        EXECUTE format('CREATE POLICY "%s_insert" ON %I FOR INSERT WITH CHECK (org_id = ANY(public.user_org_ids()))', table_name, table_name);
+        EXECUTE format('CREATE POLICY "%s_update" ON %I FOR UPDATE USING (org_id = ANY(public.user_org_ids())) WITH CHECK (org_id = ANY(public.user_org_ids()))', table_name, table_name);
+      END IF;
+    END IF;
+  END LOOP;
+END $$;
+
 -- ── Grants: allow authenticated role to access tables via Data API ─────────
 GRANT USAGE ON SCHEMA public TO authenticated, anon;
 

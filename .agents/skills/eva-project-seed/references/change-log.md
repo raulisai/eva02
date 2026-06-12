@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 19:37Z
+C: agent intelligence: implemented remaining roadmap flywheels (plan state, ask_user resume/timeout, replay, skill embeddings/dedupe, safety limits, security gate, memory/self-improvement/heartbeat tick); files=apps/eva-core/src/agent/agent-intelligence.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/skill-library.service.ts,supabase/migrations/029_agent_intelligence_flywheels.sql,supabase/migrations/014_rls_policies.sql; tests=cd apps/eva-core && npm run eval:agent && npm test -- --runInBand && npm run lint && npm run build
+P: pending/improve -> move AgentIntelligenceService in-process autonomy tick to explicit scheduled_jobs rows for easier dashboard inspection and operational control
+
 ### 2026-06-12 19:21Z
 C: agent intelligence: trajectory persistence, metrics endpoint, adaptive budget, parallel read-only tool calls, golden eval harness; files=apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/agent-trajectory.service.ts,apps/eva-core/src/agent/agent-metrics.controller.ts,apps/eva-core/evals/golden-tasks.json,apps/eva-core/scripts/agent-evals.ts,supabase/migrations/028_agent_intelligence_metrics.sql,supabase/migrations/014_rls_policies.sql; tests=cd apps/eva-core && npm test -- --runInBand && npm run eval:agent && npm run lint && npm run build
 P: pending/improve -> implement full ask_user resume channel and automatic startup resume from running agent_trajectories checkpoints

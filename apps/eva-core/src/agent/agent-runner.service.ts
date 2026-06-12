@@ -282,6 +282,14 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         if (task.status === 'pending') {
           await this.events.publish({ type: 'task.created', orgId: task.org_id, taskId: task.id, payload: { taskId: task.id, title: task.title } });
           this.logger.log(`Re-queued stuck pending task ${task.id}: "${task.title}"`);
+        } else if (await this.hasRunningTrajectory(task.org_id, task.id)) {
+          await this.db.admin
+            .from('tasks')
+            .update({ status: 'pending' })
+            .eq('org_id', task.org_id)
+            .eq('id', task.id);
+          await this.events.publish({ type: 'task.created', orgId: task.org_id, taskId: task.id, payload: { taskId: task.id, resumed_from_checkpoint: true } });
+          this.logger.log(`Re-queued checkpointed ${task.status} task ${task.id}: "${task.title}"`);
         } else {
           await this.failSafely(task.org_id, task.id, 'La tarea quedó incompleta al reiniciar el proceso.');
           this.logger.warn(`Failed stuck ${task.status} task ${task.id}: "${task.title}"`);
@@ -290,6 +298,61 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     } catch (err) {
       this.logger.warn(`recoverStuckTasks: ${(err as Error).message}`);
     }
+  }
+
+  private async hasRunningTrajectory(orgId: string, taskId: string): Promise<boolean> {
+    const { data } = await this.db.admin
+      .from('agent_trajectories')
+      .select('id')
+      .eq('org_id', orgId)
+      .eq('task_id', taskId)
+      .eq('outcome', 'running')
+      .maybeSingle();
+    return !!data;
+  }
+
+  private async answerWaitingInputIfAny(orgId: string, replyTask: Task, answer: string): Promise<boolean> {
+    const { data: waitingTasks } = await this.db.admin
+      .from('tasks')
+      .select('id, created_by')
+      .eq('org_id', orgId)
+      .eq('created_by', replyTask.created_by)
+      .eq('status', 'waiting_for_input')
+      .order('updated_at', { ascending: false })
+      .limit(1);
+    const waiting = (waitingTasks ?? [])[0] as { id: string; created_by: string } | undefined;
+    if (!waiting) return false;
+
+    const { data: requests } = await this.db.admin
+      .from('agent_input_requests')
+      .select('id')
+      .eq('org_id', orgId)
+      .eq('task_id', waiting.id)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    const request = (requests ?? [])[0] as { id: string } | undefined;
+    if (!request) return false;
+
+    const now = new Date().toISOString();
+    await this.db.admin
+      .from('agent_input_requests')
+      .update({ status: 'answered', answer, answered_at: now })
+      .eq('org_id', orgId)
+      .eq('id', request.id);
+    await this.db.admin
+      .from('tasks')
+      .update({ status: 'pending' })
+      .eq('org_id', orgId)
+      .eq('id', waiting.id);
+    await this.tasks.transition(replyTask.id, orgId, 'planning');
+    await this.tasks.transition(replyTask.id, orgId, 'running');
+    await this.tasks.transition(replyTask.id, orgId, 'completed', {
+      result: { text: 'Respuesta recibida. Continúo con la tarea pendiente.', model: 'input-resume' },
+    });
+    await this.events.publish({ type: 'task.created', orgId, taskId: waiting.id, payload: { resumed_from_input_request_id: request.id } });
+    await this.deliver(orgId, replyTask.id, 'Respuesta recibida. Continúo con la tarea pendiente.', 'input-resume', 0);
+    return true;
   }
 
   /** Picks the instant acknowledgment phrase for an order. */
@@ -356,6 +419,9 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         }
       }
     }
+
+    const answeredInput = await this.answerWaitingInputIfAny(orgId, task, rawInput);
+    if (answeredInput) return;
 
     // Detect cross-channel routing intent before any other processing.
     // "dame el clima y mándamelo por telegram" → strips the routing clause,

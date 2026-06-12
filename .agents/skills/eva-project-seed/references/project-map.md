@@ -51,7 +51,7 @@ Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Tru
 - `CommunicationModule`: accounts/conversations/messages/notifications/Telegram webhook; records Telegram final outbound messages with `task_id` and infers short praise/correction as agent feedback for the latest outbound task in that conversation.
 - `IntegrationsModule`: org integrations, MCP connections, credential/model/channel tests.
 - `AgentModule`: agent loop/runner, skill library, sandbox, media, research, Gmail/Calendar/Drive, soul, schedule, behavior patterns.
-- Agent intelligence telemetry: `AgentTrajectoryService` persists `agent_trajectories` checkpoints/finals; `GET /agent/metrics` reads org-scoped metrics views.
+- Agent intelligence telemetry/flywheels: `AgentTrajectoryService` persists `agent_trajectories` checkpoints/finals; `AgentIntelligenceService` handles plan state helpers, replay examples, ask_user persistence/timeouts, token/tool/network safety limits, security review, memory consolidation, self-improvement digest, heartbeat task creation, and skill embeddings; `GET /agent/metrics` reads org-scoped metrics views.
 - `ApprovalsModule`: approval request/resolve/validate.
 - `WearFastPathModule`: ephemeral watch tokens, request path, policy.
 - `JobsModule`: scheduled jobs + scheduler.
@@ -70,6 +70,7 @@ Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Tru
 - `TasksRepository` is service-role Supabase and must filter by `org_id`; watch `findStuck(...)`, currently cross-org by age/status and should be handled carefully.
 - `EventBusService.publish` writes Redis stream and persists `task_events` when `taskId` exists.
 - Event types include task lifecycle/log/media/form/setup, approvals, dev tasks, browser screenshots, communication, `agent.feedback.inferred`, wear fast path/tokens.
+- `task.waiting_input` is emitted when the loop uses `ask_user`; replies from the same user fill `agent_input_requests` and requeue the waiting task.
 
 ## Main HTTP/WS Surface
 
@@ -88,12 +89,12 @@ Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Tru
 
 ## Supabase Schema Groups
 
-Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_events`, `005_memories`, `006_intent_routes`, `007_communication`, `008_skills`, `009_browser`, `010_dev_manager`, `011_wear_fast_path`, `012_nodes_devices`, `013_approvals`, `014_rls_policies`, `015_wear_ui`, `016_integrations_soul_artifacts`, `017_credentials_skill_seed`, `018_tasks_schema_align`, `019_fix_missing_rls_and_grants`, `020_soul_v2`, `021_schedule_places_patterns`, `022_scheduled_jobs`, `023_token_logs`, `024_fix_billing_stats_rpc`, `025_add_task_id_to_token_logs`, `026_fix_task_events_event_nullable`, `027_skill_learning_graph`, `028_agent_intelligence_metrics`.
+Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_events`, `005_memories`, `006_intent_routes`, `007_communication`, `008_skills`, `009_browser`, `010_dev_manager`, `011_wear_fast_path`, `012_nodes_devices`, `013_approvals`, `014_rls_policies`, `015_wear_ui`, `016_integrations_soul_artifacts`, `017_credentials_skill_seed`, `018_tasks_schema_align`, `019_fix_missing_rls_and_grants`, `020_soul_v2`, `021_schedule_places_patterns`, `022_scheduled_jobs`, `023_token_logs`, `024_fix_billing_stats_rpc`, `025_add_task_id_to_token_logs`, `026_fix_task_events_event_nullable`, `027_skill_learning_graph`, `028_agent_intelligence_metrics`, `029_agent_intelligence_flywheels`.
 
 - Identity/org: `organizations`, `users`.
 - Tasks/events: `tasks`, `task_events`; `014` references `task_steps` but no `CREATE TABLE` was found in current scan.
 - Memory/soul: `memories`, `memory_embeddings`, `agent_souls`; RPC `match_memories`.
-- Routing/planning/tools/agent intelligence: `intent_routes`, `skills`, `skill_versions`, `tools`, `tool_calls`, `skill_usage_stats`, `skill_graph_edges`, `skill_selection_events`, `agent_trajectories`; views `agent_tool_success_metrics`, `agent_goal_success_metrics`, `agent_defense_metrics`, `agent_skill_funnel_metrics`, `agent_task_efficiency_metrics`.
+- Routing/planning/tools/agent intelligence: `intent_routes`, `skills`, `skill_versions`, `tools`, `tool_calls`, `skill_usage_stats`, `skill_graph_edges`, `skill_selection_events`, `agent_trajectories`, `skill_embeddings`, `agent_input_requests`, `agent_runtime_artifacts`, `org_agent_settings`; views `agent_tool_success_metrics`, `agent_goal_success_metrics`, `agent_defense_metrics`, `agent_skill_funnel_metrics`, `agent_task_efficiency_metrics`.
 - Browser: `browser_profiles`, `browser_sessions`, `browser_screenshots`, `browser_action_preparations`.
 - Dev manager: `projects`, `dev_tasks`, `claude_code_sessions`, `build_runs`, `test_runs`, `code_reviews`, `roadmap_items`.
 - Wear/devices: `wear_sessions`, `wear_tokens`, `wear_fast_path_logs`, `fast_path_policies`, `wear_capabilities`, `wear_directives`, `wear_form_responses`, `wear_sensor_consents`, `nodes`, `node_capabilities`, `devices`.
@@ -114,4 +115,5 @@ Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_
 - AGENTS says RLS policies live exclusively in `014_rls_policies.sql`, but later migrations include policy creation; decide convention before adding more tables.
 - `014_rls_policies.sql` references `task_steps`; current migration scan did not find `CREATE TABLE task_steps`.
 - `TasksRepository.findStuck` lacks an `org_id` argument/filter; may be intended system-wide but violates the written non-negotiable unless bounded elsewhere.
+- Agent autonomy tick is in-process (`AgentIntelligenceService` interval, disabled in tests) rather than persisted as explicit rows in `scheduled_jobs`; acceptable for now but DB-scheduled orchestration would be easier to inspect.
 - Many existing files are modified in the worktree; do not revert user changes.

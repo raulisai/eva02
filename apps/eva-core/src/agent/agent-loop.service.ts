@@ -20,6 +20,7 @@ import { EventBusService } from '../events/event-bus.service';
 import { TelegramAdapter } from '../communication/telegram.adapter';
 import { AgentProfile, DELEGATE_ROLE_CATALOG, resolveAgentProfile } from './agent-profiles';
 import { AgentTrajectoryService, ModelBudgetStep } from './agent-trajectory.service';
+import { AgentIntelligenceService, AgentPlanItem } from './agent-intelligence.service';
 
 
 /** One executed cycle of the loop: what the model decided + what the tool observed. */
@@ -136,6 +137,7 @@ export class AgentLoopService {
     @Optional() private readonly events?: EventBusService,
     @Optional() private readonly telegram?: TelegramAdapter,
     @Optional() private readonly trajectories?: AgentTrajectoryService,
+    @Optional() private readonly intelligence?: AgentIntelligenceService,
   ) {
     this.tools = this.buildToolCatalog();
   }
@@ -166,6 +168,13 @@ export class AgentLoopService {
     let currentBudget: ModelBudget = 'cheap';
     let budgetReason = 'initial';
     const modelBudgetPerStep: ModelBudgetStep[] = [];
+    let plan: AgentPlanItem[] = [];
+    const replayContext = depth === 0 && this.intelligence ? await this.intelligence.replayExample(orgId, goal).catch(() => null) : null;
+    const inputContext = depth === 0 ? await this.latestInputAnswerContext(orgId, taskId).catch(() => null) : null;
+    const dynamicContext = [opts.context, replayContext, inputContext].filter(Boolean).join('\n\n') || undefined;
+    if (depth === 0 && maxSteps >= DEFAULT_ROOT_STEPS && this.intelligence) {
+      plan = await this.intelligence.createInitialPlan(orgId, taskId, goal);
+    }
 
     await log(`agent-loop${depth > 0 ? ` (sub-agente d${depth})` : ''}: objetivo "${goal.slice(0, 120)}" — máx ${maxSteps} pasos`, 'loop');
     this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
@@ -191,12 +200,21 @@ export class AgentLoopService {
         throw new TaskCancelledError();
       }
 
+      if (depth === 0 && this.intelligence) {
+        const capMessage = await this.intelligence.enforceTokenCap(orgId, taskId, tokensUsed).catch(() => null);
+        if (capMessage) {
+          steps.push({ tool: 'final_answer', args: { text: capMessage }, thought: 'token cap', observation: capMessage });
+          this.recordTrajectory(orgId, taskId, goal, steps, 'degraded', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
+          return { ok: true, degraded: true, text: capMessage, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
+        }
+      }
+
       let decision: AgentDecision | null = null;
       let parallelDecisions: AgentDecision[] = [];
       let res: GenerateResult | undefined = undefined;
       try {
         res = await this.modelRouter.generate(
-          this.buildUserPrompt(goal, opts.context, steps, maxSteps - i, formatHint),
+          this.buildUserPrompt(goal, dynamicContext, steps, maxSteps - i, formatHint, plan),
           {
             orgId,
             taskId,
@@ -276,12 +294,51 @@ export class AgentLoopService {
           continue;
         }
 
+        let securityCheckedText = text;
+        if (depth === 0 && this.intelligence) {
+          const review = await this.intelligence.securityReview(orgId, taskId, goal, steps, text).catch(() => ({ ok: true, text }));
+          if (!review.ok) {
+            steps.push({
+              tool: decision.tool,
+              args: decision.args,
+              thought: decision.thought,
+              observation: `VERIFICACIÓN DE SEGURIDAD FALLIDA: ${review.text}`,
+            });
+            ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'security_review'));
+            this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
+            continue;
+          }
+          securityCheckedText = review.text;
+        }
+
         await log(`agent-loop: final_answer en paso ${i + 1} (${tokensUsed} tokens de razonamiento)`, 'loop');
-        const refinedText = depth === 0 ? await this.refineAndValidateResponse(orgId, taskId, goal, text) : text;
+        const refinedText = depth === 0 ? await this.refineAndValidateResponse(orgId, taskId, goal, securityCheckedText) : securityCheckedText;
         this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, refinedText);
         this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
         this.recordTrajectory(orgId, taskId, goal, steps, 'ok', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
+      }
+
+      if (decision.tool === 'plan_update') {
+        const items = Array.isArray(decision.args.items) ? decision.args.items : [];
+        const nextPlan = items
+          .map((item, idx) => {
+            const obj: Record<string, unknown> = item && typeof item === 'object' ? item as Record<string, unknown> : { text: item };
+            const rawStatus = String(obj.status ?? '');
+            const status = rawStatus === 'done' || rawStatus === 'active' || rawStatus === 'pending' ? rawStatus : (idx === 0 ? 'active' : 'pending');
+            return { id: String(obj.id ?? `u${idx + 1}`), text: String(obj.text ?? '').trim(), status };
+          })
+          .filter((item): item is AgentPlanItem => !!item.text)
+          .slice(0, 6);
+        if (nextPlan.length > 0) plan = nextPlan;
+        steps.push({
+          tool: 'plan_update',
+          args: decision.args,
+          thought: decision.thought,
+          observation: nextPlan.length > 0 ? 'PLAN actualizado.' : 'ERROR: plan_update requiere args.items con text/status.',
+        });
+        this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
+        continue;
       }
 
       const spec = available.find((t) => t.name === decision!.tool);
@@ -316,6 +373,9 @@ export class AgentLoopService {
           observation: `ERROR: ${stallMsg}`,
         });
         ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, stallCount >= 2 ? 'persistent_stall' : 'stall'));
+        if (stallCount >= 2 && depth === 0 && this.intelligence) {
+          plan = await this.intelligence.replan(orgId, taskId, goal, steps);
+        }
         this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         continue;
       }
@@ -330,6 +390,8 @@ export class AgentLoopService {
           const results = await Promise.all(runnable.map(async ({ decision: d, spec: tool }) => {
             await this.announceAction(orgId, taskId, tool.name, d.args);
             try {
+              const rateLimit = depth === 0 && this.intelligence ? await this.intelligence.enforceToolRateLimit(orgId, tool.name) : null;
+              if (rateLimit) return { tool, decision: d, observation: `ERROR: ${rateLimit}` };
               const observation = await tool.execute(orgId, taskId, d.args);
               return { tool, decision: d, observation };
             } catch (error) {
@@ -344,6 +406,9 @@ export class AgentLoopService {
               thought: result.decision.thought,
               observation: this.truncate(result.observation, OBSERVATION_LIMIT),
             });
+            if (depth === 0 && this.intelligence) {
+              plan = this.intelligence.updatePlanFromObservation(plan, result.observation);
+            }
           }
           if (results.some((r) => r.observation.startsWith('ERROR:'))) {
             ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'tool_error'));
@@ -358,6 +423,10 @@ export class AgentLoopService {
 
       let observation: string;
       try {
+        const rateLimit = depth === 0 && this.intelligence ? await this.intelligence.enforceToolRateLimit(orgId, spec.name) : null;
+        if (rateLimit) {
+          observation = `ERROR: ${rateLimit}`;
+        } else
         if (spec.name === 'delegate') {
           observation = await this.runDelegate(orgId, taskId, decision.args, depth, opts, log, steps);
         } else if (spec.name === 'code_execute') {
@@ -378,6 +447,8 @@ export class AgentLoopService {
       });
       if (observation.startsWith('ERROR:')) {
         ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'tool_error'));
+      } else if (depth === 0 && this.intelligence) {
+        plan = this.intelligence.updatePlanFromObservation(plan, observation);
       }
       this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
     }
@@ -488,15 +559,23 @@ export class AgentLoopService {
     return blocks.join('\n');
   }
 
-  private buildUserPrompt(goal: string, context: string | undefined, steps: AgentLoopStep[], stepsLeft: number, formatHint?: string): string {
+  private buildUserPrompt(goal: string, context: string | undefined, steps: AgentLoopStep[], stepsLeft: number, formatHint?: string, plan: AgentPlanItem[] = []): string {
     const blocks: string[] = [`OBJETIVO: ${goal}`];
     if (context) blocks.push('', `CONTEXTO:\n${context}`);
+    if (plan.length > 0) blocks.push('', `PLAN:\n${this.renderPlan(plan)}`);
     if (steps.length > 0) {
       blocks.push('', 'PASOS PREVIOS:', ...this.renderHistory(steps));
     }
     if (formatHint) blocks.push('', `ATENCIÓN: ${formatHint}`);
     blocks.push('', `Te quedan ${stepsLeft} acciones. Elige la siguiente acción y responde SOLO con el JSON.`);
     return blocks.join('\n');
+  }
+
+  private renderPlan(plan: AgentPlanItem[]): string {
+    return plan.map((item) => {
+      const marker = item.status === 'done' ? '[✓]' : item.status === 'active' ? '[→]' : '[ ]';
+      return `${marker} ${item.text}`;
+    }).join('\n');
   }
 
   private renderHistory(steps: AgentLoopStep[]): string[] {
@@ -509,6 +588,9 @@ export class AgentLoopService {
   }
 
   private compactObservation(obs: string): string {
+    if (obs.startsWith('ERROR:') || obs.startsWith('VERIFICACIÓN')) {
+      return this.truncate(obs, 320);
+    }
     const firstMeaningful = obs.split('\n').find((l) => l.trim()) ?? obs;
     return this.truncate(firstMeaningful, 160);
   }
@@ -608,6 +690,28 @@ export class AgentLoopService {
         required: ['text'],
       },
     });
+    defs.push({
+      name: 'plan_update',
+      description: 'Actualiza el plan de trabajo cuando descubras nueva información, cambie el orden o haya un bloqueo.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                text: { type: 'string' },
+                status: { type: 'string', enum: ['pending', 'active', 'done'] },
+              },
+              required: ['text', 'status'],
+            },
+          },
+        },
+        required: ['items'],
+      },
+    });
     return defs;
   }
 
@@ -691,6 +795,26 @@ export class AgentLoopService {
           const memories = await this.memoryAgent.recall(query, orgId, 5, 0.6);
           if (memories.length === 0) return 'Sin memorias relevantes.';
           return memories.map((m) => `[${m.created_at.slice(0, 10)}] ${m.summary}`).join('\n');
+        },
+      },
+      {
+        name: 'ask_user',
+        usage: 'ask_user{"question","options"?}: pregunta al usuario cuando falta una decisión o dato crítico; pausa la tarea en waiting_for_input.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            question: { type: 'string', description: 'Pregunta breve y concreta para el usuario.' },
+            options: { type: 'array', items: { type: 'string' }, description: 'Opciones sugeridas opcionales.' },
+          },
+          required: ['question'],
+        },
+        rootOnly: true,
+        execute: async (orgId, taskId, args) => {
+          if (!this.intelligence) return 'ERROR: ask_user no disponible en este contexto.';
+          const question = String(args.question ?? '').trim();
+          if (!question) return 'ERROR: ask_user requiere args.question';
+          const options = Array.isArray(args.options) ? args.options.map((o) => String(o)).filter(Boolean).slice(0, 5) : [];
+          return this.intelligence.askUser(orgId, taskId, question, options);
         },
       },
       {
@@ -1036,6 +1160,10 @@ export class AgentLoopService {
     const language: SandboxLanguage = rawLang === 'node' || rawLang === 'bash' ? rawLang : 'python';
 
     if (args.network === true) {
+      if (this.intelligence) {
+        const denied = await this.intelligence.validateNetworkAllowlist(orgId, code).catch(() => null);
+        if (denied) return `ERROR: ${denied}`;
+      }
       if (process.env.EVA_SANDBOX_ALLOW_NETWORK === 'true') {
         const result = await this.sandbox.execInSession(taskId, { kind: language, code, orgId, network: true });
         return this.formatSandboxResult(result);
@@ -1158,6 +1286,20 @@ export class AgentLoopService {
     } catch {
       return [];
     }
+  }
+
+  private async latestInputAnswerContext(orgId: string, taskId: string): Promise<string | null> {
+    const { data } = await this.db.admin
+      .from('agent_input_requests')
+      .select('question, answer')
+      .eq('org_id', orgId)
+      .eq('task_id', taskId)
+      .eq('status', 'answered')
+      .order('answered_at', { ascending: false })
+      .limit(1);
+    const row = (data ?? [])[0] as { question?: string; answer?: string } | undefined;
+    if (!row?.answer) return null;
+    return `RESPUESTA DEL USUARIO A ACLARACIÓN:\nPregunta: ${row.question ?? ''}\nRespuesta: ${row.answer}`;
   }
 
   // ── sedimentación ─────────────────────────────────────────────────────────

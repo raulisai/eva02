@@ -1,9 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { BUNDLED_SKILL_CATALOG, BUNDLED_SKILL_BY_SLUG, BundledSkillCatalogEntry, SkillSource } from './bundled-skills.catalog';
 import { DatabaseService } from '../database/database.service';
 import { SandboxLanguage } from './sandbox.service';
 import { formatScanSummary, scanSkillCode, shouldBlockAgentSkill } from './skill-guard';
+import { ModelRouterService } from '../model-router/model-router.service';
 
 export interface SkillSummary {
   slug: string;
@@ -133,7 +134,10 @@ const STOPWORDS = new Set([
 export class SkillLibraryService {
   private readonly logger = new Logger(SkillLibraryService.name);
 
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    @Optional() private readonly modelRouter?: ModelRouterService,
+  ) {}
 
   /** Top-N skills del org relevantes al objetivo. [] si ninguna supera el umbral. */
   async findRelevant(orgId: string, goal: string, limit = 4): Promise<SkillSummary[]> {
@@ -223,8 +227,10 @@ export class SkillLibraryService {
       return { ok: false, reason: `SkillGuard bloqueó el registro: ${formatScanSummary(scan)}. Reintenta sin ese contenido.` };
     }
 
-    const slug = this.slugify(input.slug ?? input.displayName);
+    let slug = this.slugify(input.slug ?? input.displayName);
     if (!slug) return { ok: false, reason: 'slug inválido' };
+    const dedupedSlug = await this.findSemanticDuplicate(orgId, slug, input.description).catch(() => null);
+    if (dedupedSlug) slug = dedupedSlug;
     const filename = input.filename ?? `${slug}.${input.language === 'python' ? 'py' : input.language === 'node' ? 'js' : 'sh'}`;
     const checksum = createHash('md5').update(input.code).digest('hex');
 
@@ -269,6 +275,9 @@ export class SkillLibraryService {
         checksum,
       }, { onConflict: 'org_id,skill_id,version' });
       if (vError) return { ok: false, reason: vError.message };
+      await this.upsertSkillEmbedding(orgId, String(skill.id), slug, input.description).catch((err) => {
+        this.logger.debug(`skill embedding skipped: ${(err as Error).message}`);
+      });
 
       this.logger.log(`skill "${slug}" v${version} registrada (origin=${input.origin}, status=${initialStatus}, verdict=${scan.verdict})`);
       return { ok: true, slug, version };
@@ -387,6 +396,47 @@ export class SkillLibraryService {
     const m = current.match(/^(\d+)\.(\d+)\.(\d+)$/);
     if (!m) return '1.0.1';
     return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+  }
+
+  private async findSemanticDuplicate(orgId: string, slug: string, description: string): Promise<string | null> {
+    const content = `${slug} ${description}`.trim();
+    const { data } = await this.db.admin
+      .from('skill_embeddings')
+      .select('skill_slug, content')
+      .eq('org_id', orgId)
+      .eq('source', 'generated')
+      .limit(100);
+    const best = ((data ?? []) as Array<{ skill_slug: string; content: string }>)
+      .map((row) => ({ row, score: this.textSimilarity(content, row.content) }))
+      .sort((a, b) => b.score - a.score)[0];
+    return best && best.score > 0.92 ? best.row.skill_slug : null;
+  }
+
+  private async upsertSkillEmbedding(orgId: string, skillId: string, slug: string, description: string): Promise<void> {
+    if (!this.modelRouter) return;
+    const content = `${slug} ${description}`.trim();
+    const checksum = createHash('sha256').update(content).digest('hex');
+    const embedded = await this.modelRouter.embed(content);
+    const { error } = await this.db.admin.from('skill_embeddings').upsert({
+      org_id: orgId,
+      skill_id: skillId,
+      skill_slug: slug,
+      source: 'generated',
+      content,
+      embedding: `[${embedded.embedding.join(',')}]`,
+      model: embedded.model,
+      checksum,
+    }, { onConflict: 'org_id,source,skill_slug' });
+    if (error) this.logger.debug(`skill embedding upsert skipped: ${error.message}`);
+  }
+
+  private textSimilarity(a: string, b: string): number {
+    const ta = this.tokenize(a);
+    const tb = this.tokenize(b);
+    if (ta.size === 0 || tb.size === 0) return 0;
+    let hits = 0;
+    for (const token of ta) if (tb.has(token)) hits += 1;
+    return hits / Math.max(ta.size, tb.size);
   }
 
   private tokenize(text: string): Set<string> {
