@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { McpClient } from '@/components/mcp/mcp-client';
+import { MCP_CATALOG } from '@/lib/mcp-catalog';
 import type { McpConnection } from '@/lib/types';
 
 jest.mock('@/lib/supabase/client', () => ({
@@ -46,11 +47,24 @@ describe('McpClient', () => {
   it('renders a bundled MCP repository', () => {
     render(<McpClient initialConnections={[]} />);
 
+    expect(MCP_CATALOG).toHaveLength(30);
     expect(screen.getByText('MCP repository')).toBeInTheDocument();
+    expect(screen.getByText('30 presets')).toBeInTheDocument();
+    expect(screen.getByText('Filesystem MCP')).toBeInTheDocument();
     expect(screen.getByText('GitHub MCP')).toBeInTheDocument();
     expect(screen.getByText('Supabase MCP')).toBeInTheDocument();
+    expect(screen.getByText('Stripe MCP')).toBeInTheDocument();
+    expect(screen.getByText('Pydantic Run Python MCP')).toBeInTheDocument();
+  });
+
+  it('filters the repository by category', () => {
+    render(<McpClient initialConnections={[]} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Data' }));
+
+    expect(screen.getByText('Supabase MCP')).toBeInTheDocument();
     expect(screen.getByText('PostgreSQL MCP')).toBeInTheDocument();
-    expect(screen.getByText('AWS MCP')).toBeInTheDocument();
+    expect(screen.queryByText('GitHub MCP')).not.toBeInTheDocument();
   });
 
   it('connects a catalog preset through eva-core with the optional token', async () => {

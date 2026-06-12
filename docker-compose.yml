@@ -42,11 +42,27 @@ services:
       - REDIS_URL=redis://redis:6379
     ports:
       - "3000:3000"
+    volumes:
+      # Monta el socket Docker del host para que EVA pueda lanzar contenedores sandbox.
+      # Requiere que el usuario pertenezca al grupo "docker" en el host.
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      eva-sandbox-builder:
+        condition: service_completed_successfully
+
+  # Construye la imagen eva-sandbox antes de que arranque eva-core.
+  # Si la imagen ya existe, "docker build --cache-from" es casi inmediato.
+  eva-sandbox-builder:
+    image: docker:cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker/sandbox:/sandbox
+    command: docker build -t eva-sandbox:latest /sandbox
+    restart: "no"
 
 volumes:
   postgres_data:

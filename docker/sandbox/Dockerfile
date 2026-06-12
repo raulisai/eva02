@@ -6,8 +6,16 @@
 # Build:    docker build -t eva-sandbox docker/sandbox
 # Override: EVA_SANDBOX_IMAGE=<otra-imagen>   (vacío = forzar fallback alpine)
 #
-# Sin red en runtime (--network none) — las dependencias van pre-horneadas aquí.
+# Red en runtime: OFF por defecto (--network none). Si EVA_SANDBOX_ALLOW_NETWORK=true
+# el SandboxService puede crear sesiones con --network bridge para downloads.
+# Las dependencias van pre-horneadas aquí para que el agente no pague install-time.
 FROM python:3.12-slim
+
+# ffmpeg: requerido por yt-dlp para muxing de video+audio en YouTube
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
     requests \
@@ -16,10 +24,12 @@ RUN pip install --no-cache-dir \
     openpyxl \
     pillow \
     python-dateutil \
-    beautifulsoup4
+    beautifulsoup4 \
+    yt-dlp
 
-# Usuario sin privilegios: el contenedor corre read-only + sin red, pero
-# tampoco hace falta root para nada.
+# Usuario sin privilegios para ejecuciones aisladas (sin red).
+# Para sesiones con red, SandboxService puede omitir --read-only para
+# que yt-dlp pueda escribir archivos temporales fuera de /work.
 RUN useradd --create-home sandbox
 USER sandbox
 WORKDIR /work

@@ -84,4 +84,83 @@ describe('TelegramAdapter', () => {
     }));
     expect(fetchMock).toHaveBeenNthCalledWith(2, 'https://api.telegram.org/file/botbot-token/photos/file_1.jpg');
   });
+
+  describe('sendDocument', () => {
+    it('sends mp4 files using sendVideo for native playback in Telegram', async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue({ result: { message_id: 789 } }),
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const adapter = new TelegramAdapter();
+      const buffer = Buffer.from('fake-video-data');
+      const result = await adapter.sendDocument(
+        { chat_id: '100' },
+        buffer,
+        'platzi_course.mp4',
+        '¡Aquí está tu video! 🎬',
+        'bot-token',
+      );
+
+      expect(result).toEqual({ ok: true, externalMessageId: '789' });
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toContain('/sendVideo');
+    });
+
+    it('sends non-video files using sendDocument endpoint', async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue({ result: { message_id: 101 } }),
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const adapter = new TelegramAdapter();
+      const buffer = Buffer.from('fake-pdf-data');
+      const result = await adapter.sendDocument(
+        { chat_id: '200' },
+        buffer,
+        'report.pdf',
+        undefined,
+        'bot-token',
+      );
+
+      expect(result).toEqual({ ok: true, externalMessageId: '101' });
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toContain('/sendDocument');
+    });
+
+    it('rejects oversized files (>50 MB) without calling Telegram API', async () => {
+      const fetchMock = jest.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const adapter = new TelegramAdapter();
+      const bigBuffer = Buffer.alloc(51 * 1024 * 1024); // 51 MB
+      const result = await adapter.sendDocument(
+        { chat_id: '100' },
+        bigBuffer,
+        'huge_video.mp4',
+        undefined,
+        'bot-token',
+      );
+
+      expect(result.ok).toBe(false);
+      expect((result as { oversized?: boolean }).oversized).toBe(true);
+      expect(result.error).toContain('supera el límite de 50 MB');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('returns error when chat_id is missing', async () => {
+      const adapter = new TelegramAdapter();
+      const result = await adapter.sendDocument(
+        {},
+        Buffer.from('data'),
+        'file.mp4',
+        undefined,
+        'bot-token',
+      );
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('chat_id');
+    });
+  });
 });

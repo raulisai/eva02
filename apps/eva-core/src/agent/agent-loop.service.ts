@@ -5,6 +5,7 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { MemoryAgentService } from '../memory/memory-agent.service';
 import { ModelRouterService } from '../model-router/model-router.service';
+import { GenerateResult } from '../model-router/model-router.types';
 import { GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
 import { GoogleDriveService } from './google-drive.service';
@@ -16,6 +17,8 @@ import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
 import { SkillLibraryService, SkillSummary } from './skill-library.service';
 import { EventBusService } from '../events/event-bus.service';
+import { TelegramAdapter } from '../communication/telegram.adapter';
+
 
 /** One executed cycle of the loop: what the model decided + what the tool observed. */
 export interface AgentLoopStep {
@@ -119,6 +122,7 @@ export class AgentLoopService {
     @Optional() private readonly approvals?: ApprovalsService,
     @Optional() private readonly integrations?: IntegrationsService,
     @Optional() private readonly events?: EventBusService,
+    @Optional() private readonly telegram?: TelegramAdapter,
   ) {
     this.tools = this.buildToolCatalog();
   }
@@ -162,14 +166,15 @@ export class AgentLoopService {
       }
 
       let decision: { thought: string; tool: string; args: Record<string, unknown> } | null = null;
+      let res: GenerateResult | undefined = undefined;
       try {
-        const res = await this.modelRouter.generate(
+        res = await this.modelRouter.generate(
           this.buildUserPrompt(goal, opts.context, steps, maxSteps - i),
           {
             orgId,
             taskId,
             requestType: 'reasoning',
-            budget: 'cheap',
+            budget: 'balanced',
             responseFormat: 'json',
             temperature: 0,
             maxTokens: DECIDE_MAX_TOKENS,
@@ -185,6 +190,8 @@ export class AgentLoopService {
 
       if (!decision) {
         parseFailures += 1;
+        const rawResText = res?.text ? ` (Respuesta del modelo: ${this.truncate(res.text, 200)})` : '';
+        await log(`agent-loop: fallo de parseo JSON ${parseFailures}/${MAX_PARSE_FAILURES}${rawResText}`, 'loop');
         if (parseFailures >= MAX_PARSE_FAILURES) {
           await log('agent-loop: el modelo no produjo decisiones válidas — abortando bucle', 'loop');
           this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
@@ -326,6 +333,7 @@ export class AgentLoopService {
       'REGLAS:',
       '- Antes de resolver desde cero, revisa memory_recall y el CATÁLOGO INTELIGENTE DE SKILLS.',
       '- Para código: divide en pasos pequeños (inspeccionar→preparar→ejecutar→verificar). Los archivos en /work persisten entre pasos de esta tarea.',
+      '- Para descargar medios/videos (YouTube, Platzi, etc.): el sandbox tiene preinstalado y listo para usar yt-dlp y ffmpeg. Escribe código de Python o Bash que use yt-dlp directamente para descargar el video/audio a /work, y luego usa telegram_send_file para enviarlo. Evita clonar repositorios externos o instalar paquetes pesados.',
       '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
       '- NUNCA inventes salida que ninguna herramienta produjo (datos, contenidos de archivo, respuestas de API). Reportar un bloqueo honesto siempre vale más que un resultado fabricado.',
@@ -591,6 +599,109 @@ export class AgentLoopService {
           } catch (err) {
             return `ERROR al analizar con el modelo de visión: ${(err as Error).message}`;
           }
+        },
+      },
+      {
+        name: 'sandbox_ls',
+        usage: 'sandbox_ls{"path"?}: lista los archivos en /work del sandbox de la tarea (o en un subdirectorio). Usa esto para verificar que un archivo fue descargado antes de enviarlo.',
+        execute: async (_orgId, taskId, args) => {
+          const subPath = String(args.path ?? '').trim().replace(/^\/work\/?/, '');
+          const hostDir = this.sandbox.getHostDir(taskId);
+          if (!hostDir) return 'No hay sesión sandbox activa para esta tarea. Ejecuta primero code_execute o terminal_run.';
+          const targetDir = subPath ? pathLib.join(hostDir, subPath) : hostDir;
+          try {
+            const entries = await fs.readdir(targetDir, { withFileTypes: true });
+            if (entries.length === 0) return '(directorio vacío)';
+            const lines = await Promise.all(
+              entries.map(async (e) => {
+                if (e.isDirectory()) return `📁 ${e.name}/`;
+                try {
+                  const stat = await fs.stat(pathLib.join(targetDir, e.name));
+                  const kb = (stat.size / 1024).toFixed(1);
+                  const mb = stat.size / 1024 / 1024;
+                  const size = mb >= 1 ? `${mb.toFixed(1)} MB` : `${kb} KB`;
+                  return `📄 ${e.name} (${size})`;
+                } catch {
+                  return `📄 ${e.name}`;
+                }
+              }),
+            );
+            return lines.join('\n');
+          } catch (err) {
+            return `ERROR al listar directorio: ${(err as Error).message}`;
+          }
+        },
+      },
+      {
+        name: 'telegram_send_file',
+        usage: 'telegram_send_file{"file","caption"?,"chat_id"?}: envía un archivo del workspace (/work) directamente a Telegram. file=nombre del archivo (ej. "video.mp4"). Si no se especifica chat_id, se usa el de la conversación activa de la tarea.',
+        execute: async (orgId, taskId, args) => {
+          if (!this.telegram) return 'ERROR: TelegramAdapter no disponible en este contexto.';
+
+          const fileArg = String(args.file ?? '').trim().replace(/^\/work\/?/, '');
+          if (!fileArg) return 'ERROR: telegram_send_file requiere args.file (nombre o ruta relativa en /work)';
+
+          // Resolver ruta del archivo desde el hostDir del sandbox
+          const hostDir = this.sandbox.getHostDir(taskId);
+          if (!hostDir) return 'ERROR: no hay sesión sandbox activa. El archivo debe existir en /work (usa code_execute primero).';
+
+          const filePath = pathLib.join(hostDir, fileArg);
+          let buffer: Buffer;
+          try {
+            buffer = await fs.readFile(filePath);
+          } catch (err) {
+            return `ERROR: no se pudo leer el archivo "${fileArg}" desde /work: ${(err as Error).message}. Usa sandbox_ls para ver los archivos disponibles.`;
+          }
+
+          const caption = String(args.caption ?? '').trim() || undefined;
+          const filename = pathLib.basename(fileArg);
+
+          // Resolver chat_id: argumento explícito o desde el task channel de la tarea.
+          let chatId = String(args.chat_id ?? '').trim();
+          if (!chatId) {
+            try {
+              const { data: task } = await this.db.admin
+                .from('tasks')
+                .select('metadata')
+                .eq('id', taskId)
+                .eq('org_id', orgId)
+                .maybeSingle();
+              const meta = (task?.metadata ?? {}) as Record<string, unknown>;
+              chatId = String(meta['chat_id'] ?? meta['telegram_chat_id'] ?? '');
+            } catch {
+              // ignore
+            }
+          }
+
+          if (!chatId) {
+            return 'ERROR: no se encontró chat_id de Telegram. Pasa args.chat_id explícitamente o asegúrate de que la tarea venga de un mensaje de Telegram.';
+          }
+
+          // Obtener bot token del org
+          let botToken: string | null | undefined;
+          if (this.integrations) {
+            botToken = await this.integrations
+              .getSecret(orgId, 'channel', 'telegram')
+              .catch(() => null);
+          }
+
+          const result = await this.telegram.sendDocument(
+            { chat_id: chatId },
+            buffer,
+            filename,
+            caption,
+            botToken,
+          );
+
+          if (!result.ok) {
+            if ((result as { oversized?: boolean }).oversized) {
+              return `ADVERTENCIA: ${result.error} — El agente descargó el archivo correctamente en /work pero no puede enviarlo porque supera el límite de Telegram. Opciones: (1) usa code_execute para comprimirlo con ffmpeg, (2) dile al usuario que lo descargue directamente.`;
+            }
+            return `ERROR al enviar a Telegram: ${result.error}`;
+          }
+
+          const sizeMb = (buffer.length / 1024 / 1024).toFixed(1);
+          return `✅ Archivo "${filename}" (${sizeMb} MB) enviado a Telegram (chat ${chatId}, message_id=${result.externalMessageId ?? 'N/A'})`;
         },
       },
     ];
@@ -862,6 +973,12 @@ export class AgentLoopService {
         break;
       case 'code_execute':
         message = `Ejecutando código en el sandbox seguro... ⚙️`;
+        break;
+      case 'telegram_send_file':
+        message = `Enviando archivo a Telegram... 📤`;
+        break;
+      case 'sandbox_ls':
+        message = `Revisando archivos en el workspace del sandbox... 📂`;
         break;
       case 'delegate':
         message = `Delegando parte de la tarea a un sub-agente especializado... 🤖`;

@@ -37,6 +37,8 @@ export interface SessionExecOptions {
   timeoutMs?: number;
   /** terminal: lanza el comando en background y vuelve de inmediato. */
   background?: boolean;
+  /** true → ejecutar con acceso a red (solo cuando EVA_SANDBOX_ALLOW_NETWORK=true). */
+  network?: boolean;
 }
 
 interface SandboxSession {
@@ -45,6 +47,8 @@ interface SandboxSession {
   image: string;
   lastUsedAt: number;
   stepCount: number;
+  /** true → este contenedor tiene --network bridge (para downloads, yt-dlp, etc.) */
+  networkEnabled: boolean;
 }
 
 /** Alias de secret en código generado: §§secret(provider) o §§secret(kind.provider). */
@@ -87,6 +91,13 @@ const FILE_EXT: Record<SandboxLanguage, string> = { python: 'py', node: 'js', ba
  * Secrets: el código puede referir §§secret(provider) — se sustituye el valor
  * real justo antes de ejecutar y se enmascara en la salida; el modelo nunca lo ve.
  */
+/** Estado del warm-up para el health check. */
+export type SandboxWarmUpStatus = 'pending' | 'ready' | 'no_docker' | 'no_enriched_image';
+
+/** Máximo de reintentos del warm-up al arranque (cada 30 s → 10 min). */
+const WARMUP_MAX_RETRIES = 20;
+const WARMUP_RETRY_MS = 30_000;
+
 @Injectable()
 export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(SandboxService.name);
@@ -95,36 +106,80 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
   private enrichedImageCheck?: { value: boolean; checkedAt: number };
   private readonly reaper: NodeJS.Timeout;
 
+  /** Estado visible para el health check. */
+  warmUpStatus: SandboxWarmUpStatus = 'pending';
+
+  /**
+   * Nombre fijo del contenedor standby — siempre visible en Docker Desktop.
+   * Cuando una tarea lo adopta, se crea un reemplazo en background.
+   */
+  private readonly STANDBY_NAME = 'eva-standby';
+  standbyReady = false;
+
   constructor(@Optional() private readonly integrations?: IntegrationsService) {
     this.reaper = setInterval(() => void this.reapIdleSessions(), 60_000);
     this.reaper.unref();
   }
 
-  /** Warm-up: la "computadora" de EVA debe estar lista ANTES de la primera tarea. */
+  /**
+   * Warm-up: la "computadora" de EVA debe estar lista ANTES de la primera tarea.
+   * Reintenta en background hasta WARMUP_MAX_RETRIES veces si Docker no responde
+   * al arranque (p.ej. Docker Desktop todavía inicializando).
+   */
   onApplicationBootstrap() {
-    void this.warmUp();
+    void this.warmUpWithRetry();
   }
 
   async onModuleDestroy() {
     clearInterval(this.reaper);
+    // Limpia todas las sesiones activas y el standby.
     await Promise.all([...this.sessions.keys()].map((taskId) => this.release(taskId)));
+    if (this.standbyReady) {
+      await this.runDocker(['rm', '-f', this.STANDBY_NAME], { timeout: 10_000, maxBuffer: 1024 * 16 }).catch(() => undefined);
+      this.standbyReady = false;
+      this.logger.log('sandbox standby: detenido al apagar el servicio');
+    }
+  }
+
+
+  /**
+   * Warm-up con retry automático. Si Docker no está disponible al arrancar
+   * (p.ej. Docker Desktop todavía inicializando), reintenta cada WARMUP_RETRY_MS
+   * hasta WARMUP_MAX_RETRIES veces — sin bloquear el proceso.
+   */
+  async warmUpWithRetry(): Promise<void> {
+    for (let attempt = 1; attempt <= WARMUP_MAX_RETRIES; attempt++) {
+      const ready = await this.warmUp();
+      if (ready) return;
+      if (attempt < WARMUP_MAX_RETRIES) {
+        this.logger.warn(`sandbox warm-up: Docker no disponible (intento ${attempt}/${WARMUP_MAX_RETRIES}) — reintentando en ${WARMUP_RETRY_MS / 1000}s`);
+        await new Promise<void>((resolve) => setTimeout(resolve, WARMUP_RETRY_MS).unref());
+        // Fuerza re-check limpiando el caché del check anterior.
+        this.dockerCheck = undefined;
+      } else {
+        this.logger.error('sandbox warm-up: Docker no pudo alcanzarse tras todos los reintentos. El sandbox estará inactivo hasta que Docker esté disponible.');
+        this.warmUpStatus = 'no_docker';
+      }
+    }
   }
 
   /**
    * Verifica Docker y deja las imágenes pre-descargadas para que la primera
    * ejecución no pague un `docker pull` (ni falle por imagen ausente).
+   * Retorna true si el sandbox quedó listo, false si Docker no estaba disponible.
    * Best-effort: nunca tira el bootstrap del proceso.
    */
-  async warmUp(): Promise<void> {
+  async warmUp(): Promise<boolean> {
     try {
       if (!(await this.dockerAvailable())) {
-        this.logger.warn('sandbox warm-up: Docker no disponible — se reintentará en el próximo uso');
-        return;
+        return false;
       }
       if (await this.enrichedImageAvailable()) {
-        this.logger.log(`sandbox warm-up: Docker OK, imagen enriquecida ${process.env.EVA_SANDBOX_IMAGE || ENRICHED_IMAGE} lista`);
+        this.logger.log(`sandbox warm-up: ✓ Docker listo, imagen enriquecida ${process.env.EVA_SANDBOX_IMAGE || ENRICHED_IMAGE} disponible — EVA tiene su computadora lista`);
+        this.warmUpStatus = 'ready';
       } else {
-        this.logger.warn(`sandbox warm-up: imagen enriquecida ausente — construye "docker build -t ${ENRICHED_IMAGE.replace(':latest', '')} docker/sandbox"; usando fallbacks alpine`);
+        this.logger.warn(`sandbox warm-up: ✓ Docker listo, pero imagen enriquecida ausente — construye "docker build -t ${ENRICHED_IMAGE.replace(':latest', '')} docker/sandbox"; usando fallbacks alpine`);
+        this.warmUpStatus = 'no_enriched_image';
       }
       // Pre-pull de los fallbacks en background — no bloquea el arranque.
       for (const { image } of Object.values(ONE_SHOT_IMAGES)) {
@@ -133,10 +188,57 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
             .then(() => this.logger.log(`sandbox warm-up: imagen ${image} descargada`))
             .catch((err) => this.logger.warn(`sandbox warm-up: no pude descargar ${image}: ${(err as Error).message.slice(0, 120)}`)));
       }
+      // Lanza el contenedor standby — visible en Docker Desktop, listo para la primera tarea.
+      void this.ensureStandby();
+      return true;
     } catch (error) {
       this.logger.warn(`sandbox warm-up falló: ${(error as Error).message.slice(0, 200)}`);
+      return false;
     }
   }
+
+  /**
+   * Levanta el contenedor eva-standby si no está corriendo.
+   * Es el "motor siempre encendido" de EVA — visible en Docker Desktop.
+   */
+  async ensureStandby(): Promise<void> {
+    try {
+      // ¿Ya corre?
+      const { stdout } = await this.runDocker(
+        ['inspect', '--format', '{{.State.Status}}', this.STANDBY_NAME],
+        { timeout: 5000, maxBuffer: 1024 * 16 },
+      ).catch(() => ({ stdout: '', stderr: '' }));
+
+      if (stdout.trim() === 'running') {
+        this.standbyReady = true;
+        this.logger.log(`sandbox standby: ✓ ${this.STANDBY_NAME} ya estaba corriendo`);
+        return;
+      }
+
+      // Limpia restos de ejecuciones anteriores.
+      await this.runDocker(['rm', '-f', this.STANDBY_NAME], { timeout: 10_000, maxBuffer: 1024 * 16 }).catch(() => undefined);
+
+      const image = (await this.enrichedImageAvailable()) ? ENRICHED_IMAGE : ONE_SHOT_IMAGES.python.image;
+      await this.runDocker([
+        'run', '-d', '--rm',
+        '--name', this.STANDBY_NAME,
+        '--network', 'none',
+        '--memory', '512m',
+        '--cpus', '1',
+        '--read-only', '--tmpfs', '/tmp',
+        '-l', 'eva.role=standby',
+        image,
+        'tail', '-f', '/dev/null',
+      ], { timeout: 30_000, maxBuffer: 1024 * 64 });
+
+      this.standbyReady = true;
+      this.logger.log(`sandbox standby: ✓ ${this.STANDBY_NAME} (${image}) levantado — EVA computer visible en Docker Desktop`);
+    } catch (err) {
+      this.logger.warn(`sandbox standby: no pude levantar ${this.STANDBY_NAME}: ${(err as Error).message.slice(0, 200)}`);
+      this.standbyReady = false;
+    }
+  }
+
 
   /**
    * Disponibilidad con TTL: un "no" de hace un rato no condena al proceso —
@@ -198,10 +300,16 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
       return { ok: false, output: '', error: 'Docker no disponible en este nodo' };
     }
 
+    // Red: solo permitida si el flag global está activo.
+    const networkRequested = opts.network === true && process.env.EVA_SANDBOX_ALLOW_NETWORK === 'true';
+    if (opts.network === true && !networkRequested) {
+      return { ok: false, output: '', error: 'ERROR: la sesión con red requiere EVA_SANDBOX_ALLOW_NETWORK=true en el servidor' };
+    }
+
     const resolved = await this.resolveSecrets(opts.code, opts.orgId);
     if (resolved.error) return { ok: false, output: '', error: resolved.error };
 
-    const session = await this.getOrCreateSession(taskId);
+    const session = await this.getOrCreateSession(taskId, networkRequested);
     if (!session) {
       // Resiliencia: sin sesión persistente, el paso aún puede correr one-shot
       // (se pierde /work entre pasos, pero la tarea no se queda sin computadora).
@@ -266,23 +374,34 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
     }
   }
 
-  /** Libera contenedor + workspace de la tarea. Idempotente y best-effort. */
+  /** Libera contenedor + workspace de la tarea. Libera ambas sesiones (red y no-red). Idempotente. */
   async release(taskId: string): Promise<void> {
-    const session = this.sessions.get(taskId);
-    if (!session) return;
-    this.sessions.delete(taskId);
-    await this.runDocker(['rm', '-f', session.containerName], { timeout: 15_000, maxBuffer: 1024 * 16 })
-      .catch(() => undefined);
-    await rm(session.hostDir, { recursive: true, force: true }).catch(() => undefined);
-    this.logger.log(`sandbox session released for task ${taskId} (${session.stepCount} pasos)`);
+    const keys = [taskId, `${taskId}:net`];
+    for (const key of keys) {
+      const session = this.sessions.get(key);
+      if (!session) continue;
+      this.sessions.delete(key);
+      await this.runDocker(['rm', '-f', session.containerName], { timeout: 15_000, maxBuffer: 1024 * 16 })
+        .catch(() => undefined);
+      await rm(session.hostDir, { recursive: true, force: true }).catch(() => undefined);
+      this.logger.log(`sandbox session released for task ${taskId} key=${key} (${session.stepCount} pasos)`);
+    }
   }
 
   hasSession(taskId: string): boolean {
-    return this.sessions.has(taskId);
+    return this.sessions.has(taskId) || this.sessions.has(`${taskId}:net`);
   }
 
+  /** Devuelve el hostDir de la sesión (preferring network session if it exists, for file access). */
   getHostDir(taskId: string): string | null {
-    return this.sessions.get(taskId)?.hostDir ?? null;
+    return this.sessions.get(`${taskId}:net`)?.hostDir
+      ?? this.sessions.get(taskId)?.hostDir
+      ?? null;
+  }
+
+  /** Devuelve el hostDir específico de la sesión de red (para acceso a archivos descargados). */
+  getNetworkHostDir(taskId: string): string | null {
+    return this.sessions.get(`${taskId}:net`)?.hostDir ?? null;
   }
 
   // ── secrets ───────────────────────────────────────────────────────────────
@@ -318,37 +437,59 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
 
   // ── private ───────────────────────────────────────────────────────────────
 
-  private async getOrCreateSession(taskId: string): Promise<SandboxSession | null> {
-    const existing = this.sessions.get(taskId);
+  private async getOrCreateSession(taskId: string, networkEnabled = false): Promise<SandboxSession | null> {
+    // Clave de sesión: red y no-red son contenedores separados en la misma tarea.
+    const sessionKey = networkEnabled ? `${taskId}:net` : taskId;
+    const existing = this.sessions.get(sessionKey);
     if (existing) return existing;
 
     const image = (await this.enrichedImageAvailable()) ? ENRICHED_IMAGE : ONE_SHOT_IMAGES.python.image;
-    const containerName = `eva-sbx-${createHash('md5').update(taskId).digest('hex').slice(0, 12)}`;
+    const suffix = networkEnabled ? 'net' : 'iso';
+    const containerName = `eva-sbx-${createHash('md5').update(taskId).digest('hex').slice(0, 10)}-${suffix}`;
     const hostDir = await mkdtemp(join(tmpdir(), 'eva-sbx-ws-'));
 
+    // Si el standby está listo y no necesitamos red, liberamos el standby ahora
+    // para que el nombre 'eva-standby' quede libre antes de recrearlo.
+    // El valor del standby es tener la imagen precargada en memoria → el nuevo
+    // docker run tarda ~200ms en vez de segundos.
+    if (!networkEnabled && this.standbyReady) {
+      this.standbyReady = false;
+      await this.runDocker(['rm', '-f', this.STANDBY_NAME], { timeout: 10_000, maxBuffer: 1024 * 16 }).catch(() => undefined);
+    }
+
     try {
-      await this.runDocker([
+      const dockerArgs = [
         'run', '-d', '--rm',
         '--name', containerName,
-        '--network', 'none',
-        '--memory', '512m',
-        '--cpus', '1',
-        '--read-only',
-        '--tmpfs', '/tmp',
+        '--network', networkEnabled ? 'bridge' : 'none',
+        '--memory', networkEnabled ? '1g' : '512m',
+        '--cpus', networkEnabled ? '1.5' : '1',
+        ...(!networkEnabled ? ['--read-only', '--tmpfs', '/tmp'] : []),
         '-v', `${hostDir}:/work`,
         '-w', '/work',
         image,
         'tail', '-f', '/dev/null',
-      ], { timeout: 60_000, maxBuffer: 1024 * 64 });
+      ];
+      await this.runDocker(dockerArgs, { timeout: 60_000, maxBuffer: 1024 * 64 });
     } catch (error) {
       await rm(hostDir, { recursive: true, force: true }).catch(() => undefined);
       this.logger.warn(`sandbox session create failed: ${(error as Error).message.slice(0, 200)}`);
       return null;
     }
 
-    const session: SandboxSession = { containerName, hostDir, image, lastUsedAt: Date.now(), stepCount: 0 };
-    this.sessions.set(taskId, session);
-    this.logger.log(`sandbox session ${containerName} (${image}) created for task ${taskId}`);
+    const session: SandboxSession = {
+      containerName, hostDir, image,
+      lastUsedAt: Date.now(), stepCount: 0,
+      networkEnabled,
+    };
+    this.sessions.set(sessionKey, session);
+    this.logger.log(`sandbox session ${containerName} (${image}, net=${networkEnabled}) ready for task ${taskId}`);
+
+    // Reponer el standby inmediatamente después de asignar la sesión.
+    if (!networkEnabled) {
+      void this.ensureStandby();
+    }
+
     return session;
   }
 

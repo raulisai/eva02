@@ -4,6 +4,7 @@ import { EvaEvent, EventBusService } from '../events/event-bus.service';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { TasksService } from '../tasks/tasks.service';
 import { Approval } from '../approvals/approval.types';
+import { SkillLibraryService, UserFeedbackReaction } from '../agent/skill-library.service';
 import { CommunicationRepository } from './communication.repository';
 import { TelegramAdapter } from './telegram.adapter';
 import {
@@ -38,6 +39,7 @@ export class CommunicationService implements OnApplicationBootstrap {
     private readonly telegram: TelegramAdapter,
     private readonly integrations: IntegrationsService,
     private readonly db: DatabaseService,
+    private readonly skillLibrary: SkillLibraryService,
   ) {}
 
   onApplicationBootstrap() {
@@ -54,7 +56,7 @@ export class CommunicationService implements OnApplicationBootstrap {
       const text = String(p['text'] ?? '');
 
       // 1. Same-channel reply (task originated from Telegram).
-      await this.deliverToTelegram(orgId, taskId, text);
+      await this.deliverToTelegram(orgId, taskId, text, true);
 
       // 2. Cross-channel delivery requested from Playground / wearOS.
       const crossTarget = p['cross_channel_target'] as string | undefined;
@@ -83,7 +85,7 @@ export class CommunicationService implements OnApplicationBootstrap {
       const { orgId, taskId, payload } = event;
       if (!taskId) return;
       const text = String((payload as Record<string, unknown>)['text'] ?? '');
-      await this.deliverToTelegram(orgId, taskId, text);
+      await this.deliverToTelegram(orgId, taskId, text, false);
     });
 
     this.logger.log('CommunicationService subscribed to task.result, task.media and task.say');
@@ -184,6 +186,31 @@ export class CommunicationService implements OnApplicationBootstrap {
         eva_attachments: inbound.attachments,
       },
     });
+
+    const inferredFeedback = this.inferUserFeedback(inbound.description);
+    if (inferredFeedback) {
+      const lastOutbound = await this.repo.findLatestOutboundTaskMessage({
+        orgId,
+        conversationId: conversation.id,
+        channel: 'telegram',
+      });
+      if (lastOutbound?.task_id) {
+        const result = await this.skillLibrary.recordUserFeedback(orgId, {
+          taskId: lastOutbound.task_id,
+          userId: account.user_id,
+          reaction: inferredFeedback.reaction,
+          rating: inferredFeedback.rating,
+          comment: inbound.description,
+        });
+        await this.events.publish({
+          type: 'agent.feedback.inferred',
+          orgId,
+          taskId: lastOutbound.task_id,
+          payload: { channel: 'telegram', conversationId: conversation.id, ...result },
+        });
+        return { ok: true, feedback: result, conversation };
+      }
+    }
 
     const task = await this.tasks.createTask({
       title: this.titleFromTelegram(inbound.title),
@@ -339,7 +366,7 @@ export class CommunicationService implements OnApplicationBootstrap {
     }
   }
 
-  private async deliverToTelegram(orgId: string, taskId: string, text: string): Promise<void> {
+  private async deliverToTelegram(orgId: string, taskId: string, text: string, recordFeedbackTarget = true): Promise<void> {
     if (!text) return;
     try {
       const task = await this.tasks.getTask(taskId, orgId);
@@ -354,10 +381,50 @@ export class CommunicationService implements OnApplicationBootstrap {
       const result = await this.telegram.sendMessage({ chat_id: chatId }, text, settings?.secret);
       if (!result.ok) {
         this.logger.warn(`deliverToTelegram failed for task ${taskId}: ${result.error ?? 'unknown Telegram error'}`);
+        return;
       }
+      if (!recordFeedbackTarget) return;
+      await this.repo.createMessage({
+        orgId,
+        conversationId: typeof meta['conversation_id'] === 'string' ? meta['conversation_id'] : null,
+        taskId,
+        userId: task.created_by,
+        channel: 'telegram',
+        direction: 'outbound',
+        body: text,
+        externalMessageId: result.externalMessageId ?? null,
+        payload: { source_event: 'task.result' },
+      });
     } catch (err) {
       this.logger.warn(`deliverToTelegram failed for task ${taskId}: ${(err as Error).message}`);
     }
+  }
+
+  private inferUserFeedback(text: string): { reaction: UserFeedbackReaction; rating: number } | null {
+    const normalized = text
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!normalized || normalized.length > 120) return null;
+
+    const positive = [
+      'gracias', 'perfecto', 'excelente', 'muy bien', 'bien hecho', 'funciono',
+      'correcto', 'listo gracias', 'genial', 'me sirvio',
+    ];
+    const negative = [
+      'eso esta mal', 'esta mal', 'incorrecto', 'no funciono', 'fallo',
+      'te equivocaste', 'no era', 'mal hecho', 'no sirve', 'corrige',
+    ];
+    if (negative.some((phrase) => normalized.includes(phrase))) {
+      return { reaction: 'negative', rating: 1 };
+    }
+    if (positive.some((phrase) => normalized.includes(phrase))) {
+      return { reaction: 'positive', rating: 5 };
+    }
+    return null;
   }
 
   private async deliverPhotoToTelegram(orgId: string, taskId: string, photoUrl: string): Promise<void> {

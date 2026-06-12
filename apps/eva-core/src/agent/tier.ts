@@ -11,9 +11,9 @@ export interface TierDecision {
   reason: string;
 }
 
-const LONG_SIGNALS = /\b(script|c[oó]digo|programa|automatiza|bot\b|scraper|scrape|docker|deploy|despliega|proyecto|integra|monitorea|cron|cada (hora|d[ií]a|semana)|paso a paso|varios pasos|informe completo|reporte completo|migra|refactoriza)\b/i;
+const LONG_SIGNALS = /\b(script|c[oó]digo|programa|automatiz|bot\b|scrap|docker|deploy|desplieg|proyect|integr|monitor|cron\b|cada (hora|d[ií]a|semana)|paso a paso|varios pasos|informe completo|reporte completo|migr|refactoriz|descarg|download|youtube|youtu\.be|platzi|udemy|vimeo|video|v[ií]deo|mp3|mp4|yt-dlp|m[aá]nd(?:a|e|o|ar)|env[ií](?:a|e|o|ar)|comprim|convert|extra[eí])/i;
 
-const QUICK_SIGNALS = /\b(busca|buscar|b[uú]squeda|clima|tiempo en|precio|cotiza|noticias|tipo de cambio|convierte|cu[aá]nto (cuesta|vale|es)|resume|revisa|traduce|correo|email|notificaciones|agenda|recu[eé]rdame|define|qu[eé] es|actual|hoy|ma[nñ]ana|ayer|[uú]ltim[ao]s?|reciente|en vivo|ahora|receta|recetas|recipe|recipes|cocina|cocinar|ingredientes?|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|calendario|fixture|selecci[oó]n|grupos?|imagen|im[aá]genes|foto|dibuja|dibujo|ilustra|ilustraci[oó]n|logo|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n|drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|archivos?|carpetas?)\b/i;
+const QUICK_SIGNALS = /\b(b[uú]sc|clima|tiempo en|precio|cotiz|noticias|tipo de cambio|convert|conviert|cu[aá]nto (cuesta|vale|es)|resum|revis|traduc|correo|email|notificaciones|agenda|recu[eé]rd|defin|qu[eé] es|actual|hoy|ma[nñ]ana|ayer|[uú]ltim[ao]s?|reciente|en vivo|ahora|recet|recipe|cocin|ingrediente|mundial|munidal|world cup|fifa|partido|jugar[aá]|calendario|fixture|selecci[oó]n|grupo|imagen|im[aá]gen|foto|dibuj|ilustr|logo|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomiend|drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|archivo|carpeta|telegram)/i;
 
 const GREETING = /^(hola|hey|buenas|buenos d[ií]as|buenas tardes|buenas noches|qu[eé] tal|c[oó]mo est[aá]s|gracias|ok|vale|jaja|adi[oó]s|bye)\b/i;
 

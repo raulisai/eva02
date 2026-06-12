@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { DatabaseService } from '../../database/database.service';
 import { EvaEvent, EventBusService } from '../../events/event-bus.service';
 import { IntegrationsService } from '../../integrations/integrations.service';
+import { SkillLibraryService } from '../../agent/skill-library.service';
 import { TasksService } from '../../tasks/tasks.service';
 import { CommunicationRepository } from '../communication.repository';
 import { CommunicationService } from '../communication.service';
@@ -68,6 +69,7 @@ describe('CommunicationService', () => {
   let events: jest.Mocked<EventBusService>;
   let integrations: jest.Mocked<IntegrationsService>;
   let db: jest.Mocked<DatabaseService>;
+  let skillLibrary: jest.Mocked<SkillLibraryService>;
 
   beforeEach(async () => {
     const bucket = {
@@ -98,6 +100,20 @@ describe('CommunicationService', () => {
               payload: input.payload ?? {},
               created_at: now,
             })),
+            findLatestOutboundTaskMessage: jest.fn().mockResolvedValue({
+              id: 'msg-out-1',
+              org_id: ORG,
+              conversation_id: CONV,
+              task_id: TASK,
+              user_id: USER,
+              channel: 'telegram',
+              direction: 'outbound',
+              message_type: 'text',
+              body: 'Respuesta previa',
+              external_message_id: '200',
+              payload: {},
+              created_at: now,
+            }),
             createNotification: jest.fn().mockImplementation(async (input) => ({
               id: 'notif-1',
               org_id: input.orgId,
@@ -152,6 +168,12 @@ describe('CommunicationService', () => {
           } satisfies Partial<IntegrationsService>,
         },
         {
+          provide: SkillLibraryService,
+          useValue: {
+            recordUserFeedback: jest.fn().mockResolvedValue({ taskId: TASK, reward: 1, appliedSkills: 2 }),
+          } satisfies Partial<SkillLibraryService>,
+        },
+        {
           provide: DatabaseService,
           useValue: {
             admin: {
@@ -173,6 +195,7 @@ describe('CommunicationService', () => {
     events = module.get(EventBusService);
     integrations = module.get(IntegrationsService);
     db = module.get(DatabaseService);
+    skillLibrary = module.get(SkillLibraryService);
     jest.spyOn(global, 'fetch' as never).mockReset();
     delete process.env.OPENAI_API_KEY;
     delete process.env.OPENAI_TRANSCRIPTION_MODEL;
@@ -206,6 +229,34 @@ describe('CommunicationService', () => {
     // No immediate "Recibido" ack — the agent delivers the real answer directly
     expect(telegram.sendMessage).not.toHaveBeenCalled();
     expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({ type: 'communication.message.received', orgId: ORG }));
+  });
+
+  it('records short Telegram praise as feedback for the latest outbound task instead of creating a task', async () => {
+    const result = await service.handleTelegramWebhook(ORG, 'secret', {
+      update_id: 2,
+      message: {
+        message_id: 11,
+        text: 'Perfecto, gracias',
+        chat: { id: 100, type: 'private' },
+        from: { id: 42, first_name: 'Eva' },
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect('feedback' in result).toBe(true);
+    expect(tasks.createTask).not.toHaveBeenCalled();
+    expect(skillLibrary.recordUserFeedback).toHaveBeenCalledWith(ORG, {
+      taskId: TASK,
+      userId: USER,
+      reaction: 'positive',
+      rating: 5,
+      comment: 'Perfecto, gracias',
+    });
+    expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'agent.feedback.inferred',
+      orgId: ORG,
+      taskId: TASK,
+    }));
   });
 
   it('creates a task from a Telegram photo and stores a safe EVA media URL for analysis', async () => {
@@ -469,6 +520,13 @@ describe('CommunicationService', () => {
         'Tu bandeja tiene 5 correos',
         'bot-token',
       );
+      expect(repo.createMessage).toHaveBeenCalledWith(expect.objectContaining({
+        orgId: ORG,
+        conversationId: CONV,
+        taskId: TASK,
+        direction: 'outbound',
+        body: 'Tu bandeja tiene 5 correos',
+      }));
     });
 
     it('skips task.result forwarding when model is media:image (photo delivered separately)', async () => {

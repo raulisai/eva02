@@ -2,6 +2,9 @@ import { Injectable } from '@nestjs/common';
 import { SecretCipher } from '../common/secret-cipher';
 import { ChannelSendResult, TelegramFileDownload } from './communication.types';
 
+/** Límite de la Bot API para sendDocument. Videos más grandes requieren streaming o terceros. */
+const TELEGRAM_MAX_BYTES = 50 * 1024 * 1024; // 50 MB
+
 @Injectable()
 export class TelegramAdapter {
   private get envToken() {
@@ -66,6 +69,70 @@ export class TelegramAdapter {
         photo: photoUrl,
         caption: caption.slice(0, 1024),
       }),
+    });
+
+    if (!response.ok) {
+      return { ok: false, error: await response.text() };
+    }
+
+    const body = (await response.json()) as { result?: { message_id?: number } };
+    return { ok: true, externalMessageId: body.result?.message_id ? String(body.result.message_id) : null };
+  }
+
+  /**
+   * Envía un archivo (video, documento, audio) desde un Buffer a Telegram.
+   *
+   * - Archivos ≤50 MB: usa sendVideo (mp4/webm/mov) o sendDocument para el resto.
+   * - Archivos >50 MB: devuelve error claro — el agente notifica al usuario.
+   *
+   * @param target   - debe tener `chat_id`
+   * @param buffer   - contenido del archivo
+   * @param filename - nombre con extensión (ej. "video.mp4")
+   * @param caption  - texto opcional bajo el archivo
+   * @param token    - bot token (si no se pasa, usa env)
+   */
+  async sendDocument(
+    target: Record<string, unknown>,
+    buffer: Buffer,
+    filename: string,
+    caption?: string,
+    token?: string | null,
+  ): Promise<ChannelSendResult & { oversized?: boolean }> {
+    const chatId = String(target['chat_id'] ?? '');
+    if (!chatId) return { ok: false, error: 'Missing Telegram chat_id' };
+
+    const botToken = token ?? this.envToken;
+    if (!botToken) return { ok: true, skipped: true, externalMessageId: null };
+
+    if (buffer.length > TELEGRAM_MAX_BYTES) {
+      return {
+        ok: false,
+        oversized: true,
+        error: `El archivo pesa ${(buffer.length / 1024 / 1024).toFixed(1)} MB — supera el límite de 50 MB de la Bot API de Telegram. Considera comprimir el video o enviarlo como enlace.`,
+      };
+    }
+
+    // Elegir método: sendVideo para formatos nativos (mejor UX en Telegram), sendDocument para el resto.
+    const ext = filename.split('.').pop()?.toLowerCase() ?? '';
+    const isNativeVideo = ['mp4', 'webm', 'mov'].includes(ext);
+    const method = isNativeVideo ? 'sendVideo' : 'sendDocument';
+    const fieldName = isNativeVideo ? 'video' : 'document';
+
+    const mimeMap: Record<string, string> = {
+      mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+      mp3: 'audio/mpeg', ogg: 'audio/ogg', m4a: 'audio/mp4',
+      pdf: 'application/pdf', zip: 'application/zip',
+    };
+    const mimeType = mimeMap[ext] ?? 'application/octet-stream';
+
+    const form = new FormData();
+    form.append('chat_id', chatId);
+    form.append(fieldName, new Blob([new Uint8Array(buffer)], { type: mimeType }), filename);
+    if (caption) form.append('caption', caption.slice(0, 1024));
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+      method: 'POST',
+      body: form,
     });
 
     if (!response.ok) {

@@ -56,6 +56,7 @@ import { CommunicationModule } from '../communication/communication.module';
   exports: [
     AgentRunnerService,
     MediaService,
+    SandboxService,
     SoulContextService,
     GmailService,
     GoogleCalendarService,

@@ -753,7 +753,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         );
         const researchInput = directPublicApi
           ? input
-          : await this.planResearchInput(orgId, taskId, contextualInput);
+          : await this.planResearchInput(orgId, taskId, contextualInput, input);
         const t0 = Date.now();
         const answer = await this.research.answer(researchInput, orgId);
         const elapsed = Date.now() - t0;
@@ -2216,7 +2216,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
     if (this.research.canAnswer(input)) {
       try {
         await this.log(orgId, taskId, 'recovery: buscando con Chromium / APIs publicas', 'tools');
-        const researchInput = await this.planResearchInput(orgId, taskId, input);
+        const researchInput = await this.planResearchInput(orgId, taskId, input, rawInput);
         const t0 = Date.now();
         const answer = await this.research.answer(researchInput, orgId);
         const elapsed = Date.now() - t0;
@@ -2253,7 +2253,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
     return true;
   }
 
-  private async planResearchInput(orgId: string, taskId: string, input: string): Promise<string> {
+  private async planResearchInput(orgId: string, taskId: string, input: string, rawInput?: string): Promise<string> {
     try {
       const plannerDate = this.currentPlannerDate();
       const result = await this.modelRouter.generate(input, {
@@ -2274,8 +2274,8 @@ Responde directamente al usuario en español, con un tono amable y natural.
       };
       const rawQuery = typeof parsed.query === 'string' && parsed.query.trim().length > 0
         ? parsed.query.trim()
-        : input;
-      const query = this.normalizeResearchQuery(input, rawQuery);
+        : (rawInput ?? input);
+      const query = this.normalizeResearchQuery(rawInput ?? input, rawQuery);
       await this.log(
         orgId,
         taskId,
@@ -2285,7 +2285,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
       return query;
     } catch (error) {
       await this.log(orgId, taskId, `research-plan failed; using original input — ${(error as Error).message}`, 'tools');
-      return this.normalizeResearchQuery(input, input);
+      return this.normalizeResearchQuery(rawInput ?? input, rawInput ?? input);
     }
   }
 

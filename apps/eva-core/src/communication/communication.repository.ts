@@ -135,6 +135,27 @@ export class CommunicationRepository {
     return data as CommunicationMessage;
   }
 
+  async findLatestOutboundTaskMessage(input: {
+    orgId: string;
+    conversationId: string;
+    channel: CommunicationChannel;
+  }): Promise<CommunicationMessage | null> {
+    const { data, error } = await this.db.admin
+      .from('messages')
+      .select('*')
+      .eq('org_id', input.orgId)
+      .eq('conversation_id', input.conversationId)
+      .eq('channel', input.channel)
+      .eq('direction', 'outbound')
+      .not('task_id', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) this.fail('messages.findLatestOutboundTask', error);
+    return data as CommunicationMessage | null;
+  }
+
   async createNotification(input: {
     orgId: string;
     userId?: string | null;

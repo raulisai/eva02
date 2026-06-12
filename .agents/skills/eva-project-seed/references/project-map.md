@@ -47,7 +47,7 @@ Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Tru
 - `ToolRouterModule`: tool routing/catalog.
 - `DevControlModule`: projects/dev_tasks/Claude sessions/build/test/roadmap endpoints.
 - `BrowserModule`: Playwright browser sessions + integration browser flows.
-- `CommunicationModule`: accounts/conversations/messages/notifications/Telegram webhook.
+- `CommunicationModule`: accounts/conversations/messages/notifications/Telegram webhook; records Telegram final outbound messages with `task_id` and infers short praise/correction as agent feedback for the latest outbound task in that conversation.
 - `IntegrationsModule`: org integrations, MCP connections, credential/model/channel tests.
 - `AgentModule`: agent loop/runner, skill library, sandbox, media, research, Gmail/Calendar/Drive, soul, schedule, behavior patterns.
 - `ApprovalsModule`: approval request/resolve/validate.
@@ -67,12 +67,13 @@ Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Tru
 - Transitions: `pending -> planning|cancelled`; `planning -> running|failed|cancelled`; `running -> waiting_for_approval|completed|failed|cancelled`; `waiting_for_approval -> running|completed|failed|cancelled`; terminal statuses can reset to `pending`.
 - `TasksRepository` is service-role Supabase and must filter by `org_id`; watch `findStuck(...)`, currently cross-org by age/status and should be handled carefully.
 - `EventBusService.publish` writes Redis stream and persists `task_events` when `taskId` exists.
-- Event types include task lifecycle/log/media/form/setup, approvals, dev tasks, browser screenshots, communication, wear fast path/tokens.
+- Event types include task lifecycle/log/media/form/setup, approvals, dev tasks, browser screenshots, communication, `agent.feedback.inferred`, wear fast path/tokens.
 
 ## Main HTTP/WS Surface
 
 - Public: `GET /health`, `POST /communication/webhooks/telegram/:orgId`.
 - Tasks: `POST /tasks`, `GET /tasks/:id`, `PATCH /tasks/:id/status`.
+- Agent learning: `POST /agent/feedback` records explicit user reaction/rating for a task and reweights skill stats/graph selections.
 - Approvals: `POST /approvals/request`, `POST /approvals/:id/approve|reject|validate`.
 - Jobs: `GET/POST /jobs`, `GET /jobs/:id`, `POST /jobs/:id/pause|resume`, `DELETE /jobs/:id`.
 - Memory: `POST /memories`, `POST /memories/search`, `POST /memories/recall`, `GET /memories/:id`.

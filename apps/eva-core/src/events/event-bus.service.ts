@@ -26,6 +26,7 @@ export type EvaEventType =
   | 'communication.message.received'
   | 'communication.message.sent'
   | 'communication.send.failed'
+  | 'agent.feedback.inferred'
   | 'wear.fast_path.started'
   | 'wear.fast_path.completed'
   | 'wear.fast_path.fallback'

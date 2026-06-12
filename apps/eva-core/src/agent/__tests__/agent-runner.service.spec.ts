@@ -80,6 +80,9 @@ describe('classifyTier', () => {
     expect(classifyTier('crea un script que limpie mis descargas').tier).toBe('long');
     expect(classifyTier('crea un script que me de mi peso en diferentes planetas usando docker').tier).toBe('long');
     expect(classifyTier('automatiza un reporte cada día').tier).toBe('long');
+    expect(classifyTier('puedes descargar un video de youtube de platzi y mandarmelo por telegram?').tier).toBe('long');
+    expect(classifyTier('descárgame el video').tier).toBe('long');
+    expect(classifyTier('bájalo de youtube').tier).toBe('long');
   });
 
   it('never lets sensitive actions take the chat shortcut', () => {
@@ -710,6 +713,27 @@ describe('AgentRunnerService', () => {
     expect(research.answer).toHaveBeenCalledWith('Mexico Mundial FIFA 2026 calendario oficial partidos', ORG);
     expect(publishedLogs().some((message) => message.includes('research-plan: query="Mexico Mundial FIFA 2026 calendario oficial partidos"'))).toBe(true);
     expect(publishedTypes()).toContain('task.result');
+  });
+
+  it('does not normalize queries to Mexico World Cup if they do not contain those keywords in the current turn but do in the history context', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'dime el ultimo video de platzi',
+    }));
+    modelRouter.generate.mockResolvedValueOnce({
+      text: JSON.stringify({
+        query: 'ultimo video Platzi youtube canal oficial',
+        intent: 'lookup',
+        source_hint: 'chromium',
+        reason: 'Pide el ultimo video de Platzi.',
+      }),
+      model: 'gemini-2.5-flash-lite',
+      backend: 'google',
+      usage: { promptTokens: 40, completionTokens: 30, totalTokens: 70 },
+    });
+
+    await service.run(ORG, TASK);
+
+    expect(research.answer).toHaveBeenCalledWith('ultimo video Platzi youtube canal oficial', ORG);
   });
 
   it('routes latest episode questions through search instead of stale model memory', async () => {

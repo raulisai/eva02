@@ -2,6 +2,34 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 16:52Z
+C: agent: loop robustness with balanced budget and yt-dlp/ffmpeg system instructions; files=apps/eva-core/src/agent/agent-loop.service.ts; tests=npm test -- agent-loop.service.spec
+P: pending/improve -> verify media downloading using yt-dlp on a real YouTube / Platzi link end-to-end
+
+### 2026-06-12 16:46Z
+C: communication/agent-learning: Telegram final outbound messages now persist task_id and short praise/correction replies infer agent feedback for latest conversation task via skill reward graph; files=apps/eva-core/src/communication/communication.service.ts,apps/eva-core/src/communication/communication.repository.ts,apps/eva-core/src/communication/communication.module.ts,apps/eva-core/src/events/event-bus.service.ts,apps/eva-core/src/communication/__tests__/communication.service.spec.ts,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- --runInBand src/communication/__tests__/communication.service.spec.ts src/agent/__tests__/skill-library.service.spec.ts && npm run build && npm test -- --runInBand && npm run lint
+P: pending/improve -> add dashboard/playground thumbs UI that calls POST /agent/feedback explicitly and add RLS_TEST coverage after applying skill learning migrations
+
+### 2026-06-12 16:45Z
+C: dashboard/mcp: expanded bundled MCP repository to 30 agent-focused presets and added category filters; files=apps/eva-dashboard/lib/mcp-catalog.ts,apps/eva-dashboard/components/mcp/mcp-client.tsx,apps/eva-dashboard/__tests__/mcp.test.tsx; tests=cd apps/eva-dashboard && npm test -- --runInBand __tests__/mcp.test.tsx && npm run lint && npm test -- --runInBand && npm run build
+P: pending/improve -> wire runner-side stdio env/secret injection for catalog presets that need DATABASE_URL, REDIS_URL, provider tokens, or OAuth
+
+### 2026-06-12 11:31Z
+C: agent: prefix-based tier signals in tier.ts for inflected Spanish verbs; files=apps/eva-core/src/agent/tier.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts; tests=npm test -- apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts
+P: pending/improve -> ensure all Spanish action verbs with trailing pronouns/suffixes are matched by the regex and test more complex phrasing combinations
+
+### 2026-06-12 11:25Z
+C: sandbox: warm-up retry loop (20x/30s), warmUpStatus export, health endpoint reports sandbox status, docker-compose mounts /var/run/docker.sock + eva-sandbox-builder service; files=apps/eva-core/src/agent/sandbox.service.ts,apps/eva-core/src/agent/agent.module.ts,apps/eva-core/src/health/health.controller.ts,apps/eva-core/src/health/health.module.ts,docker-compose.yml,apps/eva-core/src/agent/__tests__/sandbox.service.spec.ts; tests=cd apps/eva-core && npm test -- src/agent/__tests__/sandbox.service.spec.ts --runInBand && npm run build
+P: pending/improve -> verify docker socket mount works on Linux server; check eva-sandbox-builder pulls docker:cli image in CI; add /health sandbox field to dashboard status indicator
+
+### 2026-06-12 11:22Z
+C: agent: real agency — network sandbox sessions, yt-dlp+ffmpeg in eva-sandbox image, TelegramAdapter.sendDocument(), sandbox_ls and telegram_send_file tools in AgentLoopService, TelegramAdapter exported from CommunicationModule; files=docker/sandbox/Dockerfile,apps/eva-core/src/agent/sandbox.service.ts,apps/eva-core/src/communication/telegram.adapter.ts,apps/eva-core/src/communication/communication.module.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/communication/__tests__/telegram.adapter.spec.ts,apps/eva-core/.env.example; tests=cd apps/eva-core && npm test -- communication/__tests__/telegram.adapter.spec.ts agent/__tests__/sandbox.service.spec.ts --runInBand && npm run build && npm test -- --runInBand
+P: pending/improve -> verify yt-dlp download + telegram_send_file end-to-end with a real YouTube URL via Telegram bot; also check ffmpeg compression path for videos >50MB
+
+### 2026-06-12 11:04Z
+C: agent: fix search normalization query context history leakage loop; files=apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts; tests=npm test -- apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts
+P: pending/improve -> add broader e2e integration tests for search normalization under multiple conversation turns
+
 ### 2026-06-12 10:51Z
 C: communication/telegram: accept photo/image documents plus voice/audio webhooks, upload inbound files to eva-media, transcribe audio via org OpenAI key, and create agent-ready tasks without storing Telegram token URLs; files=apps/eva-core/src/communication/communication.service.ts,apps/eva-core/src/communication/communication.types.ts,apps/eva-core/src/communication/telegram.adapter.ts,apps/eva-core/src/communication/__tests__/communication.service.spec.ts,apps/eva-core/src/communication/__tests__/telegram.adapter.spec.ts; tests=cd apps/eva-core && npm test -- communication/__tests__/communication.service.spec.ts communication/__tests__/telegram.adapter.spec.ts --runInBand && npm run build && npm test -- --runInBand && npm run lint
 P: pending/improve -> real Telegram webhook smoke test with a live bot should verify file download size limits, OpenAI transcription model availability, and vision response quality on uploaded photos

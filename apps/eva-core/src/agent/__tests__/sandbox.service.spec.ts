@@ -104,13 +104,15 @@ describe('SandboxService', () => {
     await service.execInSession('task-1', { kind: 'python', code: 'print(1)' });
     await service.execInSession('task-1', { kind: 'python', code: 'print(2)' });
 
-    const creates = dockerCalls.filter((c) => c.args[0] === 'run' && c.args.includes('-d'));
+    // Solo contamos contenedores de sesión de tarea (no el standby que se replica en background).
+    const creates = dockerCalls.filter((c) => c.args[0] === 'run' && c.args.includes('-d') && !c.args.includes('eva-standby'));
     const execs = dockerCalls.filter((c) => c.args[0] === 'exec');
     expect(creates).toHaveLength(1);
     expect(creates[0].args).toEqual(expect.arrayContaining(['--network', 'none', '--read-only', 'tail']));
     expect(execs).toHaveLength(2);
     expect(service.hasSession('task-1')).toBe(true);
   });
+
 
   it('falls back to one-shot execution when the session container cannot be created', async () => {
     dockerSpy.mockImplementation(async (args: string[]) => {
@@ -205,5 +207,68 @@ describe('SandboxService', () => {
 
     expect(result.ok).toBe(false);
     expect(result.output).toContain('SyntaxError');
+  });
+
+  // ── warm-up status ─────────────────────────────────────────────────────────
+
+  it('warmUp returns true and sets status=ready when Docker and enriched image are available', async () => {
+    // dockerAvailable is already mocked to true; make enriched image available
+    dockerSpy.mockImplementation(async (args: string[]) => {
+      dockerCalls.push({ args });
+      // image inspect succeeds → enriched image exists
+      return { stdout: 'sha256:abc', stderr: '' };
+    });
+
+    const result = await service.warmUp();
+
+    expect(result).toBe(true);
+    expect(service.warmUpStatus).toBe('ready');
+  });
+
+  it('warmUp returns true and sets status=no_enriched_image when Docker is up but image missing', async () => {
+    // dockerAvailable is already mocked to true; image inspect fails
+    dockerSpy.mockImplementation(async (args: string[]) => {
+      dockerCalls.push({ args });
+      if (args[0] === 'image') throw new Error('no such image');
+      return { stdout: '', stderr: '' };
+    });
+
+    const result = await service.warmUp();
+
+    expect(result).toBe(true);
+    expect(service.warmUpStatus).toBe('no_enriched_image');
+  });
+
+  it('warmUp returns false when Docker is unavailable', async () => {
+    (service.dockerAvailable as jest.Mock).mockResolvedValue(false);
+
+    const result = await service.warmUp();
+
+    expect(result).toBe(false);
+    expect(service.warmUpStatus).toBe('pending');
+  });
+
+  it('warmUpWithRetry resolves immediately when Docker is available on first attempt', async () => {
+    dockerSpy.mockResolvedValue({ stdout: 'sha256:abc', stderr: '' });
+
+    await service.warmUpWithRetry();
+
+    expect(service.warmUpStatus).toBe('ready');
+  });
+
+  it('warmUpWithRetry sets status=no_docker after max retries exhausted', async () => {
+    // Spy on warmUp to return false always (Docker never available) and skip real timer waits.
+    const warmUpSpy = jest.spyOn(service, 'warmUp').mockResolvedValue(false);
+    // Override the internal sleep so retries are instant.
+    jest.spyOn(global, 'setTimeout').mockImplementation((fn: (...args: unknown[]) => void) => {
+      fn();
+      return 0 as unknown as NodeJS.Timeout;
+    });
+
+    await service.warmUpWithRetry();
+
+    expect(warmUpSpy).toHaveBeenCalledTimes(20); // WARMUP_MAX_RETRIES
+    expect(service.warmUpStatus).toBe('no_docker');
+    jest.restoreAllMocks();
   });
 });
