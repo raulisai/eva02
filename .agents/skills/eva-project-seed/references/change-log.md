@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-12 20:43Z
+C: agent-loop: added explicit authorization instructions to system prompt and refinement layer to prevent false capability/privacy refusals on WhatsApp/Gmail tools; files=apps/eva-core/src/agent/agent-loop.service.ts; tests=npm test
+P: pending/improve -> verify if other model providers (like Claude or GPT) require similar system prompt overrides for capability verification
+
 ### 2026-06-12 20:24Z
 C: agent: implemented general planning horizons router supporting short, medium, and long term tiers; files=apps/eva-core/src/agent/tier.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts; tests=npm test -- src/agent/__tests__/agent-runner.service.spec.ts
 P: pending/improve -> add setting controls in agent Settings page to customize maxSteps limits for different tiers

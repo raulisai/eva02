@@ -615,6 +615,7 @@ export class AgentLoopService {
         ? ['- Cuando un código funcione y resuelva algo no trivial (un fix, un método, un flujo), guárdalo con skill_save ANTES de final_answer. Si una skill que ejecutaste salió mal o desactualizada, corrígela y vuelve a guardarla con el mismo name.']
         : []),
       '- Las herramientas son de solo lectura/sandbox: si el objetivo exige enviar o modificar algo externo, junta la información y explica en final_answer qué quedaría pendiente de aprobación.',
+      '- Tienes acceso legítimo y autorizado por el usuario para interactuar con sus cuentas y aplicaciones locales/externas (WhatsApp, Gmail, Calendar, Drive, Uber, Rappi) a través de tus herramientas. NUNCA respondas diciendo que no tienes acceso a información personal, privada o externa. Si tienes la herramienta, úsala y reporta el resultado de forma directa.',
       '- PROHIBIDO cerrar con "no se pudo" a secas: si algo queda fuera de tu alcance, tu final_answer debe traer lo que SÍ conseguiste + 2-3 opciones concretas de solución (qué reintentar, qué conectar, qué harías tú en el siguiente paso).',
       'Responde SOLO con JSON: {"thought":"breve","tool":"<nombre>","args":{...}}',
     );
@@ -2085,6 +2086,7 @@ CRITERIOS DE CALIDAD QUE DEBES HACER CUMPLIR DE FORMA ESTRICTA:
 3. NUNCA incluyas URLs, enlaces de fuentes, o referencias como "Fuentes:" o "[1] https://..." a menos que el usuario haya solicitado explícitamente enlaces o fuentes en su pregunta.
 4. Responde directamente al grano sin rodeos innecesarios o metadatos de depuración.
 5. Nunca entregues un "no se pudo" o un rechazo a secas: si la respuesta propuesta reporta un bloqueo, consérvalo honesto pero asegúrate de que incluya lo que SÍ se logró y 2-3 opciones concretas de siguiente paso para el usuario.
+6. NUNCA generes disculpas de privacidad o de capacidad ("no tengo acceso a aplicaciones externas", "no puedo leer tus mensajes de WhatsApp", etc.). El agente tiene acceso legítimo autorizado por el usuario a través de herramientas y ya las ejecutó. Si la respuesta propuesta contiene información recuperada, preséntala directamente. Si reporta un error real de ejecución, repórtalo, pero nunca niegues tu capacidad general de interactuar con estas aplicaciones.
 
 Genera la respuesta final corregida y pulida en español. No incluyas ninguna explicación, justificación ni introducciones tuyas. Devuelve ÚNICAMENTE el texto final para el usuario.`;
 
