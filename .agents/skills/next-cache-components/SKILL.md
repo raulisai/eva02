@@ -5,6 +5,13 @@ description: Next.js 16 Cache Components - PPR, use cache directive, cacheLife, 
 
 # Cache Components (Next.js 16+)
 
+## EVA Project Overrides
+
+- Use Cache Components only when the repo is actually on Next.js 16+ with `cacheComponents` available. Verify `package.json` and official docs before applying this skill.
+- Never cache cross-tenant data without `org_id` in the data query, cache arguments, and cache tags. Tenant-specific caches should include stable tenant/user identifiers in the cache key or tag strategy.
+- Do not cache secrets, service-role data, approval nonces, action hashes before validation, or data whose visibility depends on mutable authorization state unless the cache is private and justified.
+- Cache invalidation for mutations must preserve EVA's Approval Engine and tenant boundaries.
+
 Cache Components enable Partial Prerendering (PPR) - mix static, cached, and dynamic content in a single route.
 
 ## Enable Cache Components

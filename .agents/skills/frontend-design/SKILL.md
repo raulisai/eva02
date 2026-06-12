@@ -6,6 +6,13 @@ license: Complete terms in LICENSE.txt
 
 This skill guides creation of distinctive, production-grade frontend interfaces that avoid generic "AI slop" aesthetics. Implement real working code with exceptional attention to aesthetic details and creative choices.
 
+## EVA Project Overrides
+
+- EVA is a multi-tenant agentic operations platform, so product UI should usually feel focused, trustworthy, dense, and work-oriented. Avoid marketing-style landing pages, decorative card stacks, oversized heroes, or novelty visuals unless the user explicitly asks for them.
+- Preserve existing design systems, component conventions, accessibility, auth states, and responsive behavior before introducing a new visual direction.
+- Do not expose secrets or tenant data in client UI. Protected data must respect `org_id` and server-side authorization boundaries.
+- When the UI triggers production, money, or tenant-data actions, surface the existing Approval Engine flow rather than adding a direct action button.
+
 The user provides frontend requirements: a component, page, application, or interface to build. They may include context about the purpose, audience, or technical constraints.
 
 ## Design Thinking

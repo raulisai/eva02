@@ -12,7 +12,7 @@ import { MissingInformationError, ResearchToolsService } from './research-tools.
 import { SandboxLanguage, SandboxService } from './sandbox.service';
 import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
-import { SkillLibraryService } from './skill-library.service';
+import { SkillLibraryService, SkillSummary } from './skill-library.service';
 
 /** One executed cycle of the loop: what the model decided + what the tool observed. */
 export interface AgentLoopStep {
@@ -59,7 +59,7 @@ interface ToolSpec {
 
 /** Extras de prompt que se resuelven una vez por run() (solo raíz). */
 interface LoopExtras {
-  skills: Array<{ slug: string; description: string }>;
+  skills: SkillSummary[];
   secretAliases: string[];
 }
 
@@ -137,6 +137,11 @@ export class AgentLoopService {
     await log(`agent-loop${depth > 0 ? ` (sub-agente d${depth})` : ''}: objetivo "${goal.slice(0, 120)}" — máx ${maxSteps} pasos`, 'loop');
     if (extras.skills.length > 0) {
       await log(`agent-loop: ${extras.skills.length} skills relevantes disponibles [${extras.skills.map((s) => s.slug).join(', ')}]`, 'loop');
+      if (depth === 0) {
+        await this.skillLibrary.beginSelection(orgId, { goal, selected: extras.skills }).catch((err) => {
+          this.logger.debug(`skill beginSelection skipped: ${(err as Error).message}`);
+        });
+      }
     }
 
     for (let i = 0; i < maxSteps; i += 1) {
@@ -178,6 +183,7 @@ export class AgentLoopService {
         parseFailures += 1;
         if (parseFailures >= MAX_PARSE_FAILURES) {
           await log('agent-loop: el modelo no produjo decisiones válidas — abortando bucle', 'loop');
+          this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
           return { ok: false, text: '', steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
         }
         continue;
@@ -188,6 +194,7 @@ export class AgentLoopService {
         const text = String(decision.args.text ?? '').trim();
         if (text) {
           await log(`agent-loop: final_answer en paso ${i + 1} (${tokensUsed} tokens de razonamiento)`, 'loop');
+          this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, text);
           this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
           return { ok: true, text, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
         }
@@ -242,6 +249,7 @@ export class AgentLoopService {
     // Out of steps — synthesise an answer from what was gathered instead of failing dry.
     const gathered = steps.filter((s) => !s.observation.startsWith('ERROR:'));
     if (gathered.length === 0) {
+      this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
       return { ok: false, text: '', steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     }
     try {
@@ -251,10 +259,12 @@ export class AgentLoopService {
       );
       tokensUsed += synthesis.usage.totalTokens;
       await log(`agent-loop: pasos agotados — sintetizando respuesta con ${gathered.length} hallazgos (${tokensUsed} tokens)`, 'loop');
+      this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, synthesis.text);
       this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
       return { ok: true, text: synthesis.text, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     } catch (error) {
       await log(`agent-loop: síntesis falló — ${(error as Error).message}`, 'loop');
+      this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, '');
       return { ok: false, text: '', steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     }
   }
@@ -277,9 +287,26 @@ export class AgentLoopService {
     if (extras.skills.length > 0) {
       blocks.push(
         '',
-        'SKILLS GUARDADAS (reutilízalas con skill_run en vez de reescribir código):',
-        ...extras.skills.map((s) => `- ${s.slug}: ${s.description}`),
+        'CATÁLOGO INTELIGENTE DE SKILLS (ordenado por aptitud, resultados previos y concurrencia):',
+        ...extras.skills.map((s) => {
+          const mode = s.useMode === 'run' ? 'ejecutable con skill_run' : 'guía para razonar/delegar';
+          const role = s.agentRole ? `; sub-agente sugerido: ${s.agentRole}` : '';
+          const reason = s.reason ? `; ${s.reason}` : '';
+          return `- ${s.slug} [${s.source ?? 'unknown'}, ${mode}${role}${reason}]: ${s.description}`;
+        }),
       );
+      const roles = extras.skills
+        .filter((s) => s.agentRole && s.useMode !== 'run')
+        .slice(0, 3)
+        .map((s) => `${s.slug}→${s.agentRole}`)
+        .join(', ');
+      if (roles) blocks.push(`DISTRIBUCIÓN SUGERIDA: si delegas, divide por especialidad (${roles}). No delegues todo el objetivo completo.`);
+      if (extras.skills.some((s) => s.useMode === 'run')) {
+        blocks.push('Las skills ejecutables son código ya probado: usa skill_run solo para las marcadas como "ejecutable con skill_run".');
+      }
+      if (extras.skills.some((s) => s.useMode !== 'run')) {
+        blocks.push('Las skills guía NO se ejecutan con skill_run: úsalas para elegir enfoque, pruebas, revisión o rol del sub-agente.');
+      }
     }
     if (extras.secretAliases.length > 0) {
       blocks.push(
@@ -290,7 +317,7 @@ export class AgentLoopService {
     blocks.push(
       '',
       'REGLAS:',
-      '- Antes de resolver desde cero, revisa memory_recall y las SKILLS GUARDADAS.',
+      '- Antes de resolver desde cero, revisa memory_recall y el CATÁLOGO INTELIGENTE DE SKILLS.',
       '- Para código: divide en pasos pequeños (inspeccionar→preparar→ejecutar→verificar). Los archivos en /work persisten entre pasos de esta tarea.',
       '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
@@ -539,7 +566,11 @@ export class AgentLoopService {
     const subGoal = String(args.goal ?? '').trim();
     if (!subGoal) return 'ERROR: delegate requiere args.goal';
     if (depth >= MAX_DEPTH) return 'ERROR: profundidad máxima de delegación alcanzada';
-    const role = String(args.role ?? '').trim() || undefined;
+    let role = String(args.role ?? '').trim() || undefined;
+    if (!role) {
+      const [suggested] = await this.skillLibrary.findRelevant(orgId, subGoal, 1).catch(() => []);
+      role = suggested?.agentRole;
+    }
     const sub = await this.run(orgId, taskId, subGoal, {
       depth: depth + 1, maxSteps: DEFAULT_SUB_STEPS, role, userId: opts.userId, log,
     });
@@ -554,9 +585,45 @@ export class AgentLoopService {
       this.listSecretAliases(orgId),
     ]);
     return {
-      skills: skills.map((s) => ({ slug: s.slug, description: s.description.slice(0, 90) })),
+      skills: skills.map((s) => ({
+        slug: s.slug,
+        display_name: s.display_name,
+        description: s.description.slice(0, 140),
+        source: s.source ?? 'generated',
+        category: s.category,
+        agentRole: s.agentRole,
+        score: s.score,
+        reason: s.reason,
+        useMode: s.useMode ?? 'run',
+        maxConcurrency: s.maxConcurrency,
+      })),
       secretAliases,
     };
+  }
+
+  private recordSkillOutcome(
+    orgId: string,
+    taskId: string,
+    goal: string,
+    selected: LoopExtras['skills'],
+    steps: AgentLoopStep[],
+    success: boolean,
+    finalText: string,
+  ): void {
+    if (selected.length === 0) return;
+    const usedSlugs = steps
+      .filter((step) => step.tool === 'skill_run' && !step.observation.startsWith('ERROR:'))
+      .map((step) => String(step.args.slug ?? ''))
+      .filter(Boolean);
+    void this.skillLibrary.recordOutcome(orgId, {
+      taskId,
+      goal,
+      selected,
+      usedSlugs,
+      toolsUsed: this.toolsUsed(steps),
+      success,
+      finalText,
+    }).catch((err) => this.logger.debug(`skill outcome skipped: ${(err as Error).message}`));
   }
 
   private async listSecretAliases(orgId: string): Promise<string[]> {

@@ -138,10 +138,58 @@ export class EventBusService implements OnModuleInit, OnModuleDestroy {
       if (!err.message?.includes('BUSYGROUP')) throw err;
     }
 
+    // Reclaim orphaned messages from previous consumer instances that died
+    // before ACKing (e.g. process crash, restart). Idle threshold: 30 s.
+    await this.recoverOrphanedMessages(consumerName);
+
     this.consuming = true;
     this.consumeLoop(consumerName).catch((err) =>
       this.logger.error('Consume loop crashed', err),
     );
+  }
+
+  /**
+   * Claims messages that have been stuck in the PEL (Pending Entry List) for
+   * longer than ORPHAN_IDLE_MS — meaning the consumer that received them is
+   * dead and will never ACK them. Re-dispatches each one under the new
+   * consumer name so they are processed exactly once on restart.
+   */
+  private async recoverOrphanedMessages(consumerName: string): Promise<void> {
+    const ORPHAN_IDLE_MS = 30_000;
+    try {
+      // XPENDING with range returns: [id, consumer, idle_ms, delivery_count]
+      const pending = await this.subscriber.xpending(
+        EVA_STREAM, EVA_CONSUMER_GROUP, '-', '+', 100,
+      ) as Array<[string, string, number, number]>;
+
+      if (!pending?.length) return;
+
+      const orphans = pending.filter(([, , idle]) => idle >= ORPHAN_IDLE_MS);
+      if (!orphans.length) return;
+
+      this.logger.warn(`Recovering ${orphans.length} orphaned PEL message(s) idle ≥ ${ORPHAN_IDLE_MS}ms`);
+
+      for (const [entryId] of orphans) {
+        try {
+          // XCLAIM transfers ownership to this consumer
+          const claimed = await this.subscriber.xclaim(
+            EVA_STREAM, EVA_CONSUMER_GROUP, consumerName,
+            ORPHAN_IDLE_MS, entryId,
+          ) as Array<[string, string[]]>;
+
+          for (const [id, fields] of claimed) {
+            const event = this.parseEntry(id, fields);
+            await this.dispatch(event);
+            await this.subscriber.xack(EVA_STREAM, EVA_CONSUMER_GROUP, id);
+          }
+        } catch (err) {
+          this.logger.error(`Failed to recover orphaned message ${entryId}`, err);
+        }
+      }
+    } catch (err) {
+      // Best-effort: a fresh stream with no PEL may return an error.
+      this.logger.debug(`PEL recovery skipped: ${(err as Error).message}`);
+    }
   }
 
   private async consumeLoop(consumerName: string): Promise<void> {

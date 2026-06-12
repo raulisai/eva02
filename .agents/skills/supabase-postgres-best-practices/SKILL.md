@@ -12,6 +12,16 @@ metadata:
 
 # Supabase Postgres Best Practices
 
+## EVA Project Overrides
+
+Use this skill only under EVA's database rules:
+
+- Tenant isolation is non-negotiable: every query, index design, policy, function, view, and optimization must preserve an explicit `org_id` filter or tenant predicate.
+- New tables need a migration plus an RLS policy in `supabase/migrations/014_rls_policies.sql`.
+- Prefer Supabase/Postgres SQL and the existing `DatabaseService` patterns. Do not introduce Prisma, TypeORM, or alternate ORM migration systems.
+- Do not recommend `DROP`, `TRUNCATE`, forced resets, destructive migrations, production data edits, or secret changes unless the user explicitly approves that exact action.
+- Performance changes must not bypass RLS. Treat `SECURITY DEFINER`, broad grants, views, and RPCs as high-risk and justify them with tests.
+
 Comprehensive performance optimization guide for Postgres, maintained by Supabase. Contains rules across 8 categories, prioritized by impact to guide automated query optimization and schema design.
 
 ## When to Apply

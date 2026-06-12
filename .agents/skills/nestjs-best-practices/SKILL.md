@@ -9,6 +9,18 @@ metadata:
 
 # NestJS Best Practices
 
+## EVA Project Overrides
+
+Apply these rules before the generic NestJS guidance:
+
+- EVA's NestJS app is `apps/eva-core`. Follow the existing module boundaries: `auth`, `database`, `events`, `tasks`, `gateway`, and `health`.
+- Use the existing Supabase-backed `DatabaseService` and per-user client patterns. Do not introduce TypeORM, Prisma, Mongoose, or a second repository/migration stack.
+- Every data access path must filter by `org_id`. Repository examples in this skill are illustrative only; adapt them to EVA's tenant boundary and real table names.
+- New tables require Supabase migrations and RLS policies in `014_rls_policies.sql`.
+- Sensitive actions, money actions, production actions, and data-changing agent actions must go through the Approval Engine (`action_hash` + nonce).
+- Keep `GET /health` public; keep other API routes protected by the existing Supabase JWT strategy/global guard unless the repo already defines a narrower pattern.
+- Always deliver focused unit/e2e tests and keep build, lint, and tests green.
+
 Comprehensive best practices guide for NestJS applications. Contains 40 rules across 10 categories, prioritized by impact to guide automated refactoring and code generation.
 
 ## When to Apply

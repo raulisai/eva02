@@ -118,6 +118,8 @@ describe('AgentLoopService', () => {
             findRelevant: jest.fn().mockResolvedValue([]),
             getRunnable: jest.fn().mockResolvedValue(null),
             register: jest.fn().mockResolvedValue({ ok: true, slug: 'mi-skill', version: '1.0.0' }),
+            recordOutcome: jest.fn().mockResolvedValue(undefined),
+            beginSelection: jest.fn().mockResolvedValue(undefined),
           },
         },
         {
@@ -373,10 +375,15 @@ describe('AgentLoopService', () => {
 
     // Las skills viven en el systemPrompt cacheable, no en el user prompt.
     const firstSystem = modelRouter.generate.mock.calls[0][1]!.systemPrompt as string;
-    expect(firstSystem).toContain('SKILLS GUARDADAS');
+    expect(firstSystem).toContain('CATÁLOGO INTELIGENTE DE SKILLS');
     expect(firstSystem).toContain('gen-cleaner');
     expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, { kind: 'python', code: 'print("clean")', orgId: ORG });
     expect(result.steps[0].observation).toContain('[skill gen-cleaner]');
+    expect(skillLibrary.recordOutcome).toHaveBeenCalledWith(ORG, expect.objectContaining({
+      goal: 'limpia mis descargas',
+      success: true,
+      usedSlugs: ['gen-cleaner'],
+    }));
   });
 
   it('reports missing skills as observations', async () => {

@@ -51,6 +51,21 @@ export class TasksRepository {
     return task;
   }
 
+  async findStuck(pendingSince: string, runningSince: string): Promise<Task[]> {
+    const { data, error } = await this.db.admin
+      .from('tasks')
+      .select('*')
+      .or(
+        `and(status.eq.pending,created_at.lt.${pendingSince}),` +
+        `and(status.in.(planning,running),created_at.lt.${runningSince})`,
+      );
+    if (error) {
+      this.logger.error('tasks.findStuck', error);
+      return [];
+    }
+    return (data ?? []) as Task[];
+  }
+
   async updateStatus(
     taskId: string,
     orgId: string,

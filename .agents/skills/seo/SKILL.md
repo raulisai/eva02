@@ -9,6 +9,12 @@ metadata:
 
 # SEO optimization
 
+## EVA Project Overrides
+
+- EVA's authenticated product surfaces should not be indexed. Apply SEO primarily to public marketing/docs pages if they exist.
+- Do not expose private routes, tenant identifiers, API internals, or authenticated content in sitemaps, structured data, metadata, or robots rules.
+- For Next.js metadata changes, follow the actual app router/pages router structure and keep secrets out of public metadata.
+
 Search engine optimization based on Lighthouse SEO audits and Google Search guidelines. Focus on technical SEO, on-page optimization, and structured data.
 
 ## SEO fundamentals

@@ -9,6 +9,13 @@ metadata:
 
 # Vercel React Best Practices
 
+## EVA Project Overrides
+
+- Optimize React code in service of EVA's actual workflows: authenticated, multi-tenant, operational UI with predictable state and clear feedback.
+- Do not move tenant-sensitive data into shared module state, browser storage, or long-lived caches unless access is scoped by `org_id` and server authorization.
+- Performance changes must preserve readability, tests, accessibility, and existing Next.js/NestJS integration boundaries.
+- Avoid adding new state libraries, analytics scripts, or client-side data layers without a repo-level reason and explicit approval when dependencies change.
+
 Comprehensive performance optimization guide for React and Next.js applications, maintained by Vercel. Contains 70 rules across 8 categories, prioritized by impact to guide automated refactoring and code generation.
 
 ## When to Apply

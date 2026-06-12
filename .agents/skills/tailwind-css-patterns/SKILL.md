@@ -6,6 +6,13 @@ allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 
 # Tailwind CSS Development Patterns
 
+## EVA Project Overrides
+
+- Follow the existing Tailwind/version/configuration in the repo before applying generic v4 examples.
+- EVA UI should prioritize readable operational density, accessible contrast, predictable controls, and responsive layouts. Avoid one-off decorative palettes or nested card-heavy page sections.
+- Keep shared design tokens and existing component patterns consistent. Add arbitrary values only when they serve a concrete layout or accessibility need.
+- Do not run package installs or Tailwind upgrades without explicit approval.
+
 Expert guide for building modern, responsive user interfaces with Tailwind CSS utility-first framework. Covers v4.1+ features including CSS-first configuration, custom utilities, and enhanced developer experience.
 
 ## Overview

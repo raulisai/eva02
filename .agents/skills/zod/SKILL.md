@@ -5,6 +5,12 @@ description: Zod schema validation best practices for type safety, parsing, and 
 
 # Zod Best Practices
 
+## EVA Project Overrides
+
+- Use schemas to enforce tenant-aware inputs where applicable. Request DTOs and command payloads that touch tenant data should carry or derive `org_id` through trusted server context, not untrusted client claims.
+- Validation does not replace authorization. Approval Engine checks, RLS, and repository-level `org_id` filters still apply after parsing succeeds.
+- Keep schemas colocated with the existing NestJS/module patterns unless the repo already has a shared schema location.
+
 Comprehensive schema validation guide for Zod in TypeScript applications. Contains 43 rules across 8 categories, prioritized by impact to guide automated refactoring and code generation.
 
 ## When to Apply

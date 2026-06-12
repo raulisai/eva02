@@ -8,6 +8,19 @@ metadata:
 
 # Supabase
 
+## EVA Project Overrides
+
+These local rules take precedence over the generic Supabase guidance below:
+
+- EVA is multi-tenant. Every table, policy, SQL statement, repository query, RPC, function, view, trigger, realtime channel, storage path, and test fixture that touches tenant data must include an explicit `org_id` boundary.
+- New tables require a numbered migration in `supabase/migrations/` and their RLS policies must be added to `supabase/migrations/014_rls_policies.sql`. Do not place project RLS policies in ad hoc migration files.
+- Do not run production, data-changing, destructive, or money-impacting Supabase operations without explicit approval. Destructive migrations, secret changes, deploys, and direct production data edits are forbidden without approval.
+- Schema work for this repo should be represented as reviewed migration files first. Direct `execute_sql`, `supabase db query`, `db push`, `db reset`, or `apply_migration` may only be used for explicitly approved local experimentation.
+- EVA's real table names are `organizations`, `users`, and `task_events`. Do not introduce or reference `orgs`, `org_members`, or `domain_events`.
+- Authorization must not rely on user-editable metadata. Use the existing Supabase JWT/auth flow, `users.org_id`, RLS, and the Approval Engine (`action_hash` + nonce) for sensitive actions.
+- Service-role credentials and Supabase secrets must stay server-side in environment variables or a secret manager. Never expose them to client code or `NEXT_PUBLIC_*` variables.
+- After Supabase changes, deliver focused tests and the verification command. Include `RLS_TEST=true npm run test:e2e` when the change affects real RLS behavior.
+
 ## Core Principles
 
 **1. Supabase changes frequently — verify against changelog and current docs before implementing.**

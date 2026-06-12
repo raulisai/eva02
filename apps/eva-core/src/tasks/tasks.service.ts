@@ -28,6 +28,12 @@ export class TasksService {
     return this.repo.findByIdOrThrow(taskId, orgId);
   }
 
+  async findStuck(opts: { pendingOlderThanMs: number; runningOlderThanMs: number }): Promise<Task[]> {
+    const pendingSince = new Date(Date.now() - opts.pendingOlderThanMs).toISOString();
+    const runningSince = new Date(Date.now() - opts.runningOlderThanMs).toISOString();
+    return this.repo.findStuck(pendingSince, runningSince);
+  }
+
   async transition(
     taskId: string,
     orgId: string,

@@ -61,6 +61,23 @@ describe('SkillLibraryService', () => {
 
       await expect(service.findRelevant(ORG, 'ventas')).resolves.toEqual([]);
     });
+
+    it('uses the bundled runtime catalog when no generated skill matches', async () => {
+      await build({
+        skills: [{ data: [], error: null }],
+        skill_usage_stats: [{ data: [], error: null }],
+        skill_graph_edges: [{ data: [], error: null }],
+      });
+
+      const result = await service.findRelevant(ORG, 'debug error timeout en tests', 2);
+
+      expect(result[0]).toMatchObject({
+        slug: 'systematic-debugging',
+        source: 'bundled',
+        agentRole: 'debugger',
+        useMode: 'prompt',
+      });
+    });
   });
 
   describe('getRunnable', () => {

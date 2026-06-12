@@ -9,6 +9,12 @@ metadata:
 
 # Accessibility (a11y)
 
+## EVA Project Overrides
+
+- Accessibility fixes must cover EVA's repeated operational workflows: keyboard navigation, focus management, status/error announcements, modals, approval dialogs, tables, task state changes, and realtime updates.
+- Do not expose hidden tenant data in labels, descriptions, metadata, test fixtures, or debug output.
+- Pair accessibility changes with the relevant UI tests or manual verification notes.
+
 Comprehensive accessibility guidelines based on WCAG 2.2 and Lighthouse accessibility audits. Goal: make content usable by everyone, including people with disabilities.
 
 ## WCAG Principles: POUR

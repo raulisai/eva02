@@ -53,6 +53,36 @@ const MOCK_TASK = {
   updated_at: new Date().toISOString(),
 };
 
+const PLAYGROUND_CASES = [
+  {
+    name: 'basic greeting',
+    prompt: 'hola',
+    metadata: { source: 'playground' },
+  },
+  {
+    name: 'internet/weather lookup',
+    prompt: 'el clima',
+    metadata: {
+      source: 'playground',
+      device_location: {
+        latitude: 19.4326,
+        longitude: -99.1332,
+        accuracy: 25,
+      },
+    },
+  },
+  {
+    name: 'latest email lookup',
+    prompt: 'dame el ultimo correo',
+    metadata: { source: 'playground' },
+  },
+  {
+    name: 'docker script request',
+    prompt: 'crea un script que me de mi peso en diferentes planetas usando docker',
+    metadata: { source: 'playground' },
+  },
+] as const;
+
 describe('Tasks (e2e)', () => {
   let app: INestApplication;
   let dbMock: jest.Mocked<DatabaseService>;
@@ -220,6 +250,41 @@ describe('Tasks (e2e)', () => {
 
       expect(eventsMock.publish).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'task.created', orgId: ORG_A }),
+      );
+    });
+  });
+
+  describe('Playground requests (e2e)', () => {
+    it.each(PLAYGROUND_CASES)('creates a task for $name', async ({ prompt, metadata }) => {
+      const token = makeJwt(USER_A, ORG_A);
+
+      const res = await request(app.getHttpServer())
+        .post('/tasks')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          title: prompt,
+          description: prompt,
+          metadata,
+        });
+
+      expect(res.status).toBe(201);
+
+      expect(supabaseMock.from).toHaveBeenCalledWith('tasks');
+      expect(supabaseMock.insert).toHaveBeenCalledWith({
+        org_id: ORG_A,
+        created_by: USER_A,
+        title: prompt,
+        description: prompt,
+        metadata,
+        status: 'pending',
+      });
+      expect(eventsMock.publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'task.created',
+          orgId: ORG_A,
+          taskId: TASK_ID,
+          payload: expect.objectContaining({ taskId: TASK_ID }),
+        }),
       );
     });
   });

@@ -60,10 +60,12 @@ describe('classifyTier', () => {
 
   it('routes lookups to quick (<1 min)', () => {
     expect(classifyTier('busca el clima de hoy').tier).toBe('quick');
+    expect(classifyTier('el clima').tier).toBe('quick');
     expect(classifyTier('¿cuánto cuesta el dólar?').tier).toBe('quick');
     expect(classifyTier('puedes decirme un restaurante de comida argentina rico para ir').tier).toBe('quick');
     expect(classifyTier('crea una imagen de un gato conduciendo').tier).toBe('quick');
     expect(classifyTier('dame una receta con pollo').tier).toBe('quick');
+    expect(classifyTier('dame el ultimo correo').tier).toBe('quick');
   });
 
   it('routes current-information requests to quick instead of chat', () => {
@@ -75,6 +77,7 @@ describe('classifyTier', () => {
 
   it('routes automation/code orders to long (background)', () => {
     expect(classifyTier('crea un script que limpie mis descargas').tier).toBe('long');
+    expect(classifyTier('crea un script que me de mi peso en diferentes planetas usando docker').tier).toBe('long');
     expect(classifyTier('automatiza un reporte cada día').tier).toBe('long');
   });
 
@@ -110,6 +113,7 @@ describe('AgentRunnerService', () => {
           useValue: {
             getTask: jest.fn().mockResolvedValue(makeTask()),
             transition: jest.fn().mockImplementation(async (_id, _org, status) => makeTask({ status })),
+            findStuck: jest.fn().mockResolvedValue([]),
           },
         },
         {
@@ -875,6 +879,70 @@ describe('AgentRunnerService', () => {
     expect(modelRouter.generate).not.toHaveBeenCalled(); // forge owns the model call
   });
 
+  it('routes the playground smoke prompts through the expected agent paths', async () => {
+    const gmail = module.get(GmailService) as jest.Mocked<GmailService>;
+
+    tasks.getTask.mockResolvedValueOnce(makeTask({
+      title: 'hola',
+      description: 'hola',
+      metadata: { source: 'playground' },
+    }));
+    await service.run(ORG, TASK);
+    expect(modelRouter.generate).toHaveBeenCalledWith('hola', expect.objectContaining({
+      budget: 'cheap',
+    }));
+    expect(intentRouter.classify).not.toHaveBeenCalled();
+    expect(publishedTypes()).toContain('task.result');
+
+    jest.clearAllMocks();
+    research.answer.mockResolvedValue({
+      text: 'Pronostico: 18-24 °C.',
+      tool: 'open-meteo',
+      sources: ['https://api.open-meteo.com/v1/forecast'],
+    });
+    tasks.getTask.mockResolvedValueOnce(makeTask({
+      title: 'el clima',
+      description: 'el clima',
+      metadata: {
+        source: 'playground',
+        device_location: { latitude: 19.4326, longitude: -99.1332, accuracy: 25 },
+      },
+    }));
+    await service.run(ORG, TASK);
+    expect(research.answer).toHaveBeenCalledWith('el clima', ORG);
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(publishedLogs().some((message) => message.includes('API pública directa'))).toBe(true);
+
+    jest.clearAllMocks();
+    gmail.fetchLatest.mockResolvedValue({ ok: true, text: '📬 Último correo: **Factura digital**' });
+    tasks.getTask.mockResolvedValueOnce(makeTask({
+      title: 'dame el ultimo correo',
+      description: 'dame el ultimo correo',
+      metadata: { source: 'playground' },
+    }));
+    await service.run(ORG, TASK);
+    expect(gmail.fetchLatest).toHaveBeenCalledWith(ORG, 1);
+    expect(research.answer).not.toHaveBeenCalled();
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+
+    jest.clearAllMocks();
+    forge.isScriptTask.mockReturnValue(true);
+    tasks.getTask.mockResolvedValueOnce(makeTask({
+      title: 'crea un script que me de mi peso en diferentes planetas usando docker',
+      description: 'crea un script que me de mi peso en diferentes planetas usando docker',
+      metadata: { source: 'playground' },
+    }));
+    await service.run(ORG, TASK);
+    expect(forge.forge).toHaveBeenCalledWith(
+      ORG,
+      TASK,
+      expect.stringContaining('crea un script que me de mi peso en diferentes planetas usando docker'),
+      expect.any(Function),
+    );
+    expect(agentLoop.run).not.toHaveBeenCalled();
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+  });
+
   it('attaches an image from the bucket when the order asks for one', async () => {
     tasks.getTask.mockResolvedValue(makeTask({ description: 'busca el clima y muéstrame una imagen' }));
     media.wantsImage.mockReturnValue(true);
@@ -928,7 +996,7 @@ describe('AgentRunnerService', () => {
 
     await service.run(ORG, TASK);
 
-    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'failed', { error: 'provider down' });
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'failed', expect.objectContaining({ error: 'provider down', result: expect.objectContaining({ model: 'failure-options' }) }));
     expect(publishedLogs().some((message) => message.includes('ERROR: provider down'))).toBe(true);
     // El usuario nunca recibe silencio ni un "no se pudo" a secas: la falla
     // llega como task.result con opciones de solución (visible en todos los canales).

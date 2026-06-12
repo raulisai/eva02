@@ -254,6 +254,35 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       await this.executeApprovedAction(event.orgId, event.taskId, payload.approvalId);
     });
     this.logger.log('Agent runner subscribed to task.created + approval.resolved');
+    // Re-queue any tasks that got stuck in a non-terminal state during a
+    // previous run (app crashed, Redis event orphaned, etc.).
+    void this.recoverStuckTasks();
+  }
+
+  /**
+   * On startup: re-queue tasks stuck in `pending` (Redis event was lost during
+   * a crash/restart) and fail tasks stuck in `planning` or `running` (process
+   * died mid-execution).
+   */
+  private async recoverStuckTasks(): Promise<void> {
+    const STUCK_PENDING_MS = 60_000;      // pending > 60s → re-fire task.created
+    const STUCK_RUNNING_MS = 10 * 60_000; // planning/running > 10min → fail
+    try {
+      const stuck = await this.tasks.findStuck({ pendingOlderThanMs: STUCK_PENDING_MS, runningOlderThanMs: STUCK_RUNNING_MS });
+      if (!stuck.length) return;
+      this.logger.warn(`Found ${stuck.length} stuck task(s) — recovering`);
+      for (const task of stuck) {
+        if (task.status === 'pending') {
+          await this.events.publish({ type: 'task.created', orgId: task.org_id, taskId: task.id, payload: { taskId: task.id, title: task.title } });
+          this.logger.log(`Re-queued stuck pending task ${task.id}: "${task.title}"`);
+        } else {
+          await this.failSafely(task.org_id, task.id, 'La tarea quedó incompleta al reiniciar el proceso.');
+          this.logger.warn(`Failed stuck ${task.status} task ${task.id}: "${task.title}"`);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`recoverStuckTasks: ${(err as Error).message}`);
+    }
   }
 
   /** Picks the instant acknowledgment phrase for an order. */
@@ -2046,15 +2075,21 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       // planning, running and waiting_for_approval can all fail directly
       if (!['completed', 'failed', 'cancelled'].includes(refreshed.status)) {
         // The user must never get dead silence (or a bare "no se pudo"):
-        // publish a task.result so every channel (dashboard, Telegram, wearOS)
-        // receives what happened plus concrete next moves EVA can take.
+        // persist result to the task row AND publish a task.result event so
+        // every channel (dashboard, Telegram, wearOS) receives what happened
+        // plus concrete next moves EVA can take.  Storing in result means the
+        // text survives even if the WebSocket was closed at delivery time.
+        const failureText = this.composeFailureOptions(message);
         await this.events.publish({
           type: 'task.result',
           orgId,
           taskId,
-          payload: { text: this.composeFailureOptions(message), model: 'failure-options', latency_ms: 0 },
+          payload: { text: failureText, model: 'failure-options', latency_ms: 0 },
         }).catch(() => undefined);
-        await this.tasks.transition(taskId, orgId, 'failed', { error: message });
+        await this.tasks.transition(taskId, orgId, 'failed', {
+          error: message,
+          result: { text: failureText, model: 'failure-options', latency_ms: 0 },
+        });
       }
     } catch (transitionError) {
       this.logger.error(`Could not mark task ${taskId} as failed`, transitionError as Error);

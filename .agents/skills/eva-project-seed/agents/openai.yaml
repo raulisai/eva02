@@ -1,0 +1,4 @@
+interface:
+  display_name: "EVA Project Seed"
+  short_description: "Compact EVA architecture memory"
+  default_prompt: "Use $eva-project-seed before changing EVA code and update its seed notes after the work."

@@ -6,6 +6,14 @@ user-invocable: false
 
 # Next.js Best Practices
 
+## EVA Project Overrides
+
+- Treat EVA as an authenticated, multi-tenant product. Client/server data fetching must preserve `org_id` boundaries and must not expose Supabase service-role credentials or other secrets to the browser.
+- Prefer server-side auth checks for protected data. Do not rely on `NEXT_PUBLIC_*` configuration for secrets or tenant authorization.
+- Mutations that affect money, production systems, or tenant data must route through the Approval Engine when applicable.
+- Match the existing app structure and Next.js version in `package.json`; verify current docs before major-version-specific changes.
+- Frontend work must include accessible, responsive states and the relevant build/lint/test command.
+
 Apply these rules when writing or reviewing Next.js code.
 
 ## File Conventions
@@ -150,4 +158,3 @@ See [self-hosting.md](./self-hosting.md) for:
 See [debug-tricks.md](./debug-tricks.md) for:
 - MCP endpoint for AI-assisted debugging
 - Rebuild specific routes with `--debug-build-paths`
-

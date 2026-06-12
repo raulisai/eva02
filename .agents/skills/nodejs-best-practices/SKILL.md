@@ -11,6 +11,13 @@ date_added: "2026-02-27"
 > Principles and decision-making for Node.js development in 2025.
 > **Learn to THINK, not memorize code patterns.**
 
+## EVA Project Overrides
+
+- EVA's backend framework is NestJS in `apps/eva-core`. Do not replace or bypass it with Express, Fastify, Hono, Bun, Deno, or a new backend framework unless the user explicitly asks for a separate service.
+- Use this skill for general Node.js reasoning only: async behavior, runtime tradeoffs, security, performance, and package hygiene.
+- Project-specific backend implementation should follow `nestjs-best-practices`, the existing Supabase `DatabaseService`, Redis Streams/BullMQ patterns, and EVA's multi-tenant `org_id` requirement.
+- Do not install packages, change lockfiles, deploy, mutate production data, or change secrets without explicit approval.
+
 ## When to Use
 Use this skill when making Node.js architecture decisions, choosing frameworks, designing async patterns, or applying security and deployment best practices.
 

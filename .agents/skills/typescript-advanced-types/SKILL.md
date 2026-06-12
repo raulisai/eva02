@@ -5,6 +5,12 @@ description: Master TypeScript's advanced type system including generics, condit
 
 # TypeScript Advanced Types
 
+## EVA Project Overrides
+
+- Prefer clear domain types over clever type machinery. Use advanced types when they enforce real invariants such as task states, approval states, tenant-scoped identifiers, or validated payload shapes.
+- Type-level safety does not replace runtime validation, RLS, `org_id` filters, tests, or Approval Engine checks.
+- Keep public API and DTO types readable for NestJS maintainers.
+
 Comprehensive guidance for mastering TypeScript's advanced type system including generics, conditional types, mapped types, template literal types, and utility types for building robust, type-safe applications.
 
 ## When to Use This Skill

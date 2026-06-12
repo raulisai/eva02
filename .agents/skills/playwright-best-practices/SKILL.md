@@ -9,6 +9,14 @@ metadata:
 
 # Playwright Best Practices
 
+## EVA Project Overrides
+
+- EVA e2e tests must preserve tenant isolation. Test data should include `org_id` and assert that cross-tenant access is denied when relevant.
+- Prefer mocked DB e2e for normal runs. Use `RLS_TEST=true npm run test:e2e` only when real Supabase RLS coverage is relevant and credentials are already configured.
+- Do not run tests against production, reset shared databases, seed production data, or update snapshots broadly without explicit approval.
+- For app tests, use the repo's existing Playwright config and scripts before adopting generic examples from this skill.
+- Never put credentials, service-role keys, tokens, or tenant secrets in test source. Use environment variables and safe fixtures.
+
 This skill provides comprehensive guidance for all aspects of Playwright test development, from writing new tests to debugging and maintaining existing test suites.
 
 ## Activity-Based Reference Guide

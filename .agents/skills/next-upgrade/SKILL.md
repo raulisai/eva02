@@ -6,6 +6,14 @@ argument-hint: "[target-version]"
 
 # Upgrade Next.js
 
+## EVA Project Overrides
+
+- Before upgrading, inspect the actual `package.json`, lockfile, Next.js config, and app structure. Do not assume the current version.
+- Fetch and cite official Next.js migration docs for the target version.
+- `npm install`, `npx @next/codemod`, lockfile changes, and broad codemods require explicit approval when they need network access or affect many files.
+- Keep upgrades incremental across major versions and run the repo's build, lint, and test commands after the change.
+- Preserve EVA auth, tenant isolation, secrets handling, and Approval Engine behavior during any framework migration.
+
 Upgrade the current project to the latest Next.js version following official migration guides.
 
 ## Instructions

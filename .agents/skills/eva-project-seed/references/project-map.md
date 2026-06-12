@@ -1,0 +1,114 @@
+# EVA Compact Project Map
+
+Purpose: terse seed memory for agents working in `/Users/djoker/code/eva02`. Trust code over this file if they conflict; then patch this file.
+
+## Hard Rules
+
+- Multi-tenant: every table/query must carry `org_id`; service-role Supabase queries need explicit `.eq('org_id', orgId)` or equivalent scoped write payload.
+- RLS: new tables require migration + RLS policy. AGENTS says policies live in `supabase/migrations/014_rls_policies.sql`; reality also has later RLS/policy migrations (`015`, `016`, `019`, `021`, `022`, `023`, `027`). Reconcile before adding schema.
+- Secrets: never commit or expose secrets. Use env/secret manager. Dashboard may send secrets; reads must return masked hints only.
+- Approvals: money/production/data/destructive actions route through Approval Engine with `action_hash` + `nonce`.
+- Tests: deliver/update tests with behavior changes; keep build/lint/test green as scope allows.
+- Destructive migrations/deploy/secrets changes need explicit user approval.
+
+## Repo Shape
+
+- Root npm workspaces: `apps/*`, `packages/*`.
+- `apps/eva-core`: NestJS API, port `3000`, dotenv loaded in `src/main.ts`, global validation pipe, Helmet, CORS default `http://localhost:3001`.
+- `apps/eva-dashboard`: Next.js 14 dashboard, port `3001`, Supabase SSR, Tailwind/shadcn-style components.
+- `packages/browser-runtime`: Playwright runtime used by core browser module.
+- `packages/mcp-adapters`: MCP adapter/manager package.
+- `packages/skill-runtime`: runtime skill manifests/instructions/tests.
+- `supabase/migrations`: SQL migrations currently `001` through `027`.
+- `docker`: Redis/Postgres local helpers; Supabase cloud remains expected DB in AGENTS.
+- `.agents/skills`: repo-local agent skills, including this seed.
+
+## Commands
+
+- Root: `npm run build`, `npm test`, `npm run test:e2e`, `npm run lint`.
+- Core: `cd apps/eva-core && npm test`; e2e `npm run test:e2e`; real RLS add `RLS_TEST=true npm run test:e2e`; dev `npm run start:dev`.
+- Dashboard: `cd apps/eva-dashboard && npm run dev`; test `npm test`; lint `npm run lint`; build `npm run build`.
+- Infra: `docker compose up -d redis`; only run migrations/deploy/destructive actions with approval.
+
+## Core App Wiring
+
+`apps/eva-core/src/app.module.ts` imports:
+
+- `AuthModule`: Supabase JWT via custom Passport strategy; global app guard is throttler, auth guard is module-level pattern.
+- `DatabaseModule`: `DatabaseService` exposes service-role `admin` and `forUser(jwt)` RLS client.
+- `EventsModule`: Redis Streams `eva:events`, consumer group `eva-core`, persists task events.
+- `TasksModule`: CRUD/status state machine.
+- `GatewayModule`: Socket.io `/eva`; validates token via Supabase and resolves `org_id` from `users`.
+- `HealthModule`: public `GET /health`.
+- `MemoryModule`: memories + pgvector search RPC.
+- `ModelRouterModule`: billing/model routing + token logs.
+- `IntentRouterModule`: classify/list intent routes.
+- `PlannerModule`: plan generation endpoint.
+- `ToolRouterModule`: tool routing/catalog.
+- `DevControlModule`: projects/dev_tasks/Claude sessions/build/test/roadmap endpoints.
+- `BrowserModule`: Playwright browser sessions + integration browser flows.
+- `CommunicationModule`: accounts/conversations/messages/notifications/Telegram webhook.
+- `IntegrationsModule`: org integrations, MCP connections, credential/model/channel tests.
+- `AgentModule`: agent loop/runner, skill library, sandbox, media, research, Gmail/Calendar/Drive, soul, schedule, behavior patterns.
+- `ApprovalsModule`: approval request/resolve/validate.
+- `WearFastPathModule`: ephemeral watch tokens, request path, policy.
+- `JobsModule`: scheduled jobs + scheduler.
+
+## Auth/Tenancy
+
+- `SupabaseJwtStrategy` validates Bearer token with `db.admin.auth.getUser(token)`.
+- `orgId` source order: `user.app_metadata.org_id`, then `X-Org-Id` verified against `users`, then single `users` row fallback.
+- Dashboard server org context reads `users.org_id` in `apps/eva-dashboard/lib/supabase/org.ts`.
+- Dashboard client `coreFetch` sends Bearer token to `NEXT_PUBLIC_EVA_CORE_URL`.
+
+## Task/Event Model
+
+- Task statuses: `pending`, `planning`, `running`, `waiting_for_approval`, `completed`, `failed`, `cancelled`.
+- Transitions: `pending -> planning|cancelled`; `planning -> running|failed|cancelled`; `running -> waiting_for_approval|completed|failed|cancelled`; `waiting_for_approval -> running|completed|failed|cancelled`; terminal statuses can reset to `pending`.
+- `TasksRepository` is service-role Supabase and must filter by `org_id`; watch `findStuck(...)`, currently cross-org by age/status and should be handled carefully.
+- `EventBusService.publish` writes Redis stream and persists `task_events` when `taskId` exists.
+- Event types include task lifecycle/log/media/form/setup, approvals, dev tasks, browser screenshots, communication, wear fast path/tokens.
+
+## Main HTTP/WS Surface
+
+- Public: `GET /health`, `POST /communication/webhooks/telegram/:orgId`.
+- Tasks: `POST /tasks`, `GET /tasks/:id`, `PATCH /tasks/:id/status`.
+- Approvals: `POST /approvals/request`, `POST /approvals/:id/approve|reject|validate`.
+- Jobs: `GET/POST /jobs`, `GET /jobs/:id`, `POST /jobs/:id/pause|resume`, `DELETE /jobs/:id`.
+- Memory: `POST /memories`, `POST /memories/search`, `POST /memories/recall`, `GET /memories/:id`.
+- Intent/planner/tool/model: `/intent/classify`, `/intent/routes`, `/planner/plan`, `/tool-router/route`, `/tool-router/tools`, `/billing/stats`.
+- Browser: `/browser/open`, `/browser/sessions/:id/{screenshot,click,type,extract-text,extract-table,wait,close,prepare-action,status}`.
+- Integrations: `/integrations`, `/integrations/mcp/connections`, credential/model/channel tests, Google/WhatsApp/Uber/Rappi browser flows.
+- Dev control: `/dev-control/projects`, `/dev-control/dev-tasks`, `/dev-control/claude-code/sessions`, build/test runs, roadmap suggestion.
+- Wear: `/wear-fast-path/token`, `/wear-fast-path/request`, `/wear-fast-path/policy`.
+- WebSocket: Socket.io namespace/path `/eva`, has `ping`, auth token checked in gateway.
+
+## Supabase Schema Groups
+
+Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_events`, `005_memories`, `006_intent_routes`, `007_communication`, `008_skills`, `009_browser`, `010_dev_manager`, `011_wear_fast_path`, `012_nodes_devices`, `013_approvals`, `014_rls_policies`, `015_wear_ui`, `016_integrations_soul_artifacts`, `017_credentials_skill_seed`, `018_tasks_schema_align`, `019_fix_missing_rls_and_grants`, `020_soul_v2`, `021_schedule_places_patterns`, `022_scheduled_jobs`, `023_token_logs`, `024_fix_billing_stats_rpc`, `025_add_task_id_to_token_logs`, `026_fix_task_events_event_nullable`, `027_skill_learning_graph`.
+
+- Identity/org: `organizations`, `users`.
+- Tasks/events: `tasks`, `task_events`; `014` references `task_steps` but no `CREATE TABLE` was found in current scan.
+- Memory/soul: `memories`, `memory_embeddings`, `agent_souls`; RPC `match_memories`.
+- Routing/planning/tools: `intent_routes`, `skills`, `skill_versions`, `tools`, `tool_calls`, `skill_usage_stats`, `skill_graph_edges`, `skill_selection_events`.
+- Browser: `browser_profiles`, `browser_sessions`, `browser_screenshots`, `browser_action_preparations`.
+- Dev manager: `projects`, `dev_tasks`, `claude_code_sessions`, `build_runs`, `test_runs`, `code_reviews`, `roadmap_items`.
+- Wear/devices: `wear_sessions`, `wear_tokens`, `wear_fast_path_logs`, `fast_path_policies`, `wear_capabilities`, `wear_directives`, `wear_form_responses`, `wear_sensor_consents`, `nodes`, `node_capabilities`, `devices`.
+- Communication/integrations: `communication_channels`, `communication_accounts`, `conversations`, `messages`, `notifications`, `org_integrations`, `mcp_connections`.
+- Artifacts/schedule/behavior/billing: `artifacts`, `schedule_events`, `known_places`, `location_visits`, `behavior_patterns`, `scheduled_jobs`, `token_logs`; RPC `get_billing_stats`.
+
+## Dashboard Map
+
+- App routes under `apps/eva-dashboard/app`: login, redirect root, dashboard layout, tasks, approvals, artifacts, billing, events, jobs, logs, mcp, nodes, playground, skills, soul.
+- `middleware.ts` refreshes Supabase auth with `getUser()`, redirects unauthenticated users to `/login`, authenticated root/login users to `/tasks`.
+- API client: `lib/core-api.ts` uses client Supabase session and Bearer token.
+- Server org context: `lib/supabase/org.ts` gets `users.org_id`; keep org-scoped Supabase reads.
+- UI components: `components/tasks`, `approvals`, `billing`, `events`, `jobs`, `mcp`, `nodes`, `playground`, `skills`, `soul`, `settings`, `layout`, `ui`.
+
+## Local Drift / Watchlist
+
+- AGENTS/README migration lists are stale versus actual `001-027`.
+- AGENTS says RLS policies live exclusively in `014_rls_policies.sql`, but later migrations include policy creation; decide convention before adding more tables.
+- `014_rls_policies.sql` references `task_steps`; current migration scan did not find `CREATE TABLE task_steps`.
+- `TasksRepository.findStuck` lacks an `org_id` argument/filter; may be intended system-wide but violates the written non-negotiable unless bounded elsewhere.
+- Many existing files are modified in the worktree; do not revert user changes.

@@ -14,6 +14,12 @@ metadata:
 
 # React Composition Patterns
 
+## EVA Project Overrides
+
+- Favor composition when it simplifies EVA's real product surfaces. Do not introduce compound-component machinery for small one-off components.
+- Preserve existing component APIs and design-system conventions unless the refactor clearly reduces repeated logic or boolean prop complexity.
+- Keep authorization and tenant checks outside presentational composition. UI composition must not hide Approval Engine or `org_id` boundaries.
+
 Composition patterns for building flexible, maintainable React components. Avoid
 boolean prop proliferation by using compound components, lifting state, and
 composing internals. These patterns make codebases easier for both humans and AI
