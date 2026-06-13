@@ -918,8 +918,8 @@ describe('AgentLoopService', () => {
     const system = modelRouter.generate.mock.calls[0][1]!.systemPrompt as string;
     expect(system).toContain('HORIZONTE Y ESTADOS');
     expect(system).toContain('MEMORIA PROCEDIMENTAL RAIZ');
-    expect(system).toContain('scheduled_jobs');
-    expect(system).toContain('timeout_minutes');
+    expect(system).toContain('schedule_job_manage');
+    expect(system).toContain('data_log');
     expect(system).toContain('inspeccionar→preparar→ejecutar→verificar');
     expect(system).toContain('Nunca declares éxito');
     expect(system).toContain('/work persisten');

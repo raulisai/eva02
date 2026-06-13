@@ -167,6 +167,8 @@ export class ScheduledJobsService {
   // ── Private helpers ───────────────────────────────────────────────────────
 
   private detectJobType(input: string): JobType {
+    if (/\b(acci[oó]n(es)?|bolsa|stock|ticker|cotizaci[oó]n|mercado\s+(burs[aá]til|financiero)|nasdaq|nyse|s&p|googl|aapl|tsla|amzn|meta|nflx|msft)\b/i.test(input)) return 'stock_monitor';
+    if (/\b(valida[r]?\s+(archivo|fichero|documento|pdf|excel|csv)|verifica[r]?\s+archivo|integridad\s+de\s+archivo|archivo\s+roto|da[ñn]ado)\b/i.test(input)) return 'file_validator';
     // Price beats URL — a product page with a price is price_monitor
     if (/\b(precio|cuesta|vale|product[oa]|amazon|mercadolibre|baj[oó]|suba|alerta\s+de\s+precio)\b/i.test(input)) return 'price_monitor';
     if (/\b(https?:\/\/|url|p[aá]gina|sitio|p[aá]g\.|arriba|disponible|status|down|ca[ií]do)\b/i.test(input)) return 'url_monitor';
@@ -193,8 +195,25 @@ export class ScheduledJobsService {
       return { schedule_type: 'interval', interval_minutes: intervalMin, timezone: tz };
     }
 
+    // Monthly recurrence → first day of month at 8am (reads previous month's data)
+    const isMonthly = /\b(cada\s+mes|mensual(mente)?|al\s+final\s+del\s+mes|fin\s+de\s+mes|[uú]ltimo\s+d[ií]a|reporte\s+mensual|informe\s+mensual)\b/i.test(input);
+    if (isMonthly) {
+      return { schedule_type: 'cron', cron_expr: `0 8 1 * *`, timezone: tz };
+    }
+
+    // Weekly recurrence pattern
+    const dayMap: Record<string, number> = {
+      lunes: 1, martes: 2, 'mi[eé]rcoles': 3, miercoles: 3, jueves: 4,
+      viernes: 5, 's[aá]bado': 6, sabado: 6, domingo: 0,
+    };
+    for (const [day, dow] of Object.entries(dayMap)) {
+      if (new RegExp(`\\b(todos\\s+los\\s+)?${day}s?\\b`, 'i').test(input)) {
+        return { schedule_type: 'cron', cron_expr: `0 8 * * ${dow}`, timezone: tz };
+      }
+    }
+
     // Daily recurrence pattern → cron at 7am default
-    const isRecurring = /\b(todos\s+los\s+d[ií]as|cada\s+d[ií]a|diariamente|diario|diaria|todos\s+los\s+(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bados?|domingos?))\b/i.test(input);
+    const isRecurring = /\b(todos\s+los\s+d[ií]as|cada\s+d[ií]a|diariamente|diario|diaria)\b/i.test(input);
     if (isRecurring) {
       return { schedule_type: 'cron', cron_expr: `0 7 * * *`, timezone: tz };
     }
@@ -207,6 +226,26 @@ export class ScheduledJobsService {
     switch (type) {
       case 'briefing': return MANERO_TASK_INPUT;
       case 'email_check': return 'Revisa mis correos importantes de las últimas 2 horas y dime si hay algo urgente.';
+      case 'stock_monitor': {
+        // Extract ticker symbols (ALL CAPS 1-5 chars) or company names from the input
+        const tickerMatch = input.match(/\b([A-Z]{1,5})\b/);
+        const companyMap: Record<string, string> = {
+          google: 'GOOGL', alphabet: 'GOOGL', apple: 'AAPL', tesla: 'TSLA',
+          amazon: 'AMZN', microsoft: 'MSFT', meta: 'META', netflix: 'NFLX',
+        };
+        let ticker = tickerMatch?.[1] ?? '';
+        for (const [name, sym] of Object.entries(companyMap)) {
+          if (new RegExp(`\\b${name}\\b`, 'i').test(input)) { ticker = sym; break; }
+        }
+        const isMonthlyReport = /\b(reporte|informe|resumen|mensual|fin\s+de\s+mes)\b/i.test(input);
+        if (isMonthlyReport) {
+          return `Genera un informe mensual de la acción ${ticker || 'indicada'}: usa code_execute con yfinance para descargar los datos OHLCV del mes anterior (period="1mo"), calcula precio de apertura, cierre, máximo, mínimo, variación porcentual total, días al alza vs días a la baja, y volumen promedio. También lee el data_log con key "stock:${ticker || 'TARGET'}" para incluir observaciones acumuladas. Presenta el informe con formato claro en español y enviámelo por Telegram si está configurado.`;
+        }
+        return `Monitoreo diario de la acción ${ticker || 'indicada'}: usa code_execute con yfinance (yf.download("${ticker || 'TICKER'}", period="1d", interval="1d")) para obtener el precio de cierre y la variación porcentual del día. Guarda el resultado en data_log con key "stock:${ticker || 'TICKER'}" y valor JSON {"price": X, "change_pct": Y, "date": "YYYY-MM-DD"}. Si la variación supera el 5% en cualquier dirección, avísame con una nota destacada.`;
+      }
+      case 'file_validator': {
+        return `Valida la integridad y calidad de los archivos indicados: verifica que no estén corruptos o vacíos, que el formato sea el correcto (PDF legible, Excel con hojas, CSV con columnas esperadas, imágenes con dimensiones válidas), y que el contenido tenga sentido (no páginas en blanco, no filas vacías, no valores nulos masivos). Usa code_execute para hacer la validación programática. Reporta qué archivos son válidos, cuáles tienen problemas y qué tipo de problema encontraste. Si algún archivo está roto o incompleto, dime exactamente qué encontraste.`;
+      }
       case 'url_monitor': {
         const urlMatch = input.match(/https?:\/\/[^\s,]+/i);
         const url = urlMatch ? urlMatch[0] : '';
@@ -239,6 +278,8 @@ export class ScheduledJobsService {
       email_check: 'Revisión de correo 📬',
       price_monitor: 'Monitor de precio 💰',
       url_monitor: 'Monitor de URL 🌐',
+      stock_monitor: 'Monitor de acciones 📈',
+      file_validator: 'Validador de archivos 📁',
       custom: shortInput,
     };
     return typeLabels[type];

@@ -213,6 +213,42 @@ export const BUNDLED_SKILL_CATALOG: BundledSkillCatalogEntry[] = [
       { to: 'plan', relation: 'supports', weight: 0.25 },
     ],
   },
+  {
+    slug: 'file-validator',
+    displayName: 'File Validator',
+    category: 'qa',
+    description: 'Validate file integrity and content quality: checks PDFs are readable, Excel sheets are non-empty, images have valid dimensions, and binary files are not corrupted. Reports specific errors per file.',
+    triggers: [
+      'valida archivo', 'valida fichero', 'archivo roto', 'archivo dañado', 'verifica integridad',
+      'pdf corrupto', 'excel vacio', 'archivo invalido', 'checa el archivo',
+      'revisa el documento', 'validate file', 'file check', 'integridad de archivo',
+      'archivo corrupto', 'documento dañado', 'archivo no abre',
+    ],
+    negativeTriggers: ['editar archivo', 'modificar pdf', 'crear csv', 'genera csv', 'reporte csv'],
+    agentRole: 'file integrity auditor',
+    baseWeight: 1.3,
+    maxConcurrency: 3,
+    graph: [
+      { to: 'systematic-debugging', relation: 'supports', weight: 0.4 },
+    ],
+  },
+  {
+    slug: 'stock-tracker',
+    displayName: 'Stock Tracker',
+    category: 'research',
+    description: 'Daily stock price collection and monthly trend analysis. Uses yfinance via code_execute and data_log to accumulate OHLCV data across job runs, then aggregates into a structured monthly analysis with percent change, up/down days, and volume.',
+    triggers: [
+      'precio de accion', 'cotizacion bursatil', 'mercado bursatil', 'bolsa de valores',
+      'trackear accion', 'monitorear accion', 'seguimiento de acciones',
+      'informe de acciones', 'analisis bursatil', 'nasdaq', 'nyse',
+      'precio googl', 'precio aapl', 'precio tsla', 'precio amzn', 'precio msft',
+    ],
+    negativeTriggers: ['criptomoneda', 'bitcoin', 'cripto', 'ventas', 'reporte de ventas'],
+    agentRole: 'financial analyst',
+    baseWeight: 1.2,
+    maxConcurrency: 2,
+    graph: [],
+  },
 ];
 
 export const BUNDLED_SKILL_BY_SLUG = new Map(BUNDLED_SKILL_CATALOG.map((skill) => [skill.slug, skill]));

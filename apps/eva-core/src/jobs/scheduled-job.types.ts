@@ -1,4 +1,4 @@
-export type JobType = 'briefing' | 'email_check' | 'price_monitor' | 'url_monitor' | 'custom';
+export type JobType = 'briefing' | 'email_check' | 'price_monitor' | 'url_monitor' | 'stock_monitor' | 'file_validator' | 'custom';
 export type JobStatus = 'active' | 'paused' | 'completed';
 export type ScheduleType = 'cron' | 'once' | 'interval';
 

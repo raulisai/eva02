@@ -737,7 +737,8 @@ export class AgentLoopService {
       'REGLAS:',
       'HORIZONTE Y ESTADOS:',
       '- Clasifica mentalmente cada objetivo antes de actuar: conversacion inmediata, trabajo de minutos, trabajo largo de fondo, tarea programada, espera externa, o accion sensible con approval.',
-      '- Si el objetivo debe repetirse, monitorear algo o despertar despues, usa scheduled_jobs en vez de simular una espera dentro del loop.',
+      '- Si el objetivo debe repetirse, monitorear algo o despertar despues, usa schedule_job_manage en vez de simular una espera dentro del loop.',
+      '- Para tareas de acumulación larga (tracking de precios/acciones, estados de archivos, métricas diarias): usa data_log{"action":"write"} al final de cada ejecución del job para guardar el punto de datos del día; un job separado mensual usa data_log{"action":"read","since":"YYYY-MM-01"} para agregar el historial. NO uses memory_recall para datos cuantitativos con timestamps — usa data_log.',
       '- Si falta una decision/dato o la tarea depende de que el usuario o un tercero responda, usa ask_user y deja la tarea pausada; no cierres como completado ni inventes que seguiras mirando.',
       '- Si una accion toca dinero, produccion, datos sensibles, mensajes/envios o cambios de cuenta, prepara la accion y deja que el Approval Engine la autorice.',
       'MEMORIA PROCEDIMENTAL RAIZ:',
@@ -2040,6 +2041,70 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
 
           return `Operación calendar.${action} preparada (${summary}). El usuario ya recibió la solicitud de aprobación por su canal. Cierra con final_answer BREVE: describe qué se hará y que responda "sí" para aprobarlo o "no" para cancelar. No incluyas hashes ni detalles técnicos.`;
         }
+      },
+      {
+        name: 'data_log',
+        usage: 'data_log{"action":"write|read|delete","key":"<namespace>:<id>","value"?,"since"?,"limit"?}: acumula observaciones persistentes entre ejecuciones de jobs (precios, hashes, estados). Ideal para monitoring de largo plazo donde cada ejecución guarda un punto de datos y un job posterior los agrega.',
+        rootOnly: false,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['write', 'read', 'delete'], description: '"write" guarda un punto; "read" recupera el historial; "delete" elimina entradas.' },
+            key: { type: 'string', description: 'Clave con namespace, ej. "stock:GOOGL", "file:invoice.pdf", "url:https://...".' },
+            value: { type: 'string', description: 'Valor a guardar (JSON string o texto). Requerido para "write".' },
+            since: { type: 'string', description: 'ISO date para filtrar entradas desde esa fecha. Ej. "2026-06-01".' },
+            limit: { type: 'number', description: 'Máx de entradas a devolver en "read". Default 100.' },
+          },
+          required: ['action', 'key'],
+        },
+        execute: async (orgId, taskId, args) => {
+          const action = String(args.action ?? '');
+          const key = String(args.key ?? '').trim();
+          if (!key) return 'ERROR: key es requerida.';
+
+          if (action === 'write') {
+            const value = args.value != null ? String(args.value) : '';
+            if (!value) return 'ERROR: value es requerida para write.';
+            const { error } = await this.db.admin
+              .from('agent_data_log')
+              .insert({ org_id: orgId, key, value, job_id: taskId });
+            if (error) return `ERROR: ${error.message}`;
+            return `✅ Guardado en data_log [${key}] a las ${new Date().toISOString()}.`;
+          }
+
+          if (action === 'read') {
+            const limit = Math.min(Number(args.limit ?? 100), 500);
+            let query = this.db.admin
+              .from('agent_data_log')
+              .select('recorded_at, value')
+              .eq('org_id', orgId)
+              .eq('key', key)
+              .order('recorded_at', { ascending: false })
+              .limit(limit);
+            if (args.since) {
+              query = query.gte('recorded_at', String(args.since));
+            }
+            const { data, error } = await query;
+            if (error) return `ERROR: ${error.message}`;
+            if (!data || data.length === 0) return `No hay entradas en data_log para key "${key}".`;
+            const lines = (data as Array<{ recorded_at: string; value: string }>)
+              .map((r) => `${r.recorded_at.slice(0, 10)}: ${r.value}`)
+              .join('\n');
+            return `${data.length} entradas para "${key}":\n${lines}`;
+          }
+
+          if (action === 'delete') {
+            const { error } = await this.db.admin
+              .from('agent_data_log')
+              .delete()
+              .eq('org_id', orgId)
+              .eq('key', key);
+            if (error) return `ERROR: ${error.message}`;
+            return `✅ Entradas de data_log eliminadas para key "${key}".`;
+          }
+
+          return 'ERROR: acción desconocida. Usa "write", "read" o "delete".';
+        },
       },
       {
         name: 'schedule_job_manage',

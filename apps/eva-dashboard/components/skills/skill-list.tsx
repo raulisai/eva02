@@ -135,18 +135,18 @@ export function SkillList({ initialSkills, toolsBySkill }: SkillListProps) {
                 <div className="border-t border-zinc-800 px-4 py-3 space-y-3 animate-expand-y overflow-hidden">
                   <div className="flex items-center justify-between">
                     <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">Tools</p>
-                    {(skill.status === 'active' || skill.status === 'disabled' || skill.status === 'draft') && (
-                      <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2">
+                      {(skill.status === 'active' || skill.status === 'disabled' || skill.status === 'draft') && (
                         <Button size="sm" variant="outline" onClick={() => toggle(skill)} disabled={busyId === skill.id}>
                           {busyId === skill.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Power className="w-3 h-3" />}
                           {skill.status === 'active' ? 'Disable skill' : 'Enable skill'}
                         </Button>
-                        <Button size="sm" variant="outline" className="text-red-400 hover:text-red-300 hover:bg-red-400/10 hover:border-red-400/30 border-red-500/20" onClick={() => removeSkill(skill)} disabled={busyId === skill.id}>
-                          {busyId === skill.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                          Delete
-                        </Button>
-                      </div>
-                    )}
+                      )}
+                      <Button size="sm" variant="outline" className="text-red-400 hover:text-red-300 hover:bg-red-400/10 hover:border-red-400/30 border-red-500/20" onClick={() => removeSkill(skill)} disabled={busyId === skill.id}>
+                        {busyId === skill.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                        Delete
+                      </Button>
+                    </div>
                   </div>
 
                   {tools.length === 0 && (
