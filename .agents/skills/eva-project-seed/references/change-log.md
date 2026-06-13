@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 19:01Z
+C: dashboard/skills: moved skill delete button to the left side next to status badge; files=apps/eva-dashboard/components/skills/skill-list.tsx; tests=npm run build
+P: pending/improve -> surface delete confirmation inline to avoid browser native confirm alert
+
 ### 2026-06-13 18:25Z
 C: agent-loop: added runtime intelligence guardrails for report/delivery tasks: hard web_search budget after 2 successful searches, outgoing PDF quality validation before Telegram upload, and regression tests for blank/malformed PDFs and search-loop prevention; files=apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/agent-loop.service.spec.ts --runInBand; cd apps/eva-core && npm run build; npm run docs:check
 P: pending/improve -> add a real renderer-backed PDF screenshot/OCR smoke in the sandbox image so visual blank-page detection can graduate from structural heuristics to rendered-page validation

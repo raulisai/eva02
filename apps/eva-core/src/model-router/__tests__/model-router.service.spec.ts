@@ -132,12 +132,20 @@ describe('ModelRouterService', () => {
       expect(body.model).toBe('gpt-4.1-nano');
     });
 
-    it('throws on non-ok response', async () => {
-      (fetch as jest.Mock).mockResolvedValueOnce({
-        ok: false, status: 429, text: async () => 'rate limit',
-      });
+    it('retries once on 429 and throws if still failing', async () => {
+      // First call: 429 with a short retry-after embedded in the message
+      (fetch as jest.Mock)
+        .mockResolvedValueOnce({
+          ok: false, status: 429,
+          text: async () => JSON.stringify({ error: { message: 'Rate limit. Please try again in 0.1s.' } }),
+        })
+        // Second call: still 429 → should throw
+        .mockResolvedValueOnce({
+          ok: false, status: 429,
+          text: async () => 'rate limit',
+        });
       await expect(service.generate('hi')).rejects.toThrow(/429/);
-    });
+    }, 10_000);
   });
 
   // ── generate() — Google backend ───────────────────────────────────────────

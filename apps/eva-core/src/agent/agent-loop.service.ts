@@ -107,6 +107,8 @@ interface LoopExtras {
 
 const MAX_DEPTH = 1;
 const OBSERVATION_LIMIT = 1200;
+/** Herramientas de investigación cuya observación se comprime más agresivamente en historia vieja. */
+const RESEARCH_TOOLS = new Set(['web_search', 'gmail_read', 'drive_read', 'calendar_read', 'memory_recall']);
 /** Args mostrados en PASOS PREVIOS — el código propio debe verse para poder corregirlo. */
 const ARGS_HISTORY_LIMIT = 800;
 /** Cuántos pasos recientes se muestran a fidelidad completa; los previos se comprimen. */
@@ -116,7 +118,7 @@ const DEFAULT_SUB_STEPS = 3;
 /** Two consecutive unparseable decisions → the model/key isn't up to it, bail out. */
 const MAX_PARSE_FAILURES = 2;
 /** El decide puede traer código literal en args — el cap debe dejarlo respirar. */
-const DECIDE_MAX_TOKENS = 1400;
+const DECIDE_MAX_TOKENS = 2000;
 /** Herramientas cuyo uso exitoso amerita memorizar la solución (tipo procedural). */
 const CODE_TOOLS = new Set(['code_execute', 'terminal_run', 'script_forge', 'skill_run']);
 /** Código más corto que esto no vale como skill (one-liners exploratorios). */
@@ -739,10 +741,12 @@ export class AgentLoopService {
       '- Clasifica mentalmente cada objetivo antes de actuar: conversacion inmediata, trabajo de minutos, trabajo largo de fondo, tarea programada, espera externa, o accion sensible con approval.',
       '- Si el objetivo debe repetirse, monitorear algo o despertar despues, usa schedule_job_manage en vez de simular una espera dentro del loop.',
       '- Para tareas de acumulación larga (tracking de precios/acciones, estados de archivos, métricas diarias): usa data_log{"action":"write"} al final de cada ejecución del job para guardar el punto de datos del día; un job separado mensual usa data_log{"action":"read","since":"YYYY-MM-01"} para agregar el historial. NO uses memory_recall para datos cuantitativos con timestamps — usa data_log.',
+      '- INVESTIGACIÓN / ALTO CONTEXTO: usa dos fases separadas. FASE 1 (recolección): tras cada web_search, análisis o bloque de datos, guarda el hallazgo en scratchpad con key descriptiva (ej. "research:nvidia", "data:precios", "draft:intro"). Mantén la observación del step a 1 línea de resumen. FASE 2 (síntesis): cuando tengas todos los hallazgos, lee scratchpad (sin key para leer todo o por key específica) y genera el entregable final. Esta separación evita que el contexto de trabajo crezca con contenido voluminoso repetido en cada decisión.',
       '- Si falta una decision/dato o la tarea depende de que el usuario o un tercero responda, usa ask_user y deja la tarea pausada; no cierres como completado ni inventes que seguiras mirando.',
       '- Si una accion toca dinero, produccion, datos sensibles, mensajes/envios o cambios de cuenta, prepara la accion y deja que el Approval Engine la autorice.',
       'MEMORIA PROCEDIMENTAL RAIZ:',
       '- Las skills son tu memoria procedimental: HOW hacer clases de tareas. Tratalas como parte de tu operacion base, no como un extra opcional.',
+      '- scratchpad = tu bloc de notas para esta tarea. Úsalo para guardar hallazgos largos y evitar cargar el contexto. data_log = series temporales entre jobs. memory_recall = memoria a largo plazo del usuario. Son tres cosas distintas.',
       ...(has('skill_view')
         ? ['- Antes de resolver desde cero, revisa el indice de skills del prompt (## Skills). Si alguna aplica, cargala con skill_view{"slug":"..."} y sigue sus instrucciones.']
         : []),
@@ -759,10 +763,16 @@ export class AgentLoopService {
       ...(has('code_execute') && has('telegram_send_file')
         ? ['- Para descargar medios/videos (YouTube, etc.): el sandbox tiene listo yt-dlp y ffmpeg. Escribe un script en code_execute (con "network": true) que use yt-dlp directamente. IMPORTANTE: yt-dlp puede buscar videos por ti sin que busques el enlace antes (ej: usar `yt-dlp --max-downloads 1 --format mp4 "ytsearch1:one piece quinto emperador"` busca y descarga el primer video de esa búsqueda). No malgastes pasos en web_search intentando encontrar enlaces exactos; ¡usa la búsqueda integrada de yt-dlp! Una vez descargado el archivo en /work, usa telegram_send_file para enviarlo de inmediato.']
         : []),
-      ...(has('code_execute') && has('telegram_send_file')
-        ? ['- Para reportes/archivos solicitados por el usuario: usa code_execute para crear el archivo en /work, verifica que exista y que tenga contenido, y después usa telegram_send_file si el usuario pidió enviarlo por Telegram. Para PDF puedes escribir código propio, pero NO guardes/reutilices una skill hasta que el PDF pase validación de calidad y el envío haya funcionado. Evita bytes PDF crudos con offsets hardcodeados; si haces PDF manual, calcula xref/startxref desde el contenido real.']
+      ...(has('code_execute')
+        ? [
+            '- SANDBOX libs disponibles (sin pip install): pandas, numpy, requests, pillow, beautifulsoup4, openpyxl, python-dateutil, yt-dlp, reportlab, fpdf2, yfinance, lxml, markdown. PDF: usa `from fpdf import FPDF` (fpdf2) o `from reportlab.platypus import SimpleDocTemplate`. Si falla el import, cambia a la otra — NUNCA pip install más de una vez.',
+            ...(has('telegram_send_file')
+              ? ['- Reportes/archivos: crea en /work → verifica `os.path.getsize("/work/archivo.pdf") > 0` → envía con telegram_send_file. No uses bytes PDF con offsets hardcodeados.']
+              : []),
+          ]
         : []),
       '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
+      '- PROHIBIDO pip/npm install en loop: si un `pip install X` falla, NO lo repitas. En su lugar usa una librería ya disponible del sandbox (ver lista arriba). Gastar más de 1 paso en pip install es un ciclo de estancamiento.',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
       '- NUNCA inventes salida que ninguna herramienta produjo (datos, contenidos de archivo, respuestas de API). Reportar un bloqueo honesto siempre vale más que un resultado fabricado.',
       ...(has('skill_save')
@@ -831,26 +841,43 @@ export class AgentLoopService {
       const recent = idx >= steps.length - RECENT_FULL_STEPS;
       if (recent) {
         const args = this.truncate(JSON.stringify(s.args), ARGS_HISTORY_LIMIT);
+        // For scratchpad reads in recent steps, still show the content (it's needed for synthesis).
         return `→ ${s.tool}(${args}) ⇒ ${s.observation}`;
-      } else {
-        // Semantic history compression for older turns:
-        // We summarize what the tool did and the outcome.
-        const argsSummary = this.truncate(JSON.stringify(s.args), 60);
-        let obsSummary = s.observation;
-        if (s.observation.startsWith('ERROR:') || s.observation.startsWith('VERIFICACIÓN')) {
-          obsSummary = s.observation.trim(); // Keep errors in full detail
-        } else {
-          // Keep key summary details from observation: e.g. first and last lines or a computed summary
-          const lines = s.observation.split('\n').map((l) => l.trim()).filter(Boolean);
-          if (lines.length > 2) {
-            obsSummary = `${lines[0]} ... ${lines[lines.length - 1]} (${lines.length} líneas)`;
-          } else {
-            obsSummary = lines.join('; ');
-          }
-          obsSummary = this.truncate(obsSummary, 160);
-        }
-        return `→ [Paso previo resumido] ${s.tool}(${argsSummary}) ⇒ ${obsSummary}`;
       }
+
+      // ── Old steps: aggressive compression ────────────────────────────────
+      const argsSummary = this.truncate(JSON.stringify(s.args), 60);
+
+      // scratchpad:read in old steps — don't repeat the content, just the reference.
+      if (s.tool === 'scratchpad' && String(s.args.action ?? '') === 'read') {
+        const key = String(s.args.key ?? '(all)');
+        const chars = s.observation.length;
+        return `→ scratchpad(read,"${key}") ⇒ [${chars}c disponibles — usa scratchpad:read si necesitas releer]`;
+      }
+
+      // scratchpad:write — show confirmation summary only.
+      if (s.tool === 'scratchpad' && String(s.args.action ?? '') === 'write') {
+        return `→ scratchpad(write,"${s.args.key ?? ''}") ⇒ ${this.truncate(s.observation, 60)}`;
+      }
+
+      // Research tools (web_search, gmail_read, drive_read…): content is expected to be in scratchpad;
+      // show only the first meaningful line so the agent knows what was searched/found.
+      if (RESEARCH_TOOLS.has(s.tool) && !s.observation.startsWith('ERROR:')) {
+        const firstLine = s.observation.split('\n').find((l) => l.trim()) ?? s.observation;
+        return `→ [resumido] ${s.tool}(${argsSummary}) ⇒ ${this.truncate(firstLine, 120)} [guarda en scratchpad si no lo hiciste]`;
+      }
+
+      let obsSummary = s.observation;
+      if (s.observation.startsWith('ERROR:') || s.observation.startsWith('VERIFICACIÓN')) {
+        obsSummary = s.observation.trim();
+      } else {
+        const lines = s.observation.split('\n').map((l) => l.trim()).filter(Boolean);
+        obsSummary = lines.length > 2
+          ? `${lines[0]} ... ${lines[lines.length - 1]} (${lines.length} líneas)`
+          : lines.join('; ');
+        obsSummary = this.truncate(obsSummary, 160);
+      }
+      return `→ [resumido] ${s.tool}(${argsSummary}) ⇒ ${obsSummary}`;
     });
   }
 
@@ -879,6 +906,15 @@ export class AgentLoopService {
    */
   private detectStall(steps: AgentLoopStep[]): string | null {
     if (steps.length < 3) return null;
+
+    // pip/npm install loop: ≥2 intentos de instalar algo en los últimos 4 pasos.
+    const PIP_RE = /\bpip\s+install\b|\bnpm\s+install\b|\bapt(-get)?\s+install\b/i;
+    const recentInstallAttempts = steps.slice(-4).filter(
+      (s) => PIP_RE.test(JSON.stringify(s.args)),
+    );
+    if (recentInstallAttempts.length >= 2) {
+      return 'CICLO pip install detectado: intentaste instalar paquetes ≥2 veces. Las librerías necesarias ya están pre-instaladas en el sandbox (reportlab, fpdf2, pandas, pillow…). Usa una de ellas directamente sin pip install.';
+    }
 
     // Firma semántica: tool + prefijo normalizado de la observación.
     const sig = (s: AgentLoopStep): string =>
@@ -2041,6 +2077,69 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
 
           return `Operación calendar.${action} preparada (${summary}). El usuario ya recibió la solicitud de aprobación por su canal. Cierra con final_answer BREVE: describe qué se hará y que responda "sí" para aprobarlo o "no" para cancelar. No incluyas hashes ni detalles técnicos.`;
         }
+      },
+      {
+        name: 'scratchpad',
+        usage: 'scratchpad{"action":"write|read|list","key"?,"content"?}: memoria de trabajo dentro de esta tarea. Guarda hallazgos largos (investigación, datos, borradores) por nombre y recupéralos cuando los necesites. Usar esto mantiene el historial de pasos corto y evita repetir contenido voluminoso en cada decisión.',
+        rootOnly: false,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: {
+              type: 'string', enum: ['write', 'read', 'list'],
+              description: '"write" guarda contenido; "read" recupera (omite key para leer todo); "list" muestra claves guardadas.',
+            },
+            key: { type: 'string', description: 'Nombre descriptivo, ej. "research:nvidia", "draft:resumen", "data:tabla_precios".' },
+            content: { type: 'string', description: 'Contenido a guardar. Requerido para "write".' },
+          },
+          required: ['action'],
+        },
+        execute: async (orgId, taskId, args) => {
+          const action = String(args.action ?? '');
+
+          const { data: taskRow } = await this.db.admin
+            .from('tasks').select('metadata').eq('id', taskId).eq('org_id', orgId).maybeSingle();
+          const meta = (taskRow?.metadata ?? {}) as Record<string, unknown>;
+          const pad = (meta['scratchpad'] ?? {}) as Record<string, string>;
+
+          if (action === 'write') {
+            const key = String(args.key ?? '').trim();
+            const content = String(args.content ?? '');
+            if (!key) return 'ERROR: key requerida para write.';
+            if (!content) return 'ERROR: content requerido para write.';
+            pad[key] = content;
+            const { error } = await this.db.admin
+              .from('tasks')
+              .update({ metadata: { ...meta, scratchpad: pad } })
+              .eq('id', taskId)
+              .eq('org_id', orgId);
+            if (error) return `ERROR al guardar en scratchpad: ${error.message}`;
+            return `✅ scratchpad["${key}"] — ${content.length} chars guardados.`;
+          }
+
+          if (action === 'read') {
+            const key = String(args.key ?? '').trim();
+            if (!key) {
+              // Read all entries
+              const keys = Object.keys(pad);
+              if (keys.length === 0) return 'Scratchpad vacío. Usa scratchpad:write para guardar hallazgos.';
+              return keys.map((k) => `## ${k}\n${pad[k]}`).join('\n\n---\n\n');
+            }
+            if (!(key in pad)) {
+              const available = Object.keys(pad).join(', ') || 'ninguna';
+              return `No hay entrada scratchpad["${key}"]. Claves disponibles: ${available}`;
+            }
+            return pad[key];
+          }
+
+          if (action === 'list') {
+            const keys = Object.keys(pad);
+            if (keys.length === 0) return 'Scratchpad vacío — ningún hallazgo guardado aún en esta tarea.';
+            return 'Contenido guardado en scratchpad:\n' + keys.map((k) => `- "${k}": ${pad[k].length} chars`).join('\n');
+          }
+
+          return 'ERROR: acción desconocida. Usa "write", "read" o "list".';
+        },
       },
       {
         name: 'data_log',

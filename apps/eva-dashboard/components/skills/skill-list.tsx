@@ -108,9 +108,9 @@ export function SkillList({ initialSkills, toolsBySkill }: SkillListProps) {
               )}
             >
               {/* Header row */}
-              <button
+              <div
                 onClick={() => setOpenId(isOpen ? null : skill.id)}
-                className="w-full flex items-center gap-3 px-4 py-3 text-left"
+                className="w-full flex items-center gap-3 px-4 py-3 text-left cursor-pointer group"
                 aria-expanded={isOpen}
               >
                 <Puzzle className={cn('w-4 h-4 flex-shrink-0', skill.status === 'active' ? 'text-cyan-400' : 'text-zinc-600')} />
@@ -118,6 +118,21 @@ export function SkillList({ initialSkills, toolsBySkill }: SkillListProps) {
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-zinc-100 font-medium">{skill.display_name}</span>
                     <Badge variant={statusVariant[skill.status]}>{skill.status}</Badge>
+                    
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-5 w-5 text-zinc-500 hover:text-red-400 hover:bg-red-400/10 transition-all"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeSkill(skill);
+                      }}
+                      disabled={busyId === skill.id}
+                      title="Delete Skill"
+                    >
+                      {busyId === skill.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                    </Button>
+
                     <span className="text-[10px] font-mono text-zinc-600">
                       {skill.slug} · v{skill.latest_version ?? '—'}
                     </span>
@@ -127,8 +142,9 @@ export function SkillList({ initialSkills, toolsBySkill }: SkillListProps) {
                 <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-1 flex-shrink-0">
                   <Wrench className="w-3 h-3" /> {tools.length} tools
                 </span>
+
                 <ChevronDown className={cn('w-4 h-4 text-zinc-500 transition-transform flex-shrink-0', isOpen && 'rotate-180')} />
-              </button>
+              </div>
 
               {/* Expanded detail */}
               {isOpen && (
@@ -136,15 +152,9 @@ export function SkillList({ initialSkills, toolsBySkill }: SkillListProps) {
                   <div className="flex items-center justify-between">
                     <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">Tools</p>
                     <div className="flex items-center gap-2">
-                      {(skill.status === 'active' || skill.status === 'disabled' || skill.status === 'draft') && (
-                        <Button size="sm" variant="outline" onClick={() => toggle(skill)} disabled={busyId === skill.id}>
-                          {busyId === skill.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Power className="w-3 h-3" />}
-                          {skill.status === 'active' ? 'Disable skill' : 'Enable skill'}
-                        </Button>
-                      )}
-                      <Button size="sm" variant="outline" className="text-red-400 hover:text-red-300 hover:bg-red-400/10 hover:border-red-400/30 border-red-500/20" onClick={() => removeSkill(skill)} disabled={busyId === skill.id}>
-                        {busyId === skill.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-                        Delete
+                      <Button size="sm" variant="outline" onClick={() => toggle(skill)} disabled={busyId === skill.id}>
+                        {busyId === skill.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Power className="w-3 h-3" />}
+                        {skill.status === 'active' ? 'Disable skill' : 'Enable skill'}
                       </Button>
                     </div>
                   </div>

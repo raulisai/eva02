@@ -58,6 +58,26 @@ export class ModelRouterService {
     return keys;
   }
 
+  // ── rate-limit retry helper ───────────────────────────────────────────────
+
+  /** Waits the delay indicated in a 429 response body, then re-runs fn once. */
+  private async withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      if (!msg.includes('429')) throw err;
+      // Parse "try again in X.XXXs" from OpenAI / Claude error text
+      const secondsMatch = msg.match(/try again in (\d+\.?\d*)s/i);
+      const waitMs = secondsMatch
+        ? Math.ceil(parseFloat(secondsMatch[1]) * 1000) + 500
+        : 8000;
+      this.logger.warn(`Rate limit hit — retrying in ${waitMs}ms`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      return fn();
+    }
+  }
+
   // ── generate ──────────────────────────────────────────────────────────────
 
   async generate(prompt: string, opts: GenerateOptions = {}): Promise<GenerateResult> {
@@ -67,11 +87,11 @@ export class ModelRouterService {
 
     let result: GenerateResult;
     if (backend === 'google' && keys.google) {
-      result = await this.generateGoogle(prompt, opts, budget, keys.google);
+      result = await this.withRateLimitRetry(() => this.generateGoogle(prompt, opts, budget, keys.google));
     } else if (backend === 'claude' && keys.claude) {
-      result = await this.generateClaude(prompt, opts, budget, keys.claude);
+      result = await this.withRateLimitRetry(() => this.generateClaude(prompt, opts, budget, keys.claude));
     } else if (backend === 'openai' && keys.openai) {
-      result = await this.generateOpenAI(prompt, opts, budget, keys.openai);
+      result = await this.withRateLimitRetry(() => this.generateOpenAI(prompt, opts, budget, keys.openai));
     } else {
       this.logger.warn('No LLM API key configured — returning deterministic stub');
       result = this.generateStub(prompt, opts);

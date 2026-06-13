@@ -30,7 +30,12 @@ RUN pip install --no-cache-dir \
     pillow \
     python-dateutil \
     beautifulsoup4 \
-    yt-dlp
+    yt-dlp \
+    reportlab \
+    fpdf2 \
+    yfinance \
+    lxml \
+    markdown
 
 # Usuario sin privilegios para ejecuciones aisladas (sin red).
 # Para sesiones con red, SandboxService puede omitir --read-only para

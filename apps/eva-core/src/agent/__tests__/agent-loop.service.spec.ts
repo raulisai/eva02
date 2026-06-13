@@ -1351,11 +1351,17 @@ describe('AgentLoopService', () => {
 
       const finalPrompt = modelRouter.generate.mock.calls[3][0] as string;
       
-      expect(finalPrompt).toContain('[Paso previo resumido] web_search');
-      expect(finalPrompt).toContain('Linea1 ... Linea4 (4 líneas)');
+      // Research tools (web_search) get aggressive compression in old steps
+      expect(finalPrompt).toContain('[resumido] web_search');
+      // web_search content is compressed to first line + reminder to use scratchpad
+      expect(finalPrompt).toContain('Linea1');
+      expect(finalPrompt).toContain('guarda en scratchpad');
+      // Errors always shown in full regardless of compression
       expect(finalPrompt).toContain('ERROR: API caída');
+      // The 3rd step (precios) is in RECENT_FULL_STEPS so it's not compressed
       expect(finalPrompt).toContain('Precios estables');
-      expect(finalPrompt).not.toContain('[Paso previo resumido] web_search({"query":"precios"})');
+      // The most recent step is never tagged [resumido]
+      expect(finalPrompt).not.toContain('[resumido] web_search({"query":"precios"})');
     });
   });
 });
