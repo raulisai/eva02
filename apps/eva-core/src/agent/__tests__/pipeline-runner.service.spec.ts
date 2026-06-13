@@ -12,6 +12,7 @@ const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
 function makeModule(overrides: Partial<{
   agentLoop: Partial<AgentLoopService>;
   modelRouter: Partial<ModelRouterService>;
+  db: unknown;
 }> = {}) {
   const agentLoop = {
     run: jest.fn(),
@@ -22,7 +23,7 @@ function makeModule(overrides: Partial<{
     ...overrides.modelRouter,
   };
   const events = { publish: jest.fn().mockResolvedValue(undefined) };
-  const db = {
+  const db = overrides.db ?? {
     admin: { from: jest.fn().mockReturnValue({ select: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), eq: jest.fn().mockReturnThis(), single: jest.fn().mockResolvedValue({ data: { metadata: {} } }) }) },
   };
   const sandbox = { release: jest.fn().mockResolvedValue(undefined) };
@@ -227,6 +228,46 @@ describe('PipelineRunnerService', () => {
       // Give the void promise a tick to resolve
       await new Promise((r) => setImmediate(r));
       expect(sandbox.release).toHaveBeenCalledWith(TASK);
+    });
+
+    it('retries only failed/skipped phases from stored pipeline metadata', async () => {
+      const storedMetadata = {
+        pipeline: {
+          retryable: true,
+          definition: successfulPhaseDef,
+          phases: [
+            { name: 'fase1', status: 'completed', outputKey: 'report', output: 'Informe ya creado', stepsUsed: 2, tokensUsed: 100, durationMs: 10 },
+            { name: 'fase2', status: 'failed', outputKey: 'pdf', error: 'PDF failed', stepsUsed: 1, tokensUsed: 20, durationMs: 5 },
+            { name: 'fase3', status: 'skipped', outputKey: 'result', error: 'Dependencias no completadas: fase2', stepsUsed: 0, tokensUsed: 0, durationMs: 0 },
+          ],
+        },
+      };
+      const builder = {
+        select: jest.fn().mockReturnThis(),
+        update: jest.fn().mockReturnThis(),
+        eq: jest.fn().mockReturnThis(),
+        single: jest.fn().mockResolvedValue({ data: { metadata: storedMetadata } }),
+      };
+      const module = await makeModule({
+        db: { admin: { from: jest.fn().mockReturnValue(builder) } },
+      });
+      const svc = module.get(PipelineRunnerService);
+      const loop = module.get(AgentLoopService) as jest.Mocked<AgentLoopService>;
+      const mr = module.get(ModelRouterService) as jest.Mocked<ModelRouterService>;
+
+      loop.run
+        .mockResolvedValueOnce({ ok: true, text: '/work/report.pdf', steps: [], tokensUsed: 80, toolsUsed: [] })
+        .mockResolvedValueOnce({ ok: true, text: 'Enviado por Telegram', steps: [], tokensUsed: 60, toolsUsed: [] });
+
+      const outcome = await svc.run(ORG, TASK, 'Crea informe, conviértelo a PDF y envíalo', { retryFailedPhases: true });
+
+      expect(mr.generate).not.toHaveBeenCalled();
+      expect(loop.run).toHaveBeenCalledTimes(2);
+      expect(loop.run.mock.calls[0][2]).toContain('Informe ya creado');
+      expect(loop.run.mock.calls[0][2]).not.toBe('Crear informe');
+      expect(outcome.ok).toBe(true);
+      expect(outcome.phases.map((phase) => phase.status)).toEqual(['completed', 'completed', 'completed']);
+      expect(outcome.totalTokens).toBe(240);
     });
   });
 });

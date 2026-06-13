@@ -41,5 +41,7 @@ export interface PipelineRunOptions {
   userId?: string;
   /** Outer context (conversation history, identity) prepended to every phase. */
   context?: string;
+  /** Reuse task.metadata.pipeline and rerun only failed/skipped phases when possible. */
+  retryFailedPhases?: boolean;
   log?: (message: string, scope: string) => Promise<unknown>;
 }

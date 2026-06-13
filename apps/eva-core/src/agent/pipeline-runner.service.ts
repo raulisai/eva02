@@ -49,8 +49,15 @@ Responde SOLO JSON estricto (sin markdown, sin explicación adicional):
 
 /** Max chars injected per phase output into subsequent phase context. */
 const PHASE_CTX_LIMIT = 1800;
+/** Max chars persisted per phase output into task metadata for phase retry. */
+const PHASE_METADATA_OUTPUT_LIMIT = 4000;
 /** Hard cap on maxSteps per phase regardless of LLM request. */
 const PHASE_MAX_STEPS_CAP = 8;
+
+interface StoredPipelineState {
+  pipeline: PipelineDefinition;
+  results: PhaseResult[];
+}
 
 @Injectable()
 export class PipelineRunnerService {
@@ -111,9 +118,29 @@ export class PipelineRunnerService {
     const log = opts.log ?? (async () => undefined);
     const startedAt = Date.now();
 
-    // ── 1. Phase synthesis ───────────────────────────────────────────────────
+    // ── 1. Phase synthesis / resume ──────────────────────────────────────────
     let pipeline: PipelineDefinition;
-    try {
+    let phaseResults: PhaseResult[];
+    const resumed = opts.retryFailedPhases ? await this.loadPipelineState(orgId, taskId) : null;
+    if (resumed) {
+      pipeline = resumed.pipeline;
+      phaseResults = resumed.results.map((result) => {
+        if (result.status === 'completed') return result;
+        return {
+          name: result.name,
+          status: 'pending' as PhaseStatus,
+          output: '',
+          stepsUsed: 0,
+          tokensUsed: 0,
+          durationMs: 0,
+        };
+      });
+      await log(
+        `Reintentando pipeline desde fases fallidas/omitidas: ${phaseResults.filter((r) => r.status === 'pending').map((r) => r.name).join(', ') || 'ninguna'}`,
+        'pipeline',
+      );
+    } else {
+      try {
       await log('Sintetizando fases del pipeline…', 'pipeline');
       pipeline = await this.synthesizePipeline(goal, orgId);
       await log(
@@ -131,18 +158,25 @@ export class PipelineRunnerService {
       };
     }
 
-    const phaseResults: PhaseResult[] = pipeline.phases.map((p) => ({
-      name: p.name,
-      status: 'pending' as PhaseStatus,
-      output: '',
-      stepsUsed: 0,
-      tokensUsed: 0,
-      durationMs: 0,
-    }));
+      phaseResults = pipeline.phases.map((p) => ({
+        name: p.name,
+        status: 'pending' as PhaseStatus,
+        output: '',
+        stepsUsed: 0,
+        tokensUsed: 0,
+        durationMs: 0,
+      }));
+    }
 
     const pipelineCtx: Record<string, string> = {};
-    let totalTokens = 0;
-    let totalSteps = 0;
+    pipeline.phases.forEach((phase, i) => {
+      const result = phaseResults[i];
+      if (result?.status === 'completed' && result.output) {
+        pipelineCtx[phase.outputKey] = result.output;
+      }
+    });
+    let totalTokens = phaseResults.reduce((sum, result) => sum + (result.status === 'completed' ? result.tokensUsed : 0), 0);
+    let totalSteps = phaseResults.reduce((sum, result) => sum + (result.status === 'completed' ? result.stepsUsed : 0), 0);
 
     await this.savePipelineMetadata(orgId, taskId, pipeline, phaseResults);
 
@@ -296,6 +330,61 @@ export class PipelineRunnerService {
     return lines.join('\n');
   }
 
+  private async loadPipelineState(orgId: string, taskId: string): Promise<StoredPipelineState | null> {
+    try {
+      const { data: task } = await this.db.admin
+        .from('tasks')
+        .select('metadata')
+        .eq('org_id', orgId)
+        .eq('id', taskId)
+        .single();
+      const metadata = (task?.metadata as Record<string, unknown> | null) ?? {};
+      const raw = metadata.pipeline;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+      const stored = raw as Record<string, unknown>;
+      const definition = stored.definition;
+      const rawPhases = stored.phases;
+      if (!definition || typeof definition !== 'object' || Array.isArray(definition) || !Array.isArray(rawPhases)) return null;
+      const phases = (definition as Record<string, unknown>).phases;
+      if (!Array.isArray(phases) || phases.length === 0) return null;
+
+      const pipeline: PipelineDefinition = {
+        phases: phases.map((phase) => {
+          const row = (phase && typeof phase === 'object' && !Array.isArray(phase)) ? phase as Record<string, unknown> : {};
+          return {
+            name: String(row.name ?? ''),
+            goal: String(row.goal ?? ''),
+            outputKey: String(row.outputKey ?? ''),
+            dependsOn: Array.isArray(row.dependsOn) ? row.dependsOn.map(String) : [],
+            maxSteps: Math.min(Math.max(Number(row.maxSteps ?? 4), 2), PHASE_MAX_STEPS_CAP),
+          };
+        }).filter((phase) => phase.name && phase.goal && phase.outputKey),
+      };
+      if (pipeline.phases.length !== rawPhases.length) return null;
+
+      const results: PhaseResult[] = rawPhases.map((phase, i) => {
+        const row = (phase && typeof phase === 'object' && !Array.isArray(phase)) ? phase as Record<string, unknown> : {};
+        const rawStatus = String(row.status ?? 'pending');
+        const status: PhaseStatus = ['pending', 'running', 'completed', 'failed', 'skipped'].includes(rawStatus)
+          ? rawStatus as PhaseStatus
+          : 'pending';
+        return {
+          name: String(row.name ?? pipeline.phases[i].name),
+          status,
+          output: typeof row.output === 'string' ? row.output : '',
+          error: typeof row.error === 'string' ? row.error : undefined,
+          stepsUsed: Number(row.stepsUsed ?? 0),
+          tokensUsed: Number(row.tokensUsed ?? 0),
+          durationMs: Number(row.durationMs ?? 0),
+        };
+      });
+      if (!results.some((result) => result.status === 'failed' || result.status === 'skipped')) return null;
+      return { pipeline, results };
+    } catch {
+      return null;
+    }
+  }
+
   /** Best-effort: persist pipeline state to task.metadata for UI progress tracking. */
   private async savePipelineMetadata(
     orgId: string,
@@ -322,12 +411,18 @@ export class PipelineRunnerService {
               totalPhases: pipeline.phases.length,
               currentPhase: currentIndex ?? 0,
               currentPhaseName: currentIndex !== undefined ? (pipeline.phases[currentIndex]?.name ?? null) : null,
+              retryable: results.some((r) => r.status === 'failed' || r.status === 'skipped'),
+              definition: {
+                phases: pipeline.phases,
+              },
               phases: results.map((r) => ({
                 name: r.name,
                 status: r.status,
+                outputKey: pipeline.phases.find((phase) => phase.name === r.name)?.outputKey,
                 stepsUsed: r.stepsUsed,
                 tokensUsed: r.tokensUsed,
                 durationMs: r.durationMs,
+                ...(r.output ? { output: r.output.slice(0, PHASE_METADATA_OUTPUT_LIMIT) } : {}),
                 ...(r.error ? { error: r.error.slice(0, 200) } : {}),
               })),
             },

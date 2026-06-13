@@ -430,6 +430,13 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         },
       },
       {
+        name: 'phase-retry',
+        priority: 105,
+        risk: 'medium',
+        matches: (ctx) => this.hasRetryablePipeline(ctx.task),
+        handler: async (ctx) => this.handleMultiPhasePipeline(ctx, true),
+      },
+      {
         name: 'pure-image',
         priority: 100,
         risk: 'low',
@@ -704,39 +711,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         priority: 43,
         risk: 'high',
         matches: (ctx) => ctx.tier.tier !== 'chat' && this.pipeline.isMultiPhase(ctx.input),
-        handler: async (ctx) => {
-          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'pipeline');
-          await this.log(ctx.orgId, ctx.taskId, `multi-phase pipeline detectado — sintetizando fases`, 'pipeline');
-
-          // Build identity context so phases know who the user is
-          const contextParts: string[] = [];
-          const identity = ctx.soulContext ? this.slimIdentityLine(ctx.soulContext) : null;
-          if (identity) contextParts.push(`Usuario: ${identity}`);
-          if (ctx.conversationContext.length > 0) {
-            contextParts.push(
-              ctx.conversationContext
-                .slice(-4)
-                .map((t) => `${t.role === 'user' ? 'Usuario' : 'EVA'}: ${t.text.slice(0, 300)}`)
-                .join('\n'),
-            );
-          }
-
-          const outcome = await this.pipeline.run(ctx.orgId, ctx.taskId, ctx.input, {
-            userId: ctx.task.created_by,
-            context: contextParts.join('\n') || undefined,
-            log: (message, scope) => this.log(ctx.orgId, ctx.taskId, message, scope),
-          });
-
-          await this.log(
-            ctx.orgId, ctx.taskId,
-            `pipeline terminado — ${outcome.phases.length} fases, ${outcome.totalSteps} pasos totales, ${outcome.totalTokens} tokens, ${(outcome.durationMs / 1000).toFixed(1)}s`,
-            'pipeline',
-          );
-          await this.deliver(ctx.orgId, ctx.taskId, outcome.text, 'multi-phase-pipeline', Date.now() - ctx.startedAt);
-          await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
-          this.digester.digestAsync({ orgId: ctx.orgId, taskId: ctx.taskId, userInput: ctx.input, evaReply: outcome.text, conversationContext: ctx.conversationContext });
-          return true;
-        },
+        handler: async (ctx) => this.handleMultiPhasePipeline(ctx, false),
       },
       {
         name: 'medium-agent-loop',
@@ -963,6 +938,48 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     } catch {
       await this.log(ctx.orgId, ctx.taskId, `tool-router: no tool for "${capability}", going straight to the model`, 'tools');
     }
+  }
+
+  private async handleMultiPhasePipeline(ctx: RouteContext, retryFailedPhases: boolean): Promise<boolean> {
+    this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'pipeline');
+    await this.log(
+      ctx.orgId,
+      ctx.taskId,
+      retryFailedPhases
+        ? 'phase retry detectado — reanudando desde fases fallidas/omitidas'
+        : 'multi-phase pipeline detectado — sintetizando fases',
+      'pipeline',
+    );
+
+    // Build identity context so phases know who the user is
+    const contextParts: string[] = [];
+    const identity = ctx.soulContext ? this.slimIdentityLine(ctx.soulContext) : null;
+    if (identity) contextParts.push(`Usuario: ${identity}`);
+    if (ctx.conversationContext.length > 0) {
+      contextParts.push(
+        ctx.conversationContext
+          .slice(-4)
+          .map((t) => `${t.role === 'user' ? 'Usuario' : 'EVA'}: ${t.text.slice(0, 300)}`)
+          .join('\n'),
+      );
+    }
+
+    const outcome = await this.pipeline.run(ctx.orgId, ctx.taskId, ctx.input, {
+      userId: ctx.task.created_by,
+      context: contextParts.join('\n') || undefined,
+      retryFailedPhases,
+      log: (message, scope) => this.log(ctx.orgId, ctx.taskId, message, scope),
+    });
+
+    await this.log(
+      ctx.orgId, ctx.taskId,
+      `pipeline terminado — ${outcome.phases.length} fases, ${outcome.totalSteps} pasos totales, ${outcome.totalTokens} tokens, ${(outcome.durationMs / 1000).toFixed(1)}s`,
+      'pipeline',
+    );
+    await this.deliver(ctx.orgId, ctx.taskId, outcome.text, 'multi-phase-pipeline', Date.now() - ctx.startedAt);
+    await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+    this.digester.digestAsync({ orgId: ctx.orgId, taskId: ctx.taskId, userInput: ctx.input, evaReply: outcome.text, conversationContext: ctx.conversationContext });
+    return true;
   }
 
   async run(orgId: string, taskId: string): Promise<void> {
@@ -2572,6 +2589,19 @@ Responde directamente al usuario en español, con un tono amable y natural.
     const payload = metadata.scheduled_job_payload;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
     return (payload as Record<string, unknown>).system_job === AGENT_AUTONOMY_JOB_KEY;
+  }
+
+  private hasRetryablePipeline(task: Task): boolean {
+    const metadata = (task.metadata ?? {}) as Record<string, unknown>;
+    const pipeline = metadata.pipeline;
+    if (!pipeline || typeof pipeline !== 'object' || Array.isArray(pipeline)) return false;
+    if ((pipeline as Record<string, unknown>).retryable === true) return true;
+    const phases = (pipeline as Record<string, unknown>).phases;
+    return Array.isArray(phases) && phases.some((phase) => {
+      if (!phase || typeof phase !== 'object' || Array.isArray(phase)) return false;
+      const status = (phase as Record<string, unknown>).status;
+      return status === 'failed' || status === 'skipped';
+    });
   }
 
   private async requestMissingInformation(orgId: string, taskId: string, error: MissingInformationError) {

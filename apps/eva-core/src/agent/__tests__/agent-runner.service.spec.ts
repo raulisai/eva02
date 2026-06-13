@@ -120,6 +120,7 @@ describe('AgentRunnerService', () => {
   let media: jest.Mocked<MediaService>;
   let research: jest.Mocked<ResearchToolsService>;
   let agentLoop: jest.Mocked<AgentLoopService>;
+  let pipeline: jest.Mocked<PipelineRunnerService>;
   let forge: jest.Mocked<ScriptForgeService>;
   let soul: jest.Mocked<SoulContextService>;
   let db: any;
@@ -524,6 +525,7 @@ describe('AgentRunnerService', () => {
     modelRouter = module.get(ModelRouterService);
     media = module.get(MediaService);
     research = module.get(ResearchToolsService);
+    pipeline = module.get(PipelineRunnerService);
     forge = module.get(ScriptForgeService);
     soul = module.get(SoulContextService);
     db = module.get(DatabaseService);
@@ -699,6 +701,44 @@ describe('AgentRunnerService', () => {
     expect(logs.some((message) => message.includes('tier=medium'))).toBe(true);
     expect(agentLoop.run).toHaveBeenCalledWith(ORG, TASK, 'todo bien cual es el clima de los siguientes 3 dias', expect.objectContaining({ maxSteps: 4 }));
     expect(publishedTypes()).toContain('task.result');
+  });
+
+  it('passes phase-retry mode to the pipeline when task metadata has failed phases', async () => {
+    pipeline.isMultiPhase.mockReturnValue(true);
+    const description = 'Investiga a fondo ventas trimestrales, redacta un informe extenso, luego conviértelo a PDF y finalmente envíalo por Telegram';
+    const retryTask = makeTask({
+      title: 'Pipeline fallido',
+      description,
+      metadata: {
+        pipeline: {
+          retryable: true,
+          phases: [
+            { name: 'crear_informe', status: 'completed' },
+            { name: 'convertir_pdf', status: 'failed' },
+            { name: 'enviar_telegram', status: 'skipped' },
+          ],
+        },
+      },
+    });
+    expect((service as any).hasRetryablePipeline(retryTask)).toBe(true);
+    tasks.getTask.mockResolvedValue(retryTask);
+
+    await (service as any).handleMultiPhasePipeline({
+      orgId: ORG,
+      taskId: TASK,
+      task: retryTask,
+      input: description,
+      startedAt: Date.now(),
+      soulContext: { personal_profile: {}, cowork_context: {}, goals: [], persona_context: {} },
+      conversationContext: [],
+    }, true);
+
+    expect(pipeline.run).toHaveBeenCalledWith(
+      ORG,
+      TASK,
+      description,
+      expect.objectContaining({ retryFailedPhases: true }),
+    );
   });
 
   it('uses org max step settings for long agent-loop work', async () => {
