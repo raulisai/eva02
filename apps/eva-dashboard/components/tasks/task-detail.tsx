@@ -15,6 +15,131 @@ interface TaskDetailProps {
   initialEvents?: EvaEvent[];
 }
 
+type PipelinePhaseStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+
+interface PipelinePhaseView {
+  name: string;
+  status: PipelinePhaseStatus;
+  stepsUsed: number;
+  tokensUsed: number;
+  durationMs: number;
+  error?: string;
+}
+
+interface PipelineProgressView {
+  totalPhases: number;
+  currentPhase: number;
+  currentPhaseName: string | null;
+  phases: PipelinePhaseView[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function asNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function parsePipelineProgress(metadata: Record<string, unknown>): PipelineProgressView | null {
+  const raw = metadata.pipeline;
+  if (!isRecord(raw) || !Array.isArray(raw.phases)) return null;
+
+  const phases = raw.phases.filter(isRecord).map((phase): PipelinePhaseView => {
+    const rawStatus = typeof phase.status === 'string' ? phase.status : 'pending';
+    const status: PipelinePhaseStatus = ['pending', 'running', 'completed', 'failed', 'skipped'].includes(rawStatus)
+      ? (rawStatus as PipelinePhaseStatus)
+      : 'pending';
+
+    return {
+      name: typeof phase.name === 'string' && phase.name.length > 0 ? phase.name : 'fase',
+      status,
+      stepsUsed: asNumber(phase.stepsUsed),
+      tokensUsed: asNumber(phase.tokensUsed),
+      durationMs: asNumber(phase.durationMs),
+      error: typeof phase.error === 'string' ? phase.error : undefined,
+    };
+  });
+
+  if (phases.length === 0) return null;
+
+  return {
+    totalPhases: asNumber(raw.totalPhases) || phases.length,
+    currentPhase: asNumber(raw.currentPhase),
+    currentPhaseName: typeof raw.currentPhaseName === 'string' ? raw.currentPhaseName : null,
+    phases,
+  };
+}
+
+function PipelineStatusBadge({ status }: { status: PipelinePhaseStatus }) {
+  const styles: Record<PipelinePhaseStatus, string> = {
+    pending: 'border-zinc-700 bg-zinc-900/70 text-zinc-500',
+    running: 'border-cyan-500/40 bg-cyan-500/10 text-cyan-300',
+    completed: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
+    failed: 'border-red-500/30 bg-red-500/10 text-red-400',
+    skipped: 'border-zinc-700 bg-zinc-800/40 text-zinc-500',
+  };
+
+  return (
+    <span className={`rounded-sm border px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-wider ${styles[status]}`}>
+      {status}
+    </span>
+  );
+}
+
+function formatDuration(ms: number): string {
+  if (ms <= 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function PipelineProgress({ progress }: { progress: PipelineProgressView }) {
+  const completedCount = progress.phases.filter((phase) => phase.status === 'completed').length;
+  const failedCount = progress.phases.filter((phase) => phase.status === 'failed').length;
+
+  return (
+    <section className="mb-4 rounded border border-zinc-800/80 bg-zinc-950/30" aria-label="Pipeline progress">
+      <div className="flex items-center justify-between gap-2 border-b border-zinc-800/80 px-3 py-2">
+        <div>
+          <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Pipeline Progress</p>
+          <p className="mt-0.5 text-[11px] font-mono text-zinc-400">
+            {completedCount}/{progress.totalPhases} completed
+            {failedCount > 0 ? ` · ${failedCount} failed` : ''}
+          </p>
+        </div>
+        {progress.currentPhaseName && (
+          <span className="max-w-[11rem] truncate rounded-sm border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-mono text-cyan-300" title={progress.currentPhaseName}>
+            {progress.currentPhaseName}
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-2 p-3">
+        {progress.phases.map((phase, index) => (
+          <div key={`${phase.name}-${index}`} className="rounded border border-zinc-800/70 bg-zinc-900/20 p-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate text-xs font-medium text-zinc-200" title={phase.name}>
+                  {index + 1}. {phase.name}
+                </p>
+                <p className="mt-1 text-[10px] font-mono text-zinc-500">
+                  {phase.stepsUsed} steps · {phase.tokensUsed.toLocaleString()} tokens · {formatDuration(phase.durationMs)}
+                </p>
+              </div>
+              <PipelineStatusBadge status={phase.status} />
+            </div>
+            {phase.error && (
+              <p className="mt-2 rounded border border-red-500/20 bg-red-500/5 p-1.5 text-[10px] font-mono text-red-300">
+                {phase.error}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function EventItem({ ev }: { ev: EvaEvent }) {
   const [expanded, setExpanded] = useState(false);
   const timeStr = new Date(ev.ts).toLocaleTimeString();
@@ -206,6 +331,8 @@ export function TaskDetail({ task, tokenLogs = [], initialEvents = [] }: TaskDet
     { key: 'response', label: 'Response', color: 'bg-amber-500', textColor: 'text-amber-400', borderColor: 'border-amber-500/40 border-l-amber-500', bgColor: 'bg-amber-500/5', icon: MessageSquare },
   ];
 
+  const pipelineProgress = parsePipelineProgress(task.metadata);
+
   return (
     <div className="grid grid-rows-[auto_1fr] h-full gap-0">
       {/* Header */}
@@ -276,6 +403,7 @@ export function TaskDetail({ task, tokenLogs = [], initialEvents = [] }: TaskDet
             Metadata
           </p>
           <ScrollArea className="flex-1 p-3">
+            {pipelineProgress && <PipelineProgress progress={pipelineProgress} />}
             <pre className="text-xs font-mono text-zinc-400 whitespace-pre-wrap break-all">
               {JSON.stringify(task.metadata, null, 2)}
             </pre>

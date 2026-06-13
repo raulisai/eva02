@@ -1,4 +1,5 @@
 import { render, screen, act } from '@testing-library/react';
+import { TaskDetail } from '@/components/tasks/task-detail';
 import { TaskList } from '@/components/tasks/task-list';
 import { WsProvider } from '@/hooks/use-ws';
 import { triggerEvent, resetMockSocket } from '../__mocks__/socket.io-client';
@@ -112,5 +113,38 @@ describe('TaskList', () => {
     await renderWithWs(<TaskList initialTasks={[task]} />);
     screen.getByTestId('task-row').click();
     expect(mockPush).toHaveBeenCalledWith(`/tasks/${task.id}`);
+  });
+});
+
+describe('TaskDetail', () => {
+  beforeEach(() => {
+    resetMockSocket();
+  });
+
+  it('renders pipeline phase progress from task metadata', async () => {
+    const task = makeTask({
+      status: 'running',
+      metadata: {
+        pipeline: {
+          totalPhases: 3,
+          currentPhase: 1,
+          currentPhaseName: 'crear_pdf',
+          phases: [
+            { name: 'investigar', status: 'completed', stepsUsed: 2, tokensUsed: 1200, durationMs: 1500 },
+            { name: 'crear_pdf', status: 'running', stepsUsed: 1, tokensUsed: 450, durationMs: 0 },
+            { name: 'enviar_telegram', status: 'pending', stepsUsed: 0, tokensUsed: 0, durationMs: 0 },
+          ],
+        },
+      },
+    });
+
+    await renderWithWs(<TaskDetail task={task} />);
+
+    expect(screen.getByText('Pipeline Progress')).toBeInTheDocument();
+    expect(screen.getByText('1/3 completed')).toBeInTheDocument();
+    expect(screen.getByText('crear_pdf')).toBeInTheDocument();
+    expect(screen.getByText('2. crear_pdf')).toBeInTheDocument();
+    expect(screen.getByText('3. enviar_telegram')).toBeInTheDocument();
+    expect(screen.getByLabelText('Pipeline progress')).toHaveTextContent('1,200 tokens');
   });
 });

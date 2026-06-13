@@ -118,7 +118,7 @@ Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_
 - `middleware.ts` refreshes Supabase auth with `getUser()`, redirects unauthenticated users to `/login`, authenticated root/login users to `/tasks`.
 - API client: `lib/core-api.ts` uses client Supabase session and Bearer token.
 - Server org context: `lib/supabase/org.ts` gets `users.org_id`; keep org-scoped Supabase reads.
-- UI components: `components/tasks`, `approvals`, `billing`, `events`, `jobs`, `mcp`, `nodes`, `playground`, `profile`, `skills`, `soul`, `settings`, `layout`, `ui`. Soul editor is now agent identity only; `/profile` is the user Profile Hub with relationship cards, profile context, todos, notes, goals, schedule preview, and encrypted private vault reveal through `/agent/profile`. Playground final answers have thumbs feedback wired to `POST /agent/feedback`; Topbar polls public `/health` to show core/sandbox readiness.
+- UI components: `components/tasks`, `approvals`, `billing`, `events`, `jobs`, `mcp`, `nodes`, `playground`, `profile`, `skills`, `soul`, `settings`, `layout`, `ui`. Task detail renders per-phase progress from `task.metadata.pipeline` above raw metadata. Soul editor is now agent identity only; `/profile` is the user Profile Hub with relationship cards, profile context, todos, notes, goals, schedule preview, and encrypted private vault reveal through `/agent/profile`. Playground final answers have thumbs feedback wired to `POST /agent/feedback`; Topbar polls public `/health` to show core/sandbox readiness.
 
 ## Local Drift / Watchlist
 

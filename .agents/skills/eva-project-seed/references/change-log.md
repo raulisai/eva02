@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 12:42Z
+C: dashboard/tasks: task detail renders task.metadata.pipeline phase chips; backlog removed completed pipeline UI and duplicate Profile Hub RLS item; files=apps/eva-dashboard/components/tasks/task-detail.tsx,apps/eva-dashboard/__tests__/tasks.test.tsx,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-dashboard && npm test -- --runInBand __tests__/tasks.test.tsx; cd apps/eva-dashboard && npm run build; npm run docs:check
+P: pending/improve -> Phase Retry remains: resume only failed/skipped pipeline phases without rerunning completed phases.
+
 ### 2026-06-13 01:33Z
 C: agent,communication: parallel pipeline waves + startup input resume + Telegram inline approval buttons; files=apps/eva-core/src/agent/pipeline-runner.service.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/communication/telegram.adapter.ts,apps/eva-core/src/communication/communication.service.ts,apps/eva-core/src/communication/communication.types.ts,docs/backlog.md; tests=npm test (524 passed)
 P: pending/improve -> Phase Retry, Pipeline Progress in UI, Evidence Follow-up Window, Large Media Compression

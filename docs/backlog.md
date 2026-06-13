@@ -6,12 +6,6 @@ This backlog keeps only relevant, actionable improvements. Completed items move 
 
 ## 1. Agent Intelligence & Control Plane
 - [ ] **Scheduled Autonomy Rows**: Move `AgentIntelligenceService` periodic autonomy tick into explicit `scheduled_jobs` rows so wakeups are visible, pausable, and auditable in the dashboard.
-- [x] **Ask User Resume on Startup**: `recoverStuckTasks` now calls `expireTimedOutInputs` per-org for `waiting_for_input` tasks before processing, so conversations survive restarts without being incorrectly failed.
-- [x] **Tier Step Controls**: Dashboard controls `max_steps_by_tier`; runner uses org settings for medium/long loop depth with safe clamps.
-- [x] **Fluid Approvals UX**: human approval ask (no hash/level/screenshot), `notify` flag to avoid duplicate messages, natural sí/no keywords, evidence-on-demand screenshots, early long-task ack.
-- [x] **Telegram Inline Approval Buttons**: `TelegramAdapter.sendMessageWithInlineKeyboard` sends ✅/❌ buttons on approval requests; `callback_query` webhook handler resolves approvals with one tap and publishes `approval.resolved`. No circular dependency — uses DB directly.
-- [ ] **Evidence Follow-up Window**: allow "mándame la captura" AFTER an action executed (currently `send_evidence` must be requested in the original order; post-hoc requests need the session screenshot to be retrievable).
-- [x] **Spanish Verb Suffix Routing**: Tier classifier handles attached Spanish pronouns like `descárgamelo`, `mándaselo`, `envíaselo`, `recuérdamelo`.
 
 ---
 
@@ -31,9 +25,6 @@ This backlog keeps only relevant, actionable improvements. Completed items move 
 ## 4. Profile Hub Roadmap
 Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hub_plan.md).
 
-- [x] **Fase 1 — Datos+API Base**: migration 033 for structured profile todos/notes/goals + encrypted vault, sensitivity classifier, profile facts service/controller, focused unit tests.
-- [x] **Fase 2 — Split UI Base**: dedicated `/profile` route, `/soul` focused on agent identity, sidebar entry.
-- [ ] **Profile Hub RLS Verification**: after applying migration 033 to Supabase, run `RLS_TEST=true npm run test:e2e` and verify `profile_private_items.ciphertext` is not readable by authenticated Data API. (Needs live Supabase credentials — see §6.)
 - [ ] **Fase 3 — Interaction**: direct edit/create for notes/todos/goals/events, drag reorder, dialogs, masking/reveal audit UI for private vault.
 - [ ] **Fase 4 — Auto-fill**: structured digester v2, profile/todo/goal/note tools, suggestion inbox UI, realtime updates.
 - [ ] **Fase 5 — Prompt**: shared `ProfileContextBuilder` and deprecate free-text `cowork_context`.
@@ -42,11 +33,7 @@ Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hu
 
 ## 5. Multi-Phase Pipeline
 
-- [x] **PipelineRunnerService**: detects multi-phase goals, synthesizes phases via LLM, runs each phase as a separate AgentLoop with shared sandbox workspace.
-  Files: `src/agent/pipeline-runner.types.ts`, `src/agent/pipeline-runner.service.ts`.
-- [x] **Parallel Phases**: independent phases (empty `dependsOn`) execute concurrently using `Promise.all` in a wave-based scheduler. Dependent phases wait for their prerequisites.
 - [ ] **Phase Retry**: allow individual phase retry without rerunning the full pipeline (resume from last failed phase).
-- [ ] **Pipeline Progress in UI**: display per-phase status chips in the frontend task detail view using `task.metadata.pipeline`.
 
 ---
 
