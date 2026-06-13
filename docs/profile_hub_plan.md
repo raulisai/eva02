@@ -1,6 +1,7 @@
 # EVA · Profile Hub Plan (Mi Perfil visual + privado unificado)
 
-> Estado: **planeado** (sin código aún). Plan detallado acordado el 2026-06-12.
+> Estado: **Fase 1 + split inicial implementados**. Plan detallado acordado el 2026-06-12;
+> primera implementación agregada el 2026-06-12.
 > Objetivo: sacar "Mi perfil" de `/soul` a una sección propia `/profile`, unificarla con el
 > contexto privado (auto-ocultado), volverla visual (calendario, pendientes, metas, horarios,
 > notas movibles) y que el sistema/agentes la llenen y lean vía estructuras de datos.
@@ -8,7 +9,7 @@
 ## Estado actual relevante
 - `agent_souls`: persona agente + `persona_context` (personal_profile, cowork_context free-text,
   relationship_map) + `goals` JSONB + `private_context_ciphertext/hint` (AES-256-GCM write-only).
-- `soul-editor.tsx`: tabs Agente / Mi perfil / Privado — todo inputs/textarea de texto libre.
+- `soul-editor.tsx`: ahora queda enfocado en identidad del agente; `/profile` carga el hub del usuario.
 - Ya existen SIN UI: `schedule_events`, `known_places`, `behavior_patterns` (021) +
   `ScheduleService`/`BehaviorPatternService` (solo alimentan prompts).
 - `ConversationDigesterService.maybeUpdateSoulProfile`: auto-fill por regex (occupation/location).
@@ -25,28 +26,32 @@
 | D6 | API mixta: tablas planas → Supabase RLS directo + realtime (patrón soul-editor); cifrado/sugerencias/migración → `ProfileController` en eva-core | menos backend, realtime gratis, secreto nunca toca el cliente |
 
 ## Migración `033_profile_hub.sql`
-- `profile_todos(id, org_id, title, notes, status, due_date, priority, sensitivity, source, confidence, evidence_task_id, hint, created_at, updated_at)`
-- `profile_notes(id, org_id, title, content, color, pinned, position JSONB, sensitivity, source, hint, agent_visible, ...)`
-- `profile_goals(...)` + backfill desde `agent_souls.goals`
-- `agent_souls.private_context_ciphertext` evoluciona a JSON cifrado de items (blob actual = item `legacy`)
-- RLS inline en la propia migración (patrón real 021/027/031; CLAUDE.md dice 014 pero 014 ya está aplicada — convención documentada aquí)
-- Grants de columna: ciphertext jamás legible por `authenticated` (igual que 031)
+- Implementada: `profile_todos`, `profile_notes`, `profile_goals`, `profile_private_items`,
+  `profile_suggestions`, `profile_private_access_logs`.
+- `profile_goals` hace backfill desde `agent_souls.goals`.
+- RLS inline en la propia migración (patrón real 021/027/031; AGENTS dice 014 pero 014 ya está aplicada).
+- Grants de columna: `profile_private_items.ciphertext` jamás es legible por `authenticated`.
+- Pendiente: migrar el blob legacy `agent_souls.private_context_ciphertext` a items `legacy` cuando se aplique en un entorno real.
 
 ## Endpoints (`/agent/profile`)
-`GET overview` (SSR agregado) · `POST/DELETE private-item` · `POST private-item/reveal` (audit+rate-limit)
-· `POST migrate-legacy` (one-shot: cowork_context texto → sugerencias estructuradas vía modelo)
-· `POST suggestions/:id/accept|dismiss`
+Implementado: `GET overview` · `POST facts` · `POST private-items` · `POST private-items/:id/reveal`
+(auditado en `profile_private_access_logs`) · `POST suggestions/:id/accept|dismiss`.
+
+Pendiente: `DELETE private-item`, rate-limit explicito, `POST migrate-legacy`.
 
 ## UI `/profile` (`components/profile/`)
-identity-card + completeness-meter · week-calendar (tira 14 días scrollable, date-fns + CSS grid, sin lib calendario; badges de source) · todo-board (drag reorder) · goal-cards (barras progreso) · notes-board (notas movibles, posición persistida, badge Bot) · schedule-prefs-grid (pintor semanal) · relationship-cards · suggestion-inbox · masking global "modo privado".
-Deps nuevas: `@dnd-kit/core`, `@dnd-kit/sortable`, `@radix-ui/react-dialog`, `react-popover`, `react-checkbox`.
+Implementado: identity summary, stats, contexto operativo, relationship cards, pendientes, metas,
+notas, agenda proxima y boveda privada con guardar/reveal cifrado.
+
+Pendiente: completeness meter, week-calendar avanzado, drag reorder, dialogs, pintor semanal,
+suggestion inbox visual, masking global "modo privado". No se agregaron deps nuevas en la primera pasada.
 
 ## Fases
-1. **Datos+API**: migración 033, servicios (`SensitivityClassifier`, `ProfileFactsService`), `ProfileController`, tests RLS.
-2. **Split UI**: `/profile` read-only visual, `/soul` podado, sidebar.
-3. **Interacción**: drag notes/todos, dialogs eventos, pintor horarios, vault unificado masking/reveal.
-4. **Auto-llenado**: digester v2, tools del loop, suggestion inbox, realtime, migrate-legacy.
-5. **Prompt**: `ProfileContextBuilder` compartido, deprecación cowork_context, docs/evals.
+1. **Datos+API**: hecho para migración 033, servicios, controller y unit tests. Falta RLS_TEST real.
+2. **Split UI**: hecho para `/profile`, `/soul` podado y sidebar.
+3. **Interacción**: pendiente drag notes/todos, dialogs eventos, pintor horarios, masking global.
+4. **Auto-llenado**: pendiente digester v2, tools del loop, suggestion inbox, realtime, migrate-legacy.
+5. **Prompt**: pendiente `ProfileContextBuilder` compartido, deprecación cowork_context, docs/evals.
 
 ## Riesgos
 - Falsos positivos del clasificador → siempre reversible des-marcando (re-publica valor).

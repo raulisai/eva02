@@ -27,12 +27,13 @@ This backlog keeps only relevant,compiles outstanding tasks, technical debt, act
 ---
 
 ## 4. Profile Hub Roadmap
-Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hub_plan.md). Keep as roadmap until the schema/API/UI split is started.
+Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hub_plan.md).
 
-- [ ] **Fase 1 — Datos+API**: migration for structured profile todos/notes/goals + vault, profile facts service/controller, RLS tests.
-- [ ] **Fase 2 — Split UI**: dedicated `/profile` route; keep `/soul` focused on agent identity.
-- [ ] **Fase 3 — Interaction**: notes/todos/events editing, masking/reveal audit for private vault.
-- [ ] **Fase 4 — Auto-fill**: structured digester and profile/todo/goal/note tools.
+- [x] **Fase 1 — Datos+API Base**: migration 033 for structured profile todos/notes/goals + encrypted vault, sensitivity classifier, profile facts service/controller, focused unit tests.
+- [x] **Fase 2 — Split UI Base**: dedicated `/profile` route, `/soul` focused on agent identity, sidebar entry.
+- [ ] **Profile Hub RLS Verification**: after applying migration 033 to Supabase, run `RLS_TEST=true npm run test:e2e` and verify `profile_private_items.ciphertext` is not readable by authenticated Data API.
+- [ ] **Fase 3 — Interaction**: direct edit/create for notes/todos/goals/events, drag reorder, dialogs, masking/reveal audit UI for private vault.
+- [ ] **Fase 4 — Auto-fill**: structured digester v2, profile/todo/goal/note tools, suggestion inbox UI, realtime updates.
 - [ ] **Fase 5 — Prompt**: shared `ProfileContextBuilder` and deprecate free-text `cowork_context`.
 
 ---

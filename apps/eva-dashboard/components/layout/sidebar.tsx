@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   ListTodo, Server, Zap, FileText, ShieldCheck, LogOut, Terminal,
-  FlaskConical, Puzzle, Plug, Package, Sparkles, KeyRound, MessageSquare, Fingerprint, Clock, Coins, Sliders,
+  FlaskConical, Puzzle, Plug, Package, Sparkles, KeyRound, MessageSquare, Fingerprint, Clock, Coins, Sliders, UserRound,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { createClient } from '@/lib/supabase/client';
@@ -31,6 +31,7 @@ const NAV_GROUPS = [
       { href: '/mcp',        label: 'MCP',        icon: Plug },
       { href: '/artifacts',  label: 'Artifacts',  icon: Package },
       { href: '/soul',       label: 'Soul',       icon: Sparkles },
+      { href: '/profile',    label: 'Mi Perfil',  icon: UserRound },
     ],
   },
   {

@@ -17,6 +17,9 @@ import { AgentIntelligenceService } from './agent-intelligence.service';
 import { AgentMetricsController } from './agent-metrics.controller';
 import { AgentRunnerService } from './agent-runner.service';
 import { AgentTrajectoryService } from './agent-trajectory.service';
+import { ProfileController } from './profile.controller';
+import { ProfileFactsService } from './profile-facts.service';
+import { SensitivityClassifierService } from './sensitivity-classifier.service';
 import { SoulController } from './soul.controller';
 import { ConversationDigesterService } from './conversation-digester.service';
 import { GmailService } from './gmail.service';
@@ -57,8 +60,10 @@ import { CommunicationModule } from '../communication/communication.module';
     BehaviorPatternService,
     MemoryRecallService,
     ConversationDigesterService,
+    SensitivityClassifierService,
+    ProfileFactsService,
   ],
-  controllers: [AgentFeedbackController, AgentMetricsController, SoulController],
+  controllers: [AgentFeedbackController, AgentMetricsController, SoulController, ProfileController],
   exports: [
     AgentRunnerService,
     MediaService,
@@ -69,6 +74,7 @@ import { CommunicationModule } from '../communication/communication.module';
     GoogleDriveService,
     ScheduleService,
     BehaviorPatternService,
+    ProfileFactsService,
   ],
 })
 export class AgentModule {}

@@ -27,7 +27,7 @@ Key Documentation References:
 - `packages/browser-runtime`: Playwright runtime used by core browser module.
 - `packages/mcp-adapters`: MCP adapter/manager package.
 - `packages/skill-runtime`: runtime skill manifests/instructions/tests.
-- `supabase/migrations`: SQL migrations currently `001` through `032`.
+- `supabase/migrations`: SQL migrations currently `001` through `033`.
 - `docker`: Redis/Postgres local helpers; Supabase cloud remains expected DB in AGENTS.
 - `.agents/skills`: repo-local agent skills, including this seed.
 
@@ -91,18 +91,19 @@ Key Documentation References:
 - Intent/planner/tool/model: `/intent/classify`, `/intent/routes`, `/planner/plan`, `/tool-router/route`, `/tool-router/tools`, `/billing/stats`.
 - Browser: `/browser/open`, `/browser/sessions/:id/{screenshot,click,type,extract-text,extract-table,wait,close,prepare-action,status}`.
 - Integrations: `/integrations`, `/integrations/mcp/connections`, credential/model/channel tests, Google/WhatsApp/Uber/Rappi browser flows; browser-backed integration controllers live at `/integrations/google-web`, `/integrations/whatsapp`, `/integrations/uber`, and `/integrations/rappi`.
-- Soul/private context: `POST /agent/soul/private-context` stores encrypted user-only context for model prompting.
+- Soul/private context: `POST /agent/soul/private-context` stores legacy encrypted user-only context for model prompting.
+- Profile Hub: `/agent/profile` exposes `GET /overview`, `POST /facts`, `POST /private-items`, `POST /private-items/:id/reveal`, and suggestion accept/dismiss endpoints for structured user profile data and encrypted vault items.
 - Dev control: `/dev-control/projects`, `/dev-control/dev-tasks`, `/dev-control/claude-code/sessions`, build/test runs, roadmap suggestion.
 - Wear: `/wear-fast-path/token`, `/wear-fast-path/request`, `/wear-fast-path/policy`.
 - WebSocket: Socket.io namespace/path `/eva`, has `ping`, auth token checked in gateway.
 
 ## Supabase Schema Groups
 
-Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_events`, `005_memories`, `006_intent_routes`, `007_communication`, `008_skills`, `009_browser`, `010_dev_manager`, `011_wear_fast_path`, `012_nodes_devices`, `013_approvals`, `014_rls_policies`, `015_wear_ui`, `016_integrations_soul_artifacts`, `017_credentials_skill_seed`, `018_tasks_schema_align`, `019_fix_missing_rls_and_grants`, `020_soul_v2`, `021_schedule_places_patterns`, `022_scheduled_jobs`, `023_token_logs`, `024_fix_billing_stats_rpc`, `025_add_task_id_to_token_logs`, `026_fix_task_events_event_nullable`, `027_skill_learning_graph`, `028_agent_intelligence_metrics`, `029_agent_intelligence_flywheels`, `030_capability_gaps`, `031_soul_private_context`, `032_agent_tier_step_settings`.
+Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_events`, `005_memories`, `006_intent_routes`, `007_communication`, `008_skills`, `009_browser`, `010_dev_manager`, `011_wear_fast_path`, `012_nodes_devices`, `013_approvals`, `014_rls_policies`, `015_wear_ui`, `016_integrations_soul_artifacts`, `017_credentials_skill_seed`, `018_tasks_schema_align`, `019_fix_missing_rls_and_grants`, `020_soul_v2`, `021_schedule_places_patterns`, `022_scheduled_jobs`, `023_token_logs`, `024_fix_billing_stats_rpc`, `025_add_task_id_to_token_logs`, `026_fix_task_events_event_nullable`, `027_skill_learning_graph`, `028_agent_intelligence_metrics`, `029_agent_intelligence_flywheels`, `030_capability_gaps`, `031_soul_private_context`, `032_agent_tier_step_settings`, `033_profile_hub`.
 
 - Identity/org: `organizations`, `users`.
 - Tasks/events: `tasks`, `task_events`; `014` references `task_steps` but no `CREATE TABLE` was found in current scan.
-- Memory/soul: `memories`, `memory_embeddings`, `agent_souls`; RPC `match_memories`. `agent_souls.persona_context` is the user-owned structured profile (`personal_profile`, `cowork_context`, `relationship_map`, expectations/routines); `model_prefs` is for model preferences only. `private_context_ciphertext` stores AES-256-GCM private user context written/decrypted only by eva-core, with Data API grants exposing only `private_context_hint`.
+- Memory/soul/profile: `memories`, `memory_embeddings`, `agent_souls`, `profile_todos`, `profile_notes`, `profile_goals`, `profile_private_items`, `profile_suggestions`, `profile_private_access_logs`; RPC `match_memories`. `agent_souls` keeps agent identity and legacy persona_context. Profile Hub tables own user todos/notes/goals and encrypted private vault items; Data API grants expose only private hints, never `profile_private_items.ciphertext`.
 - Routing/planning/tools/agent intelligence: `intent_routes`, `skills`, `skill_versions`, `tools`, `tool_calls`, `skill_usage_stats`, `skill_graph_edges`, `skill_selection_events`, `agent_trajectories`, `skill_embeddings`, `agent_input_requests`, `agent_runtime_artifacts`, `org_agent_settings`; `org_agent_settings.max_steps_by_tier` controls safe agent-loop step budgets by tier; views `agent_tool_success_metrics`, `agent_goal_success_metrics`, `agent_defense_metrics`, `agent_skill_funnel_metrics`, `agent_task_efficiency_metrics`.
 - Browser: `browser_profiles`, `browser_sessions`, `browser_screenshots`, `browser_action_preparations`.
 - Dev manager: `projects`, `dev_tasks`, `claude_code_sessions`, `build_runs`, `test_runs`, `code_reviews`, `roadmap_items`.
@@ -112,15 +113,15 @@ Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_
 
 ## Dashboard Map
 
-- App routes under `apps/eva-dashboard/app`: login, redirect root, dashboard layout, tasks, approvals, artifacts, billing, events, jobs, logs, mcp, nodes, playground, skills, soul.
+- App routes under `apps/eva-dashboard/app`: login, redirect root, dashboard layout, tasks, approvals, artifacts, billing, events, jobs, logs, mcp, nodes, playground, profile, skills, soul.
 - `middleware.ts` refreshes Supabase auth with `getUser()`, redirects unauthenticated users to `/login`, authenticated root/login users to `/tasks`.
 - API client: `lib/core-api.ts` uses client Supabase session and Bearer token.
 - Server org context: `lib/supabase/org.ts` gets `users.org_id`; keep org-scoped Supabase reads.
-- UI components: `components/tasks`, `approvals`, `billing`, `events`, `jobs`, `mcp`, `nodes`, `playground`, `skills`, `soul`, `settings`, `layout`, `ui`. Soul editor is a segmented workspace with `Agente EVA`, `Mi perfil`, and `Privado` sections; user profile/relationship aliases/cowork context stay separate from agent identity, and private vault fields go through `POST /agent/soul/private-context`. Playground final answers have thumbs feedback wired to `POST /agent/feedback`; Topbar polls public `/health` to show core/sandbox readiness.
+- UI components: `components/tasks`, `approvals`, `billing`, `events`, `jobs`, `mcp`, `nodes`, `playground`, `profile`, `skills`, `soul`, `settings`, `layout`, `ui`. Soul editor is now agent identity only; `/profile` is the user Profile Hub with relationship cards, profile context, todos, notes, goals, schedule preview, and encrypted private vault reveal through `/agent/profile`. Playground final answers have thumbs feedback wired to `POST /agent/feedback`; Topbar polls public `/health` to show core/sandbox readiness.
 
 ## Local Drift / Watchlist
 
-- AGENTS/README migration lists are stale versus actual `001-032`.
+- AGENTS/README migration lists are stale versus actual `001-033`.
 - AGENTS says RLS policies live exclusively in `014_rls_policies.sql`, but later migrations include policy creation; decide convention before adding more tables.
 - `014_rls_policies.sql` references `task_steps`; current migration scan did not find `CREATE TABLE task_steps`.
 - `TasksRepository.findStuck` lacks an `org_id` argument/filter; may be intended system-wide but violates the written non-negotiable unless bounded elsewhere.

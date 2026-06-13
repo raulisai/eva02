@@ -2,6 +2,14 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 00:11Z
+C: profile-hub: fixed suggestion accept flow so accepted low-confidence facts apply instead of re-entering inbox; files=apps/eva-core/src/agent/profile-facts.service.ts; tests=cd apps/eva-core && npm test -- src/agent/__tests__/profile-facts.service.spec.ts --runInBand; cd apps/eva-core && npm run build
+P: pending/improve -> add integration/e2e coverage for profile suggestion accept/dismiss once migration 033 is applied
+
+### 2026-06-13 00:10Z
+C: profile-hub: implemented structured user profile hub with migration 033, secure profile API, /profile dashboard, and /soul agent-only split; files=supabase/migrations/033_profile_hub.sql,apps/eva-core/src/agent/profile.controller.ts,apps/eva-core/src/agent/profile-facts.service.ts,apps/eva-core/src/agent/sensitivity-classifier.service.ts,apps/eva-dashboard/app/(dashboard)/profile/page.tsx,apps/eva-dashboard/components/profile/profile-hub-client.tsx,apps/eva-dashboard/components/soul/soul-editor.tsx,docs/backlog.md,docs/profile_hub_plan.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/sensitivity-classifier.service.spec.ts src/agent/__tests__/profile-facts.service.spec.ts --runInBand; cd apps/eva-dashboard && npm test -- --runInBand __tests__/soul-editor.test.tsx; cd apps/eva-core && npm run build; cd apps/eva-dashboard && npm run build; npm run docs:check
+P: pending/improve -> apply migration 033 to Supabase and run RLS_TEST=true npm run test:e2e to verify profile_private_items.ciphertext is unreadable through authenticated Data API
+
 ### 2026-06-12 23:47Z
 C: agent/settings: added tier step budgets, Spanish suffix routing coverage, and curated active backlog; files=apps/eva-core/src/agent/tier.ts,apps/eva-core/src/agent/agent-intelligence.service.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-intelligence.service.spec.ts,apps/eva-dashboard/components/settings/agent-client.tsx,supabase/migrations/032_agent_tier_step_settings.sql,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/agent-intelligence.service.spec.ts --runInBand; cd apps/eva-core && npm test -- src/agent/__tests__/agent-runner.service.spec.ts --runInBand; cd apps/eva-dashboard && npm run build; npm run docs:check
 P: pending/improve -> apply migrations 031-032 to Supabase and run RLS_TEST=true npm run test:e2e before relying on private context and tier-step settings in production
