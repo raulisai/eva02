@@ -1,9 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ModelRouterService } from '../model-router/model-router.service';
 import { SkillDocsService } from './skill-docs.service';
 import { MemoryAgentService } from '../memory/memory-agent.service';
 import { SaveMemoryDto } from '../memory/dto/save-memory.dto';
 import { AgentLoopStep } from './agent-loop.service';
+import { EventBusService } from '../events/event-bus.service';
 
 /**
  * Prompt that drives the background skill-review agent.
@@ -122,7 +123,21 @@ export class BackgroundReviewService {
     private readonly modelRouter: ModelRouterService,
     private readonly skillDocs: SkillDocsService,
     private readonly memoryAgent: MemoryAgentService,
+    @Optional() private readonly events?: EventBusService,
   ) {}
+
+  /**
+   * Surface a compact "what I learned" note to the user after the learning loop
+   * (Hermes parity: summarize_background_review_actions). Best-effort.
+   */
+  private async surface(orgId: string, taskId: string, text: string): Promise<void> {
+    if (!this.events) return;
+    try {
+      await this.events.publish({ type: 'task.say', orgId, taskId, payload: { text } });
+    } catch (err) {
+      this.logger.debug(`learning-surface skipped (task ${taskId}): ${(err as Error).message}`);
+    }
+  }
 
   /**
    * Schedules a background review after task completion.
@@ -270,6 +285,8 @@ export class BackgroundReviewService {
 
     if (manageResult.ok) {
       this.logger.log(`background-review: ${parsed.action} skill '${slug}' (task ${taskId}) — ${parsed.reason ?? ''}`);
+      const verb = parsed.action === 'create' ? 'creada' : parsed.action === 'write_file' ? 'ampliada' : 'actualizada';
+      await this.surface(orgId, taskId, `💾 Aprendí algo: skill '${slug}' ${verb}.`);
     } else {
       this.logger.debug(`background-review: skill action failed for '${slug}': ${manageResult.error}`);
     }
@@ -304,6 +321,8 @@ export class BackgroundReviewService {
       }
 
       this.logger.log(`background-review: ${parsed.facts.length} hechos guardados en memoria (task ${input.taskId})`);
+      const n = Math.min(parsed.facts.length, 5);
+      await this.surface(input.orgId, input.taskId, `🧠 Recordaré ${n} ${n === 1 ? 'cosa nueva' : 'cosas nuevas'} sobre ti.`);
     } catch (err) {
       this.logger.debug(`memory-review skipped (task ${input.taskId}): ${(err as Error).message}`);
     }

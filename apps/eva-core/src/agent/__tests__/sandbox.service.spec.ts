@@ -253,6 +253,38 @@ describe('SandboxService', () => {
     expect(volOf(nodeRun!)).toBe(volOf(sessionCreate!));
   });
 
+  it('handles many concurrent task sessions and releases them without leaking', async () => {
+    const N = 12;
+    const tasks = Array.from({ length: N }, (_, i) => `stress-${i}`);
+
+    // Cada tarea: comando en sesión 0, código python en 0, comando en una
+    // terminal paralela (1) y un proceso en background — todo concurrente.
+    await Promise.all(
+      tasks.map(async (t) => {
+        await service.execInSession(t, { kind: 'terminal', code: 'echo a', session: 0 });
+        await service.execInSession(t, { kind: 'python', code: 'print(1)', session: 0 });
+        await service.execInSession(t, { kind: 'terminal', code: 'echo b', session: 1 });
+        await service.execInSession(t, { kind: 'terminal', code: 'sleep 1', background: true });
+      }),
+    );
+
+    // Un contenedor por tarea (no contar el standby).
+    const creates = dockerCalls.filter((c) => c.args[0] === 'run' && c.args.includes('-d') && !c.args.includes('eva-standby'));
+    expect(creates).toHaveLength(N);
+    // Dos shells por tarea (sesiones 0 y 1) → 2N shells vivos.
+    expect(shellProcs).toHaveLength(2 * N);
+    expect(tasks.every((t) => service.hasSession(t))).toBe(true);
+
+    // Liberar todo concurrentemente.
+    await Promise.all(tasks.map((t) => service.release(t)));
+
+    // Sin sesiones vivas, todos los shells cerrados, un `rm -f` por contenedor.
+    expect(tasks.some((t) => service.hasSession(t))).toBe(false);
+    expect(shellProcs.every((p) => p.exited)).toBe(true);
+    const removals = dockerCalls.filter((c) => c.args[0] === 'rm' && c.args.includes('-f') && !c.args.includes('eva-standby'));
+    expect(removals.length).toBeGreaterThanOrEqual(N);
+  });
+
   it('release removes the container and forgets the session', async () => {
     await service.execInSession('task-1', { kind: 'python', code: 'print(1)' });
     await service.release('task-1');

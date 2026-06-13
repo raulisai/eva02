@@ -3,6 +3,7 @@ import { BackgroundReviewService, ReviewInput } from '../background-review.servi
 import { ModelRouterService } from '../../model-router/model-router.service';
 import { SkillDocsService } from '../skill-docs.service';
 import { MemoryAgentService } from '../../memory/memory-agent.service';
+import { EventBusService } from '../../events/event-bus.service';
 import { AgentLoopStep } from '../agent-loop.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -26,12 +27,14 @@ describe('BackgroundReviewService', () => {
   let modelRouter: jest.Mocked<ModelRouterService>;
   let skillDocs: jest.Mocked<SkillDocsService>;
   let memoryAgent: jest.Mocked<MemoryAgentService>;
+  let events: jest.Mocked<EventBusService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         BackgroundReviewService,
         { provide: ModelRouterService, useValue: { generate: jest.fn() } },
+        { provide: EventBusService, useValue: { publish: jest.fn().mockResolvedValue('1-0') } },
         {
           provide: SkillDocsService,
           useValue: {
@@ -53,6 +56,7 @@ describe('BackgroundReviewService', () => {
     modelRouter = module.get(ModelRouterService);
     skillDocs = module.get(SkillDocsService);
     memoryAgent = module.get(MemoryAgentService);
+    events = module.get(EventBusService);
   });
 
   const input: ReviewInput = {
@@ -113,6 +117,23 @@ describe('BackgroundReviewService', () => {
 
     expect(skillDocs.viewSkill).not.toHaveBeenCalled();
     expect(skillDocs.createSkill).toHaveBeenCalledWith(ORG, expect.objectContaining({ slug: 'nueva' }));
+  });
+
+  it('surfaces a compact learning note to the user when a skill is created', async () => {
+    modelRouter.generate.mockResolvedValueOnce(reply({
+      action: 'create', slug: 'deploy-flow', display_name: 'Deploy', description: 'd',
+      category: 'coding', content_md: '# Deploy', reason: 'nuevo workflow',
+    }));
+
+    await (service as unknown as { runSkillReview: (i: ReviewInput, t: string) => Promise<void> })
+      .runSkillReview(input, 'transcript');
+
+    expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'task.say',
+      orgId: ORG,
+      taskId: TASK,
+      payload: expect.objectContaining({ text: expect.stringContaining('deploy-flow') }),
+    }));
   });
 
   it('scheduleReview skips when there are fewer than 2 meaningful steps', () => {

@@ -63,6 +63,7 @@ describe('AgentLoopService', () => {
   let uber: jest.Mocked<UberWebService>;
   let rappi: jest.Mocked<RappiWebService>;
   let scheduledJobs: jest.Mocked<ScheduledJobsService>;
+  let database: { admin: { from: jest.Mock } };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -176,6 +177,7 @@ describe('AgentLoopService', () => {
             writeSkillFile: jest.fn().mockResolvedValue({ ok: true, slug: 'test', action: 'write_file', message: 'ok' }),
             removeSkillFile: jest.fn().mockResolvedValue({ ok: true, slug: 'test', action: 'remove_file', message: 'ok' }),
             deleteSkill: jest.fn().mockResolvedValue({ ok: true, slug: 'test', action: 'delete', message: 'ok' }),
+            recordSkillView: jest.fn().mockResolvedValue(undefined),
           },
         },
         {
@@ -240,6 +242,7 @@ describe('AgentLoopService', () => {
     uber = module.get(UberWebService);
     rappi = module.get(RappiWebService);
     scheduledJobs = module.get(ScheduledJobsService);
+    database = module.get(DatabaseService);
   });
 
   it('returns the final answer when the model answers directly', async () => {
@@ -529,6 +532,8 @@ describe('AgentLoopService', () => {
       network: true,
       session: 0,
     });
+    // Telemetría de cumplimiento de red persistida en task_events.
+    expect(database.admin.from).toHaveBeenCalledWith('task_events');
     expect(sandbox.runOneShot).not.toHaveBeenCalled();
     expect(result.ok).toBe(true);
     delete process.env.EVA_SANDBOX_ALLOW_NETWORK;

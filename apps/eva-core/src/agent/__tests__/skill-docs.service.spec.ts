@@ -13,7 +13,7 @@ function makeDb(tables: Record<string, { data: unknown; error?: unknown }>) {
   const from = jest.fn((table: string) => {
     const payload = tables[table] ?? { data: null, error: null };
     const builder: Record<string, unknown> = {};
-    for (const m of ['select', 'eq', 'in', 'order', 'limit', 'maybeSingle', 'update', 'insert', 'upsert', 'delete']) {
+    for (const m of ['select', 'eq', 'in', 'gte', 'order', 'limit', 'maybeSingle', 'update', 'insert', 'upsert', 'delete']) {
       builder[m] = jest.fn(() => builder);
     }
     // maybeSingle resolves to the first row; everything else resolves to the list.
@@ -40,10 +40,20 @@ function skillRow(slug: string, category: string, description = `desc ${slug}`, 
 
 describe('SkillDocsService', () => {
   async function build(tables: Record<string, { data: unknown; error?: unknown }>) {
+    const db = makeDb(tables);
     const module: TestingModule = await Test.createTestingModule({
-      providers: [SkillDocsService, { provide: DatabaseService, useValue: makeDb(tables) }],
+      providers: [SkillDocsService, { provide: DatabaseService, useValue: db }],
     }).compile();
     return module.get(SkillDocsService);
+  }
+
+  /** Like build(), but also exposes the db so callers can assert on writes. */
+  async function buildWithDb(tables: Record<string, { data: unknown; error?: unknown }>) {
+    const db = makeDb(tables) as unknown as { admin: { from: jest.Mock } };
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [SkillDocsService, { provide: DatabaseService, useValue: db }],
+    }).compile();
+    return { svc: module.get(SkillDocsService), db };
   }
 
   describe('substituteTemplateVars', () => {
@@ -109,6 +119,31 @@ describe('SkillDocsService', () => {
       expect(detail?.content_md).toBe('run in task-9');
       expect(detail?.files).toEqual([{ subdir: 'references', filename: 'api.md', path: 'references/api.md' }]);
       expect(detail?.related_skills).toEqual([{ slug: 'rollback', relation: 'precedes', weight: 0.9 }]);
+    });
+  });
+
+  describe('usage telemetry', () => {
+    it('recordSkillView upserts into skill_usage_stats', async () => {
+      const { svc, db } = await buildWithDb({ skill_usage_stats: { data: [] } });
+      await svc.recordSkillView(ORG, 'deploy', 'generated');
+      expect(db.admin.from).toHaveBeenCalledWith('skill_usage_stats');
+    });
+
+    it('keeps a recently-used category expanded even when off-goal', async () => {
+      const data = [
+        ...Array.from({ length: 8 }, (_, i) => skillRow(`code-${i}`, 'coding', 'deploy and build code')),
+        ...Array.from({ length: 8 }, (_, i) => skillRow(`cook-${i}`, 'cooking', 'recetas de pasta')),
+      ];
+      const svc = await build({
+        skills: { data },
+        // cook-0 fue usada hace poco → su categoría se expande pese a no matchear el goal.
+        skill_usage_stats: { data: [{ skill_slug: 'cook-0' }] },
+      });
+      const block = await svc.getSkillIndexBlock(ORG, { goal: 'necesito deploy de code' });
+
+      expect(block).toContain('  cooking:');
+      expect(block).toContain('    - cook-0: recetas de pasta');
+      expect(block).not.toContain('cooking [solo nombres]');
     });
   });
 });

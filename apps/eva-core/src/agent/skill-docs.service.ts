@@ -113,20 +113,23 @@ export class SkillDocsService {
     }
 
     // Decide which categories stay expanded. Below the threshold, expand all.
-    // Above it, expand only categories relevant to the goal (keyword overlap)
-    // plus any category that holds a pinned skill.
+    // Above it, expand only categories relevant to the goal (keyword overlap),
+    // any category that holds a pinned skill, OR one with a recently-used skill
+    // (rank by real usage, not just goal keywords — skill_usage_stats).
     const goalTokens = this.tokenize(opts?.goal ?? '');
     const expandAll = skills.length <= EXPAND_ALL_THRESHOLD || goalTokens.size === 0;
     const expanded = new Set<string>();
     if (!expandAll) {
+      const recentSlugs = await this.recentlyUsedSlugs(orgId);
       for (const [cat, entries] of byCategory) {
         const hasPinned = entries.some((e) => e.is_pinned);
+        const hasRecent = entries.some((e) => recentSlugs.has(e.slug));
         const catTokens = this.tokenize(
           `${cat} ${entries.map((e) => `${e.slug} ${e.description}`).join(' ')}`,
         );
         let overlap = 0;
         for (const t of goalTokens) if (catTokens.has(t)) overlap++;
-        if (hasPinned || overlap > 0) expanded.add(cat);
+        if (hasPinned || hasRecent || overlap > 0) expanded.add(cat);
       }
     }
 
@@ -200,6 +203,54 @@ export class SkillDocsService {
         .map((e) => ({ slug: e.to_skill_slug, relation: e.relation, weight: Number(e.weight) || 0 }));
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * Record a usage bump when the agent loads a skill (skill_view). Feeds
+   * skill_usage_stats so the index demotion can rank by real usage, not just
+   * goal keyword overlap. Best-effort; bundled and doc skills both tracked.
+   */
+  async recordSkillView(orgId: string, slug: string, source: 'bundled' | 'generated'): Promise<void> {
+    try {
+      const now = new Date().toISOString();
+      const { data } = await this.db.admin
+        .from('skill_usage_stats')
+        .select('attempts')
+        .eq('org_id', orgId)
+        .eq('source', source)
+        .eq('skill_slug', slug)
+        .eq('context_key', '__global__')
+        .maybeSingle();
+      const attempts = Number((data as { attempts?: number } | null)?.attempts ?? 0) + 1;
+      await this.db.admin.from('skill_usage_stats').upsert({
+        org_id: orgId,
+        source,
+        skill_slug: slug,
+        context_key: '__global__',
+        attempts,
+        last_used_at: now,
+        updated_at: now,
+      }, { onConflict: 'org_id,source,skill_slug,context_key' });
+    } catch (err) {
+      this.logger.debug(`recordSkillView(${slug}) skipped: ${(err as Error).message}`);
+    }
+  }
+
+  /** Slugs viewed/used within the last `sinceDays` — drives index expansion. */
+  private async recentlyUsedSlugs(orgId: string, sinceDays = 14, limit = 40): Promise<Set<string>> {
+    try {
+      const since = new Date(Date.now() - sinceDays * 86_400_000).toISOString();
+      const { data } = await this.db.admin
+        .from('skill_usage_stats')
+        .select('skill_slug')
+        .eq('org_id', orgId)
+        .gte('last_used_at', since)
+        .order('last_used_at', { ascending: false })
+        .limit(limit);
+      return new Set(((data ?? []) as Array<{ skill_slug: string }>).map((r) => r.skill_slug));
+    } catch {
+      return new Set();
     }
   }
 

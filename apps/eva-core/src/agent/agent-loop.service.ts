@@ -1296,6 +1296,9 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
           const skill = await this.skillDocs.viewSkill(orgId, slug, { taskId });
           if (!skill) return `ERROR: Skill '${slug}' no encontrada. Usa skill_manage(action="list") o revisa el índice de skills.`;
 
+          // Telemetría de uso: cargar una skill cuenta como uso (rankea el índice).
+          void this.skillDocs.recordSkillView(orgId, slug, skill.source);
+
           const body = await this.expandSkillInlineShell(
             skill.content_md ?? '(sin contenido — usa skill_manage para añadir instrucciones)',
             orgId,
@@ -2140,13 +2143,18 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
     if (args.network === true) {
       if (this.intelligence) {
         const denied = await this.intelligence.validateNetworkAllowlist(orgId, code).catch(() => null);
-        if (denied) return `ERROR: ${denied}`;
+        if (denied) {
+          await this.recordNetworkExec(orgId, taskId, { language, code, allowlistPassed: false, outcome: 'blocked', blockedReason: denied });
+          return `ERROR: ${denied}`;
+        }
       }
       if (process.env.EVA_SANDBOX_ALLOW_NETWORK === 'true') {
+        await this.recordNetworkExec(orgId, taskId, { language, code, allowlistPassed: true, outcome: 'ran_direct' });
         const result = await this.sandbox.execInSession(taskId, { kind: language, code, orgId, network: true, session });
         return this.formatSandboxResult(result);
       }
       if (!this.approvals || !opts.userId) {
+        await this.recordNetworkExec(orgId, taskId, { language, code, allowlistPassed: true, outcome: 'blocked', blockedReason: 'no_approval_context' });
         return 'ERROR: la ejecución con red requiere aprobación humana y no está disponible en este contexto. Reintenta sin "network" o explica en final_answer qué quedó pendiente.';
       }
       const approval = await this.approvals.requestForPreparedAction({
@@ -2157,11 +2165,41 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
         payload: { language, code },
         summary: `Ejecutar ${language} con acceso a red: ${code.slice(0, 120)}`,
       });
+      await this.recordNetworkExec(orgId, taskId, { language, code, allowlistPassed: true, outcome: 'approval_requested' });
       return `PENDIENTE DE APROBACIÓN: la ejecución con red quedó en Approvals (hash ${approval.action_hash.slice(0, 12)}…). Se ejecutará al aprobarse. Continúa sin red o cierra con final_answer explicando que quedó pendiente.`;
     }
 
     const result = await this.sandbox.execInSession(taskId, { kind: language, code, orgId, session });
     return this.formatSandboxResult(result);
+  }
+
+  /**
+   * Telemetría de cumplimiento de red: persiste en task_events cada vez que el
+   * modelo pidió ejecutar con red, si pasó el allowlist y el desenlace
+   * (ran_direct / approval_requested / blocked). Auditoría de uso de red.
+   */
+  private async recordNetworkExec(
+    orgId: string,
+    taskId: string,
+    info: { language: string; code: string; allowlistPassed: boolean; outcome: 'ran_direct' | 'approval_requested' | 'blocked'; blockedReason?: string },
+  ): Promise<void> {
+    try {
+      await this.db.admin.from('task_events').insert({
+        org_id: orgId,
+        task_id: taskId,
+        event_type: 'sandbox.network_exec',
+        payload: {
+          requested: true,
+          language: info.language,
+          code_preview: info.code.slice(0, 200),
+          allowlist_passed: info.allowlistPassed,
+          outcome: info.outcome,
+          blocked_reason: info.blockedReason ?? null,
+        },
+      });
+    } catch (err) {
+      this.logger.debug(`network-exec telemetry skipped: ${(err as Error).message}`);
+    }
   }
 
   private async runDelegate(

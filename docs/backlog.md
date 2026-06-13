@@ -5,21 +5,11 @@ This backlog keeps only relevant, actionable improvements. Completed work moves 
 ---
 
 ## 1. Runtime Safety & Observability
-- [ ] **Sandbox Concurrency Stress Test**: focused stress test for concurrent task containers + multiplexed persistent shells (`session` 0-9), background processes, and the idle reaper releasing workspaces without leaking containers or shell PIDs.
-- [ ] **Sandbox Network Compliance Telemetry**: persist/report when the model requested network execution, whether it passed the allowlist, and why it was blocked — so network usage is auditable.
+Sandbox concurrency stress test and network-compliance telemetry shipped (see [sandbox.service.spec.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/__tests__/sandbox.service.spec.ts) and `recordNetworkExec` in [agent-loop.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/agent-loop.service.ts) → `task_events` event_type `sandbox.network_exec`). No open items.
 
 ---
 
-## 2. Procedural Skills (Hermes parity)
-Skills system already shipped (doc-skills + stable index + `skill_view`/`skill_manage` + post-task `BackgroundReviewService`). Remaining work is gated on the migration below.
-
-- [ ] **Apply migration 034 (blocker)**: `034_skill_docs.sql` (adds `content_md/category/is_pinned/kind` to `skills` + `skill_files` table with RLS) must be applied to Supabase cloud. Until then `skill_view`/`skill_manage` return empty and the whole doc-skill loop is inert.
-- [ ] **Surface background-review to the user**: emit a compact summary after the learning loop ("💾 Skill 'deploy-flow' updated"), mirroring Hermes' `summarize_background_review_actions`.
-- [ ] **Usage telemetry for doc-skills**: wire `skill_view`/`skill_manage` of `kind='doc'` skills into `skill_usage_stats` so the index demotion can rank by real usage, not just goal keyword overlap (today only `code` skills record outcomes via SkillLibraryService).
-
----
-
-## 3. Profile Hub Roadmap
+## 2. Profile Hub Roadmap
 Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hub_plan.md).
 
 - [ ] **Fase 3 — Interaction**: direct edit/create for notes/todos/goals/events, drag reorder, dialogs, masking/reveal audit UI for private vault.
@@ -27,7 +17,7 @@ Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hu
 
 ---
 
-## 4. External Validation Queue
+## 3. External Validation Queue
 These require live credentials/environment and are not code backlog until available.
 
 - [ ] **RLS Verification**: after applying migrations to Supabase, run `RLS_TEST=true npm run test:e2e` and verify `agent_souls.private_context_ciphertext` and `profile_private_items.ciphertext` are unreadable through the authenticated Data API.
