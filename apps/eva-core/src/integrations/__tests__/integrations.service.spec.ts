@@ -3,7 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { SecretCipher } from '../../common/secret-cipher';
 import { IntegrationsRepository } from '../integrations.repository';
 import { IntegrationsService } from '../integrations.service';
-import { OrgIntegration } from '../integrations.types';
+import { McpConnection, OrgIntegration } from '../integrations.types';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const now = new Date().toISOString();
@@ -20,6 +20,25 @@ function row(overrides: Partial<OrgIntegration> = {}): OrgIntegration {
     secret_ciphertext: null,
     secret_hint: null,
     webhook_secret_ciphertext: null,
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+function mcpRow(overrides: Partial<McpConnection> = {}): McpConnection {
+  return {
+    id: 'mcp-1',
+    org_id: ORG,
+    name: 'Remote MCP',
+    transport: 'http',
+    endpoint: 'https://mcp.example.com/mcp',
+    enabled: true,
+    status: 'disconnected',
+    auth_ciphertext: null,
+    tools: [{ stale: true }],
+    last_checked_at: null,
+    last_error: null,
     created_at: now,
     updated_at: now,
     ...overrides,
@@ -206,6 +225,34 @@ describe('IntegrationsService', () => {
       kind: 'channel',
       provider: 'wear',
       status: 'active',
+    }));
+  });
+
+  it('testMcp: marks OAuth-required remote servers unusable until auth is connected', async () => {
+    repo.findMcpConnection.mockResolvedValue(mcpRow());
+    repo.updateMcpConnection.mockImplementation(async (_orgId, _id, patch) => mcpRow({
+      status: patch.status ?? 'disconnected',
+      tools: patch.tools ?? [],
+      last_checked_at: patch.last_checked_at ?? null,
+      last_error: patch.last_error ?? null,
+    }));
+
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      headers: { get: jest.fn().mockReturnValue('Bearer realm="mcp", error="invalid_token"') },
+      text: async () => 'authorization_required',
+    }) as unknown as typeof fetch;
+
+    const result = await service.testMcp(ORG, 'mcp-1');
+
+    expect(result.status).toBe('error');
+    expect(result.tools).toEqual([]);
+    expect(result.last_error).toBe('OAuth required before this MCP server can expose tools');
+    expect(repo.updateMcpConnection).toHaveBeenCalledWith(ORG, 'mcp-1', expect.objectContaining({
+      status: 'error',
+      tools: [],
+      last_error: 'OAuth required before this MCP server can expose tools',
     }));
   });
 

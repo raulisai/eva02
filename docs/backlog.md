@@ -16,9 +16,7 @@ This backlog keeps only relevant, actionable improvements. Completed items move 
 ---
 
 ## 3. Integrations With Real Product Impact
-- [ ] **Large Media Compression**: Add ffmpeg compression fallback for outbound videos/files over Telegram platform limits.
 - [ ] **MCP Stdio Secret Injection**: Wire dashboard MCP presets to runner-side env/secret injection for stdio tools that need API tokens or database URLs.
-- [ ] **MCP OAuth Preflight**: Add a connection preflight for remote MCP nodes that require OAuth before exposing them as usable tools.
 
 ---
 

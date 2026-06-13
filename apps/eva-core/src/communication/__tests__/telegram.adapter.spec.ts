@@ -1,12 +1,48 @@
+import { EventEmitter } from 'events';
+import { spawn } from 'child_process';
+import { readFile, unlink, writeFile } from 'fs/promises';
 import { TelegramAdapter } from '../telegram.adapter';
+
+jest.mock('child_process', () => ({ spawn: jest.fn() }));
+jest.mock('fs/promises', () => ({
+  readFile: jest.fn(),
+  unlink: jest.fn(),
+  writeFile: jest.fn(),
+}));
 
 describe('TelegramAdapter', () => {
   const originalFetch = global.fetch;
+  const spawnMock = spawn as unknown as jest.Mock;
+  const readFileMock = readFile as unknown as jest.Mock;
+  const unlinkMock = unlink as unknown as jest.Mock;
+  const writeFileMock = writeFile as unknown as jest.Mock;
 
   afterEach(() => {
     global.fetch = originalFetch;
+    jest.clearAllMocks();
     jest.restoreAllMocks();
   });
+
+  function mockFfmpegExit(code: number, output?: Buffer, stderr?: string) {
+    writeFileMock.mockResolvedValue(undefined);
+    readFileMock.mockResolvedValue(output ?? Buffer.from('compressed-video'));
+    unlinkMock.mockResolvedValue(undefined);
+    spawnMock.mockImplementation(() => {
+      const child = new EventEmitter() as EventEmitter & { stderr: EventEmitter };
+      child.stderr = new EventEmitter();
+      process.nextTick(() => {
+        if (stderr) child.stderr.emit('data', Buffer.from(stderr));
+        child.emit('close', code);
+      });
+      return child;
+    });
+  }
+
+  function bufferWithReportedSize(bytes: number): Buffer {
+    const buffer = Buffer.alloc(1);
+    Object.defineProperty(buffer, 'length', { value: bytes });
+    return buffer;
+  }
 
   it('sends plain text without Telegram Markdown parse_mode', async () => {
     const fetchMock = jest.fn().mockResolvedValue({
@@ -130,15 +166,41 @@ describe('TelegramAdapter', () => {
       expect(url).toContain('/sendDocument');
     });
 
-    it('rejects oversized files (>50 MB) without calling Telegram API', async () => {
-      const fetchMock = jest.fn();
+    it('compresses oversized native videos with ffmpeg before sending to Telegram', async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue({ result: { message_id: 202 } }),
+      });
       global.fetch = fetchMock as unknown as typeof fetch;
+      mockFfmpegExit(0, Buffer.alloc(10 * 1024 * 1024));
 
       const adapter = new TelegramAdapter();
-      const bigBuffer = Buffer.alloc(51 * 1024 * 1024); // 51 MB
+      const bigBuffer = bufferWithReportedSize(51 * 1024 * 1024);
       const result = await adapter.sendDocument(
         { chat_id: '100' },
         bigBuffer,
+        'huge_video.mov',
+        'Video listo',
+        'bot-token',
+      );
+
+      expect(result).toEqual({ ok: true, externalMessageId: '202' });
+      expect(spawnMock).toHaveBeenCalledWith('ffmpeg', expect.arrayContaining(['-c:v', 'libx264']), expect.objectContaining({ stdio: ['ignore', 'ignore', 'pipe'] }));
+      expect(writeFileMock).toHaveBeenCalledWith(expect.stringContaining('eva-telegram-'), bigBuffer);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toContain('/sendVideo');
+      expect(String(init.body)).toBe('[object FormData]');
+    });
+
+    it('rejects oversized videos when ffmpeg cannot compress below Telegram limits', async () => {
+      const fetchMock = jest.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      mockFfmpegExit(0, bufferWithReportedSize(51 * 1024 * 1024));
+
+      const adapter = new TelegramAdapter();
+      const result = await adapter.sendDocument(
+        { chat_id: '100' },
+        bufferWithReportedSize(52 * 1024 * 1024),
         'huge_video.mp4',
         undefined,
         'bot-token',
@@ -146,7 +208,28 @@ describe('TelegramAdapter', () => {
 
       expect(result.ok).toBe(false);
       expect((result as { oversized?: boolean }).oversized).toBe(true);
+      expect(result.error).toContain('no se pudo comprimir');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('rejects oversized non-video files without calling Telegram API', async () => {
+      const fetchMock = jest.fn();
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const adapter = new TelegramAdapter();
+      const bigBuffer = bufferWithReportedSize(51 * 1024 * 1024);
+      const result = await adapter.sendDocument(
+        { chat_id: '100' },
+        bigBuffer,
+        'huge_report.pdf',
+        undefined,
+        'bot-token',
+      );
+
+      expect(result.ok).toBe(false);
+      expect((result as { oversized?: boolean }).oversized).toBe(true);
       expect(result.error).toContain('supera el límite de 50 MB');
+      expect(spawnMock).not.toHaveBeenCalled();
       expect(fetchMock).not.toHaveBeenCalled();
     });
 

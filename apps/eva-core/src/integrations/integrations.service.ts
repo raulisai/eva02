@@ -230,7 +230,13 @@ export class IntegrationsService {
           tools = [{ advertised: true }];
         }
       } else {
-        lastError = `HTTP ${res.status}`;
+        const bodyText = await res.text().catch(() => '');
+        if (this.isMcpOAuthRequired(res.status, res.headers.get('www-authenticate'), bodyText)) {
+          tools = [];
+          lastError = 'OAuth required before this MCP server can expose tools';
+        } else {
+          lastError = `HTTP ${res.status}${bodyText ? `: ${bodyText.slice(0, 240)}` : ''}`;
+        }
       }
     } catch (error) {
       lastError = (error as Error).message;
@@ -243,6 +249,18 @@ export class IntegrationsService {
       last_error: lastError,
     });
     return this.toMcpView(updated);
+  }
+
+  private isMcpOAuthRequired(status: number, authenticateHeader: string | null, bodyText: string): boolean {
+    if (![401, 403].includes(status)) return false;
+    const auth = authenticateHeader?.toLowerCase() ?? '';
+    const body = bodyText.toLowerCase();
+    return auth.includes('bearer')
+      || auth.includes('oauth')
+      || body.includes('oauth')
+      || body.includes('authorization_required')
+      || body.includes('invalid_token')
+      || body.includes('missing authorization');
   }
 
   /**

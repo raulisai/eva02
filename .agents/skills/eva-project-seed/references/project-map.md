@@ -109,7 +109,7 @@ Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_
 - Browser: `browser_profiles`, `browser_sessions`, `browser_screenshots`, `browser_action_preparations`.
 - Dev manager: `projects`, `dev_tasks`, `claude_code_sessions`, `build_runs`, `test_runs`, `code_reviews`, `roadmap_items`.
 - Wear/devices: `wear_sessions`, `wear_tokens`, `wear_fast_path_logs`, `fast_path_policies`, `wear_capabilities`, `wear_directives`, `wear_form_responses`, `wear_sensor_consents`, `nodes`, `node_capabilities`, `devices`.
-- Communication/integrations: `communication_channels`, `communication_accounts`, `conversations`, `messages`, `notifications`, `org_integrations`, `mcp_connections`.
+- Communication/integrations: `communication_channels`, `communication_accounts`, `conversations`, `messages`, `notifications`, `org_integrations`, `mcp_connections`. Telegram outbound file sends compress oversized native videos with `ffmpeg` before applying the 50 MB Bot API limit. MCP HTTP/SSE tests detect OAuth-required 401/403 responses and keep tools hidden until auth is connected.
 - Artifacts/schedule/behavior/billing: `artifacts`, `schedule_events`, `known_places`, `location_visits`, `behavior_patterns`, `scheduled_jobs`, `token_logs`; RPC `get_billing_stats`.
 
 ## Dashboard Map
