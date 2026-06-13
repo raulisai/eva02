@@ -25,7 +25,7 @@ import { UberWebService } from '../../integrations/uber-web.service';
 import { RappiWebService } from '../../integrations/rappi-web.service';
 import { GoogleWebLoginService } from '../../integrations/google-web-login.service';
 import { WhatsAppWebService } from '../../integrations/whatsapp-web.service';
-import { classifyTier } from '../tier';
+import { classifyTier, decideTaskHorizon } from '../tier';
 import { Task } from '../../tasks/task.types';
 import { AGENT_AUTONOMY_JOB_KEY, ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
 import { CommunicationService } from '../../communication/communication.service';
@@ -110,6 +110,41 @@ describe('classifyTier', () => {
   });
 });
 
+describe('decideTaskHorizon', () => {
+  it('marks recurring work as a visible scheduled job horizon', () => {
+    const decision = decideTaskHorizon('automatiza un reporte cada día a las 7');
+
+    expect(decision.mode).toBe('scheduled');
+    expect(decision.waitPolicy).toBe('schedule');
+    expect(decision.shouldCreateScheduledJob).toBe(true);
+    expect(decision.resumable).toBe(true);
+  });
+
+  it('parks external waits as standby instead of pretending immediate completion', () => {
+    const decision = decideTaskHorizon('espera a que me responda Ana y luego seguimos');
+
+    expect(decision.mode).toBe('standby');
+    expect(decision.waitPolicy).toBe('external_event');
+    expect(decision.timeoutMinutes).toBe(24 * 60);
+  });
+
+  it('keeps sensitive actions on the approval horizon', () => {
+    const decision = decideTaskHorizon('borra la base de datos');
+
+    expect(decision.mode).toBe('approval');
+    expect(decision.waitPolicy).toBe('approval');
+  });
+
+  it('treats code and skill improvement work as background self-improvement work', () => {
+    const decision = decideTaskHorizon('mejora tus skills usando código y terminal');
+
+    expect(decision.mode).toBe('background');
+    expect(decision.shouldUseCodeTools).toBe(true);
+    expect(decision.shouldUseSkills).toBe(true);
+    expect(decision.shouldSelfImprove).toBe(true);
+  });
+});
+
 describe('AgentRunnerService', () => {
   let module: TestingModule;
   let service: AgentRunnerService;
@@ -136,6 +171,7 @@ describe('AgentRunnerService', () => {
             admin: {
               from: jest.fn().mockReturnThis(),
               select: jest.fn().mockReturnThis(),
+              update: jest.fn().mockReturnThis(),
               eq: jest.fn().mockReturnThis(),
               order: jest.fn().mockReturnThis(),
               limit: jest.fn().mockResolvedValue({ data: [], error: null }),
@@ -504,6 +540,7 @@ describe('AgentRunnerService', () => {
             registerCapabilityGap: jest.fn().mockResolvedValue(undefined),
             getCapabilityGapsDigest: jest.fn().mockResolvedValue(null),
             maxStepsForTier: jest.fn().mockResolvedValue(4),
+            askUser: jest.fn().mockResolvedValue('WAITING_FOR_INPUT'),
             runAutonomyForOrg: jest.fn().mockResolvedValue(undefined),
           },
         },
@@ -628,7 +665,7 @@ describe('AgentRunnerService', () => {
         }),
       }),
     }));
-    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval');
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_input');
     expect(publishedTypes()).not.toContain('task.result');
   });
 
@@ -959,6 +996,44 @@ describe('AgentRunnerService', () => {
     const firstSay = events.publish.mock.calls.map(([event]) => event).find((event) => event.type === 'task.say');
     expect((firstSay!.payload as { text: string }).text).toContain('Va para largo');
     expect(publishedLogs().some((message) => message.includes('tier=long'))).toBe(true);
+  });
+
+  it('announces scheduled horizon and creates a visible job for recurring work', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'automatiza un reporte cada día a las 7',
+    }));
+    const scheduledJobs = module.get(ScheduledJobsService) as jest.Mocked<ScheduledJobsService>;
+
+    await service.run(ORG, TASK);
+
+    const firstSay = events.publish.mock.calls.map(([event]) => event).find((event) => event.type === 'task.say');
+    expect((firstSay!.payload as { text: string }).text).toContain('programo');
+    expect(scheduledJobs.createFromNl).toHaveBeenCalledWith('automatiza un reporte cada día a las 7', ORG, 'user-1');
+    expect(publishedLogs().some((message) => message.includes('horizon=scheduled'))).toBe(true);
+    expect(intentRouter.classify).not.toHaveBeenCalled();
+  });
+
+  it('parks external wait tasks in waiting_for_input with a long timeout', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'espera a que me responda Ana y luego seguimos con el correo',
+    }));
+    const intelligence = module.get(AgentIntelligenceService) as jest.Mocked<AgentIntelligenceService>;
+
+    await service.run(ORG, TASK);
+
+    const firstSay = events.publish.mock.calls.map(([event]) => event).find((event) => event.type === 'task.say');
+    expect((firstSay!.payload as { text: string }).text).toContain('pausa');
+    expect(intelligence.askUser).toHaveBeenCalledWith(
+      ORG,
+      TASK,
+      expect.stringContaining('espera a que me responda Ana'),
+      ['Continuar', 'Cancelar'],
+      24 * 60,
+    );
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'planning');
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'running');
+    expect(tasks.transition).not.toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
+    expect(publishedLogs().some((message) => message.includes('horizon=standby'))).toBe(true);
   });
 
   it('uses a slim context for chat tier — no agenda/patterns, keeps identity and recent turns', async () => {
@@ -1316,7 +1391,7 @@ describe('AgentRunnerService', () => {
         form: expect.objectContaining({ form_key: 'personal_profile.location' }),
       }),
     }));
-    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval');
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_input');
     expect(publishedTypes()).not.toContain('task.failed');
   });
 

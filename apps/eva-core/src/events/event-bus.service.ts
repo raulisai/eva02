@@ -13,6 +13,7 @@ export type EvaEventType =
   | 'task.waiting_input'
   | 'task.say'      // immediate acknowledgment EVA speaks while working
   | 'task.log'      // transparent step-by-step action log
+  | 'task.step'     // structured tool step selected by the agent loop
   | 'task.result'   // final answer text
   | 'task.media'    // media attachment uploaded to storage (image/audio)
   | 'task.form_request'    // server-driven form request for missing information

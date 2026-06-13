@@ -275,8 +275,15 @@ export class AgentIntelligenceService implements OnApplicationBootstrap {
     return `EJEMPLO DE RESOLUCIÓN PREVIA para objetivo similar "${best.goal}":\n${compact}`;
   }
 
-  async askUser(orgId: string, taskId: string, question: string, options: string[] = []): Promise<string> {
-    const expiresAt = new Date(Date.now() + 15 * 60_000).toISOString();
+  async askUser(
+    orgId: string,
+    taskId: string,
+    question: string,
+    options: string[] = [],
+    timeoutMinutes = 15,
+  ): Promise<string> {
+    const safeTimeoutMinutes = Math.min(Math.max(Math.round(timeoutMinutes), 1), 7 * 24 * 60);
+    const expiresAt = new Date(Date.now() + safeTimeoutMinutes * 60_000).toISOString();
     const { data, error } = await this.db.admin
       .from('agent_input_requests')
       .insert({ org_id: orgId, task_id: taskId, question, options, expires_at: expiresAt })

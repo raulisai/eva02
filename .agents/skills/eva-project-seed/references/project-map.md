@@ -61,6 +61,7 @@ Key Documentation References:
 - `AgentModule`: agent loop/runner, skill library, sandbox, media, research, Gmail/Calendar/Drive, soul, schedule, behavior patterns.
 - Agent intelligence telemetry/flywheels: `AgentTrajectoryService` persists `agent_trajectories` checkpoints/finals; `AgentIntelligenceService` handles plan state helpers, replay examples, ask_user persistence/timeouts, token/tool/network safety limits, security review, memory consolidation, self-improvement digest, heartbeat task creation, and skill embeddings. Periodic autonomy is seeded as visible `scheduled_jobs` rows with `payload.system_job='agent_intelligence_autonomy'`; the runner executes those tasks internally without a model call. `ProfileContextBuilderService` builds compact/full prompt context from structured Profile Hub data with legacy `cowork_context` fallback; `GET /agent/metrics` reads org-scoped metrics views.
 - Agent loop delivery guard: root loop derives explicit user-requested deliverables like generated PDFs and Telegram file sends, raises the step budget to 10 for those tasks, rejects premature `final_answer`, and reports pending deliverables if exhausted. Multi-phase pipeline retries reuse `task.metadata.pipeline.definition` and completed phase outputs, rerunning only failed/skipped phases.
+- Task horizon routing: `agent/tier.ts` exposes `classifyTier` plus `decideTaskHorizon`; the runner persists `task.metadata.task_horizon`, logs `horizon=*`, and injects horizon policy into generic agent-loop context. Modes: `conversation`, `immediate`, `background`, `scheduled`, `standby`, `approval`; scheduled work routes to visible Jobs, standby parks in `waiting_for_input` with long `ask_user` timeouts, and sensitive actions stay in `waiting_for_approval`.
 - `ApprovalsModule`: approval request/resolve/validate.
 - `WearFastPathModule`: ephemeral watch tokens, request path, policy.
 - `JobsModule`: scheduled jobs + scheduler; scheduled job payload is copied into task metadata so system jobs can be audited and routed safely.
@@ -76,9 +77,10 @@ Key Documentation References:
 
 - Task statuses: `pending`, `planning`, `running`, `waiting_for_approval`, `waiting_for_input`, `completed`, `failed`, `cancelled`.
 - Transitions: `pending -> planning|cancelled`; `planning -> running|failed|cancelled`; `running -> waiting_for_approval|waiting_for_input|completed|failed|cancelled`; `waiting_for_approval|waiting_for_input -> running|completed|failed|cancelled`; terminal statuses can reset to `pending`.
+- Missing data/setup/forms use `waiting_for_input`, not approval. `AgentIntelligenceService.askUser(...)` accepts configurable `timeoutMinutes` (clamped to 1 minute through 7 days) so tasks can pause for hours/days without being treated as crashed work.
 - `TasksRepository` is service-role Supabase and must filter by `org_id`; watch `findStuck(...)`, currently cross-org by age/status and should be handled carefully.
 - `EventBusService.publish` writes Redis stream and persists `task_events` when `taskId` exists.
-- Event types include task lifecycle/log/media/form/setup, approvals, dev tasks, browser screenshots, communication, `agent.feedback.inferred`, wear fast path/tokens.
+- Event types include task lifecycle/log/step/media/form/setup, approvals, dev tasks, browser screenshots, communication, `agent.feedback.inferred`, wear fast path/tokens.
 - `task.waiting_input` is emitted when the loop uses `ask_user`; replies from the same user fill `agent_input_requests` and requeue the waiting task.
 
 ## Main HTTP/WS Surface

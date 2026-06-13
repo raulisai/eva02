@@ -29,7 +29,7 @@ import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
 import { AgentSoulContext, Goal, PersonalProfile, SoulContextService } from './soul-context.service';
 import { ConversationContextTurn, ProfileContextBuilderService } from './profile-context-builder.service';
-import { TierDecision, classifyTier } from './tier';
+import { TaskHorizonDecision, TierDecision, classifyTier, decideTaskHorizon } from './tier';
 import { wantsEvidence } from './evidence';
 import { AGENT_AUTONOMY_JOB_KEY, ScheduledJobsService } from '../jobs/scheduled-jobs.service';
 import { CommunicationService } from '../communication/communication.service';
@@ -88,6 +88,8 @@ const ACK_RULES: Array<{ pattern: RegExp; say: string; hint: string }> = [
 const DEFAULT_ACK = { say: 'Enseguida, ya estoy en ello ⚙️', hint: 'default' };
 
 const LONG_TASK_ACK = 'Va para largo 🛠️ Ya estoy en ello; te aviso en cuanto lo tenga.';
+const SCHEDULED_TASK_ACK = 'Lo programo y lo dejo visible en Jobs; te aviso cuando se dispare.';
+const STANDBY_TASK_ACK = 'Lo dejo en pausa y retomo cuando llegue la señal que falta.';
 
 const SYSTEM_PROMPT = `Eres EVA, un agente operativo. Responde SIEMPRE en español,
 de forma directa y concisa (máximo ~120 palabras salvo que pidan detalle).
@@ -230,6 +232,7 @@ export interface RouteContext {
   startedAt: number;
   freshness: { required: boolean; reason?: string };
   tier: TierDecision;
+  horizon: TaskHorizonDecision;
   wantsImage: boolean;
   pureImageRequest: boolean;
   ack: { say: string; hint: string };
@@ -411,6 +414,17 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     return ACK_RULES.find(({ pattern }) => pattern.test(text)) ?? DEFAULT_ACK;
   }
 
+  private pickHorizonAck(text: string, horizon: TaskHorizonDecision): { say: string; hint: string } {
+    if (horizon.mode === 'scheduled') return { say: SCHEDULED_TASK_ACK, hint: 'scheduled' };
+    if (horizon.mode === 'standby') return { say: STANDBY_TASK_ACK, hint: 'standby' };
+    if (horizon.mode === 'background') return { say: LONG_TASK_ACK, hint: 'background' };
+    return this.pickAck(text);
+  }
+
+  private shouldSendEarlyAck(horizon: TaskHorizonDecision): boolean {
+    return horizon.mode === 'background' || horizon.mode === 'scheduled' || horizon.mode === 'standby';
+  }
+
   private initRoutes() {
     this.routes = [
       {
@@ -562,6 +576,18 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         }
       },
       {
+        name: 'standby-horizon',
+        priority: 64,
+        risk: 'low',
+        matches: (ctx) => ctx.horizon.mode === 'standby',
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.handleStandbyHorizon(ctx);
+          return true;
+        }
+      },
+      {
         name: 'gmail-calendar-write',
         priority: 60,
         risk: 'medium',
@@ -678,7 +704,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             });
           } else {
             // fallback: terminate with setup message if loop produced nothing
-            await this.tasks.transition(ctx.taskId, ctx.orgId, 'waiting_for_approval', {
+            await this.tasks.transition(ctx.taskId, ctx.orgId, 'waiting_for_input', {
               result: { text: missingReq.user_message, model: 'capability-gate' },
             });
           }
@@ -1097,18 +1123,24 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     // tier='long' (length > 280) and produce wrong ACKs/routing.
     const freshness = this.needsFreshness(input);
     const tier = this.applyFreshnessToTier(classifyTier(input), freshness);
+    const horizon = decideTaskHorizon(input, tier);
     const wantsImage = this.media.wantsImage(input);
     const pureImageRequest = wantsImage && this.isPureImageRequest(input);
-    const ack = tier.tier === 'long'
-      ? { say: LONG_TASK_ACK, hint: 'background' }
-      : this.pickAck(input);
+    const ack = this.pickHorizonAck(input, horizon);
 
-    // Tareas largas: el ack corto sale ANTES de cargar contexto (soul, agenda,
-    // memoria), para que el usuario sepa en <1s que EVA ya está en ello.
+    // Background/scheduled/standby work gets a short ack before heavier context
+    // loading so the user sees the task is alive immediately.
     let ackSent = false;
-    if (tier.tier === 'long') {
+    let horizonLogged = false;
+    if (this.shouldSendEarlyAck(horizon)) {
       await this.say(orgId, taskId, ack.say);
       ackSent = true;
+    }
+
+    await this.persistHorizonDecision(orgId, taskId, task, horizon);
+    if (ackSent) {
+      await this.logHorizon(orgId, taskId, horizon);
+      horizonLogged = true;
     }
 
     const conversationContext = await this.getConversationContext(task);
@@ -1157,6 +1189,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       startedAt,
       freshness,
       tier,
+      horizon,
       wantsImage,
       pureImageRequest,
       ack,
@@ -1173,6 +1206,10 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             if (!ackSent) {
               await this.say(orgId, taskId, ack.say);
               ackSent = true;
+            }
+            if (!horizonLogged) {
+              await this.logHorizon(orgId, taskId, horizon);
+              horizonLogged = true;
             }
             await this.log(
               orgId, taskId,
@@ -2411,6 +2448,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
       const contextParts: string[] = [];
       const identity = soulContext ? this.slimIdentityLine(soulContext) : null;
       if (identity) contextParts.push(`Usuario: ${identity}`);
+      contextParts.push(this.formatHorizonForLoop(decideTaskHorizon(input)));
       if (conversationContext.length > 0) {
         contextParts.push(
           conversationContext
@@ -2451,6 +2489,20 @@ Responde directamente al usuario en español, con un tono amable y natural.
       // El workspace de la tarea muere con el loop; el sandbox es por-tarea.
       void this.sandbox.release(taskId).catch(() => undefined);
     }
+  }
+
+  private formatHorizonForLoop(horizon: TaskHorizonDecision): string {
+    const policies: string[] = [];
+    if (horizon.shouldCreateScheduledJob) policies.push('si aplica, crea/usa scheduled_jobs visible y pausable');
+    if (horizon.waitPolicy === 'external_event') policies.push(`si falta una señal externa, usa ask_user con timeout_minutes=${horizon.timeoutMinutes ?? 1440}`);
+    if (horizon.waitPolicy === 'approval') policies.push('prepara la accion y deja que Approval Engine autorice');
+    if (horizon.shouldUseCodeTools) policies.push('usa code_execute/terminal_run para ejecutar y verificar');
+    if (horizon.shouldUseSkills) policies.push('consulta skill_view/skill_run antes de resolver desde cero');
+    if (horizon.shouldSelfImprove) policies.push('guarda o parchea skills si el aprendizaje queda probado');
+    return [
+      `HORIZONTE_DE_TAREA: mode=${horizon.mode}; wait=${horizon.waitPolicy}; duration=${horizon.durationBand}; resumable=${horizon.resumable}.`,
+      `POLITICA_DE_EJECUCION: ${policies.join('; ') || horizon.summary}.`,
+    ].join('\n');
   }
 
   private async maxStepsForTier(orgId: string, tier: 'chat' | 'quick' | 'medium' | 'long'): Promise<number> {
@@ -2604,6 +2656,65 @@ Responde directamente al usuario en español, con un tono amable y natural.
     });
   }
 
+  private async persistHorizonDecision(
+    orgId: string,
+    taskId: string,
+    task: Task,
+    horizon: TaskHorizonDecision,
+  ): Promise<void> {
+    try {
+      await this.db.admin
+        .from('tasks')
+        .update({
+          metadata: {
+            ...(task.metadata ?? {}),
+            task_horizon: {
+              mode: horizon.mode,
+              wait_policy: horizon.waitPolicy,
+              duration_band: horizon.durationBand,
+              expected_duration_sec: horizon.expectedDurationSec,
+              resumable: horizon.resumable,
+              should_create_scheduled_job: horizon.shouldCreateScheduledJob,
+              should_use_code_tools: horizon.shouldUseCodeTools,
+              should_use_skills: horizon.shouldUseSkills,
+              should_self_improve: horizon.shouldSelfImprove,
+              timeout_minutes: horizon.timeoutMinutes ?? null,
+              reason: horizon.reason,
+              summary: horizon.summary,
+              decided_at: new Date().toISOString(),
+            },
+          },
+        })
+        .eq('org_id', orgId)
+        .eq('id', taskId);
+    } catch (err) {
+      this.logger.debug(`horizon metadata skipped for task ${taskId}: ${(err as Error).message}`);
+    }
+  }
+
+  private async handleStandbyHorizon(ctx: RouteContext): Promise<void> {
+    const timeoutMinutes = ctx.horizon.timeoutMinutes ?? 24 * 60;
+    const text = [
+      'Queda en standby.',
+      'Cuando tengas la respuesta, señal o dato externo que falta, respóndeme en este mismo chat y retomo la tarea desde este punto.',
+      `Ventana de espera: hasta ${Math.round(timeoutMinutes / 60)} horas.`,
+    ].join('\n');
+    await this.events.publish({
+      type: 'task.result',
+      orgId: ctx.orgId,
+      taskId: ctx.taskId,
+      payload: { text, model: 'standby-horizon', latency_ms: Date.now() - ctx.startedAt },
+    });
+    await this.intelligence.askUser(
+      ctx.orgId,
+      ctx.taskId,
+      `Avisame cuando pueda continuar esta tarea: ${ctx.input.slice(0, 180)}`,
+      ['Continuar', 'Cancelar'],
+      timeoutMinutes,
+    );
+    await this.log(ctx.orgId, ctx.taskId, `parked in standby for up to ${timeoutMinutes} minutes`, 'horizon');
+  }
+
   private async requestMissingInformation(orgId: string, taskId: string, error: MissingInformationError) {
     await this.log(orgId, taskId, `missing information: ${error.message}`, 'forms');
     await this.events.publish({
@@ -2616,7 +2727,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
       },
     });
     await this.say(orgId, taskId, error.message);
-    await this.tasks.transition(taskId, orgId, 'waiting_for_approval');
+    await this.tasks.transition(taskId, orgId, 'waiting_for_input');
   }
 
   private log(orgId: string, taskId: string, message: string, scope: string) {
@@ -2633,6 +2744,15 @@ Responde directamente al usuario en español, con un tono amable y natural.
         level: message.startsWith('ERROR:') ? 'error' : 'debug',
       },
     });
+  }
+
+  private logHorizon(orgId: string, taskId: string, horizon: TaskHorizonDecision) {
+    return this.log(
+      orgId,
+      taskId,
+      `horizon=${horizon.mode} wait=${horizon.waitPolicy} duration=${horizon.durationBand} resumable=${horizon.resumable} schedule=${horizon.shouldCreateScheduledJob} code=${horizon.shouldUseCodeTools} skills=${horizon.shouldUseSkills} self_improve=${horizon.shouldSelfImprove} — ${horizon.summary}`,
+      'horizon',
+    );
   }
 
   private async failSafely(orgId: string, taskId: string, message: string) {

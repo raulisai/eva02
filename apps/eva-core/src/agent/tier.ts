@@ -4,11 +4,28 @@
  * with zero pipeline overhead.
  */
 export type Tier = 'chat' | 'quick' | 'medium' | 'long';
+export type TaskHorizonMode = 'conversation' | 'immediate' | 'background' | 'scheduled' | 'standby' | 'approval';
+export type TaskWaitPolicy = 'none' | 'approval' | 'user_input' | 'external_event' | 'schedule';
+export type TaskDurationBand = 'seconds' | 'minutes' | 'hours' | 'indefinite';
 
 export interface TierDecision {
   tier: Tier;
   estimateSec: number;
   reason: string;
+}
+
+export interface TaskHorizonDecision extends TierDecision {
+  mode: TaskHorizonMode;
+  waitPolicy: TaskWaitPolicy;
+  durationBand: TaskDurationBand;
+  expectedDurationSec: number;
+  resumable: boolean;
+  shouldCreateScheduledJob: boolean;
+  shouldUseCodeTools: boolean;
+  shouldUseSkills: boolean;
+  shouldSelfImprove: boolean;
+  timeoutMinutes?: number;
+  summary: string;
 }
 
 const LONG_SIGNALS = /\b(script|c[oó]digo|programa|automatiz|bot\b|scrap|docker|deploy|desplieg|proyect|integr|monitor|cron\b|cada (hora|d[ií]a|semana)|paso a paso|varios pasos|informe completo|reporte completo|migr|refactoriz|descarg(?:a|ar|ue|uen|ando|ad[ao]s?)?(?:melo|mela|noslo|nosla|selo|sela|lo|la|me|nos)?|download|youtube|youtu\.be|platzi|udemy|vimeo|video|v[ií]deo|mp3|mp4|yt-dlp|m[aá]nd(?:a|e|o|ar|alo|ala|ame|eme|amelo|amela|aselo|asela|eselo|esela)|env[ií](?:a|e|o|ar|alo|ala|ame|eme|amelo|amela|aselo|asela|eselo|esela)|comprim|convert|extra[eí])/i;
@@ -24,6 +41,15 @@ const GREETING = /^(hola|hey|buenas|buenos d[ií]as|buenas tardes|buenas noches|
 // Money/production/data actions must NEVER take the chat shortcut — they have
 // to flow through intent classification and the approval gate.
 const SENSITIVE = /\b(compra|comprar|paga|pagar|transfiere|env[ií]a dinero|deploy|producci[oó]n|borra|elimina|delete|drop)\b/i;
+
+const SCHEDULE_HORIZON_SIGNALS =
+  /\b(cron\b|programa[r]?\s+(?:un\s+)?(?:job|recordatorio|tarea)|tarea\s+programada|recu[eé]rd(?:a|ame|eme|amelo|amela|alo|ala|ar)?|av[ií]same|notif[ií]came|cada\s+(?:hora|d[ií]a|semana|mes|\d+\s*(?:minutos?|horas?|d[ií]as?))|todos\s+los\s+(?:d[ií]as|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bados?|domingos?)|a\s+partir\s+de\s+hoy|monitor(?:ea|ear|iza|izar)|vigila(?:r)?|cuando\s+(?:baje|suba|cambie|est[eé]\s+disponible)|si\s+(?:baja|sube|cambia|se\s+cae|vuelve))\b/i;
+
+const STANDBY_HORIZON_SIGNALS =
+  /\b(stand\s*by|pausa(?:do|da|r)?|qu[eé]date\s+en\s+pausa|espera\s+(?:a\s+que|hasta)|hasta\s+que|en\s+cuanto|cuando\s+(?:me|te|nos|le|les)?\s*(?:conteste|responda|llegue|aparezca|termine|avise)|si\s+(?:me|te|nos|le|les)?\s*(?:contesta|responde|avisa)|pendiente\s+de\s+respuesta|mientras\s+(?:contesta|responde|llega))\b/i;
+
+const SELF_IMPROVEMENT_SIGNALS =
+  /\b(skill|skills|aprend(?:e|er|izaje)|mejor(?:a|arse|arte|amiento)|memoria\s+procedural|procedimental|hermes|agente\s+cero|agent\s+zero|c[oó]digo|script|terminal|sandbox|automatiz|refactoriz|debug|depur)\b/i;
 
 export function classifyTier(text: string): TierDecision {
   const input = text.trim();
@@ -44,4 +70,107 @@ export function classifyTier(text: string): TierDecision {
     return { tier: 'chat', estimateSec: 3, reason: GREETING.test(input) ? 'greeting' : 'short conversational input' };
   }
   return { tier: 'quick', estimateSec: 30, reason: 'default medium' };
+}
+
+export function decideTaskHorizon(text: string, tierDecision: TierDecision = classifyTier(text)): TaskHorizonDecision {
+  const input = text.trim();
+  const scheduled = SCHEDULE_HORIZON_SIGNALS.test(input);
+  const standby = STANDBY_HORIZON_SIGNALS.test(input);
+  const approval = SENSITIVE.test(input);
+  const codeOrProcedural = LONG_SIGNALS.test(input) || SELF_IMPROVEMENT_SIGNALS.test(input);
+
+  if (approval) {
+    return {
+      ...tierDecision,
+      mode: 'approval',
+      waitPolicy: 'approval',
+      durationBand: 'indefinite',
+      expectedDurationSec: Math.max(tierDecision.estimateSec, 30),
+      resumable: true,
+      shouldCreateScheduledJob: false,
+      shouldUseCodeTools: codeOrProcedural,
+      shouldUseSkills: true,
+      shouldSelfImprove: codeOrProcedural,
+      summary: 'sensitive action parked behind Approval Engine',
+    };
+  }
+
+  if (scheduled) {
+    return {
+      ...tierDecision,
+      mode: 'scheduled',
+      waitPolicy: 'schedule',
+      durationBand: 'indefinite',
+      expectedDurationSec: Math.max(tierDecision.estimateSec, 60),
+      resumable: true,
+      shouldCreateScheduledJob: true,
+      shouldUseCodeTools: codeOrProcedural,
+      shouldUseSkills: true,
+      shouldSelfImprove: codeOrProcedural,
+      summary: 'recurring/monitoring work should become a visible scheduled_job',
+    };
+  }
+
+  if (standby) {
+    return {
+      ...tierDecision,
+      mode: 'standby',
+      waitPolicy: 'external_event',
+      durationBand: 'indefinite',
+      expectedDurationSec: Math.max(tierDecision.estimateSec, 60 * 60),
+      resumable: true,
+      shouldCreateScheduledJob: false,
+      shouldUseCodeTools: codeOrProcedural,
+      shouldUseSkills: true,
+      shouldSelfImprove: codeOrProcedural,
+      timeoutMinutes: 24 * 60,
+      summary: 'task should pause until an external/user signal arrives',
+    };
+  }
+
+  if (tierDecision.tier === 'long') {
+    return {
+      ...tierDecision,
+      mode: 'background',
+      waitPolicy: 'none',
+      durationBand: 'hours',
+      expectedDurationSec: Math.max(tierDecision.estimateSec, 2 * 60 * 60),
+      resumable: true,
+      shouldCreateScheduledJob: false,
+      shouldUseCodeTools: codeOrProcedural,
+      shouldUseSkills: true,
+      shouldSelfImprove: true,
+      summary: 'long-running background work with checkpoints and procedural learning',
+    };
+  }
+
+  if (tierDecision.tier === 'medium') {
+    return {
+      ...tierDecision,
+      mode: 'immediate',
+      waitPolicy: 'none',
+      durationBand: 'minutes',
+      expectedDurationSec: Math.max(tierDecision.estimateSec, 3 * 60),
+      resumable: true,
+      shouldCreateScheduledJob: false,
+      shouldUseCodeTools: codeOrProcedural,
+      shouldUseSkills: true,
+      shouldSelfImprove: codeOrProcedural,
+      summary: 'multi-step immediate work',
+    };
+  }
+
+  return {
+    ...tierDecision,
+    mode: tierDecision.tier === 'chat' ? 'conversation' : 'immediate',
+    waitPolicy: 'none',
+    durationBand: 'seconds',
+    expectedDurationSec: tierDecision.estimateSec,
+    resumable: false,
+    shouldCreateScheduledJob: false,
+    shouldUseCodeTools: codeOrProcedural,
+    shouldUseSkills: tierDecision.tier !== 'chat' || codeOrProcedural,
+    shouldSelfImprove: codeOrProcedural,
+    summary: tierDecision.tier === 'chat' ? 'direct conversational response' : 'short immediate task',
+  };
 }

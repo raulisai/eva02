@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Inbox, BrainCircuit, Cog, ShieldCheck, Flag, Send, Loader2,
-  ChevronRight, AlertTriangle, Clock, ClipboardList, ThumbsDown, ThumbsUp,
+  ChevronRight, ChevronDown, AlertTriangle, Clock, ClipboardList, ThumbsDown, ThumbsUp,
 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { coreFetch } from '@/lib/core-api';
@@ -159,7 +159,7 @@ export function PlaygroundClient() {
   const terminalVariant = selectedStatus === 'completed' ? 'completed' : selectedStatus === 'failed' ? 'failed' : 'cancelled';
 
   const actionLog = selectedEvents.filter((event) =>
-    ['task.log', 'task.created', 'task.started', 'task.completed', 'task.failed', 'task.waiting_approval', 'task.form_request', 'task.setup_required'].includes(event.type));
+    ['task.log', 'task.created', 'task.started', 'task.completed', 'task.failed', 'task.waiting_approval', 'task.form_request', 'task.setup_required', 'task.media', 'task.step'].includes(event.type));
 
   return (
     <div className="flex flex-col h-full">
@@ -286,9 +286,28 @@ export function PlaygroundClient() {
                       <p className="px-3 py-3 text-zinc-600">Waiting for the agent to start…</p>
                     )}
                     {actionLog.map((event, index) => {
-                      const payload = event.payload as { message?: string; scope?: string; status?: string; error?: string };
+                      const payload = event.payload as any;
                       const isLog = event.type === 'task.log';
                       const isError = Boolean(payload.error) || payload.message?.startsWith('ERROR');
+                      
+                      if (event.type === 'task.media' && payload.kind === 'image') {
+                        return (
+                          <div key={`${event.type}-${event.ts}-${index}`} className="flex flex-col gap-2 px-3 py-2 border-b border-zinc-800/40 animate-fade-in bg-zinc-900/30">
+                            <div className="flex items-start gap-2">
+                              <span className="text-zinc-600 flex-shrink-0">{new Date(event.ts).toLocaleTimeString()}</span>
+                              <span className="flex-shrink-0 uppercase tracking-wider text-[9px] mt-0.5 px-1 rounded-sm border text-violet-400 border-violet-500/30">screenshot</span>
+                            </div>
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={payload.url} alt="action log screenshot" className="max-w-full max-h-64 object-contain rounded border border-zinc-800 bg-zinc-950/50" />
+                          </div>
+                        );
+                      }
+
+                      let displayMessage = payload.message ?? payload.error ?? (payload.status ? `status → ${payload.status}` : JSON.stringify(event.payload));
+                      if (event.type === 'task.step') {
+                        displayMessage = `Thinking: ${payload.thought} → [${payload.tool}]`;
+                      }
+
                       return (
                         <div
                           key={`${event.type}-${event.ts}-${index}`}
@@ -300,12 +319,13 @@ export function PlaygroundClient() {
                           <span className={cn(
                             'flex-shrink-0 uppercase tracking-wider text-[9px] mt-0.5 px-1 rounded-sm border',
                             isError ? 'text-red-400 border-red-500/40' :
-                              isLog ? 'text-cyan-400 border-cyan-500/30' : 'text-amber-400 border-amber-500/30',
+                              isLog ? 'text-cyan-400 border-cyan-500/30' : 
+                              event.type === 'task.step' ? 'text-fuchsia-400 border-fuchsia-500/30' : 'text-amber-400 border-amber-500/30',
                           )}>
                             {isLog ? (payload.scope ?? 'log') : event.type.replace('task.', '')}
                           </span>
-                          <span className={cn('break-all', isError ? 'text-red-300' : 'text-zinc-300')}>
-                            {payload.message ?? payload.error ?? (payload.status ? `status → ${payload.status}` : JSON.stringify(event.payload))}
+                          <span className={cn('break-all', isError ? 'text-red-300' : event.type === 'task.step' ? 'text-fuchsia-300' : 'text-zinc-300')}>
+                            {displayMessage}
                           </span>
                         </div>
                       );
@@ -353,17 +373,14 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
   const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null);
   const [feedbackBusy, setFeedbackBusy] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
-  const says = events
-    .filter((event) => event.type === 'task.say')
-    .map((event) => String((event.payload as Record<string, unknown>)['text'] ?? ''));
+  const timelineEvents = events
+    .filter((e) => ['task.say', 'task.media', 'task.form_request', 'task.setup_required', 'task.step'].includes(e.type))
+    .sort((a, b) => a.ts - b.ts);
   const resultEvent = events.find((event) => event.type === 'task.result');
   const resultText = resultEvent
     ? String((resultEvent.payload as Record<string, unknown>)['text'] ?? '')
     : (entry.task.result as Record<string, unknown> | null)?.['text'] as string | undefined;
   const resultMeta = resultEvent?.payload as { model?: string; latency_ms?: number } | undefined;
-  const mediaEvents = events.filter((event) => event.type === 'task.media');
-  const formEvents = events.filter((event) => event.type === 'task.form_request');
-  const setupEvents = events.filter((event) => event.type === 'task.setup_required');
   const working = !TERMINAL.includes(status) && !resultText;
   const failed = status === 'failed';
   const canRate = Boolean(resultText) || failed;
@@ -410,14 +427,88 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
         </div>
       </div>
 
-      {/* EVA instant acknowledgments */}
-      {says.map((text, index) => (
-        <div key={`say-${index}`} className="flex justify-start animate-slide-up">
-          <div className="max-w-[80%] border border-cyan-500/30 bg-cyan-500/5 rounded-sm px-3 py-2 text-xs text-cyan-100">
-            {text}
-          </div>
-        </div>
-      ))}
+      {/* EVA instant acknowledgments and timeline events */}
+      {timelineEvents.map((event, index) => {
+        if (event.type === 'task.say') {
+          const text = String((event.payload as any)['text'] ?? '');
+          return (
+            <div key={`say-${index}`} className="flex justify-start animate-slide-up">
+              <div className="max-w-[80%] border border-cyan-500/30 bg-cyan-500/5 rounded-sm px-3 py-2 text-xs text-cyan-100 whitespace-pre-wrap">
+                {text}
+              </div>
+            </div>
+          );
+        }
+        if (event.type === 'task.step') {
+          return <ThoughtBubble key={`step-${index}`} event={event} />;
+        }
+        if (event.type === 'task.media') {
+          const payload = event.payload as { kind?: string; url?: string };
+          if (!payload.url) return null;
+          return (
+            <div key={`media-${index}`} className="flex justify-start animate-slide-up">
+              <div className="max-w-[70%] border border-violet-500/30 bg-violet-500/5 rounded-sm p-2 space-y-1">
+                {payload.kind === 'image' ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={payload.url} alt="EVA attachment" className="max-h-56 rounded-sm" />
+                ) : (
+                  <audio controls src={payload.url} className="h-8 w-64" />
+                )}
+                <p className="text-[9px] font-mono text-zinc-600 break-all">{payload.url}</p>
+              </div>
+            </div>
+          );
+        }
+        if (event.type === 'task.form_request') {
+          const payload = event.payload as any;
+          const form = payload.form;
+          return (
+            <InteractiveFormBubble
+              key={`form-${index}`}
+              taskId={entry.task.id}
+              orgId={entry.task.org_id}
+              message={payload.message}
+              form={form}
+              onSubmit={async (values) => {
+                const formKey = form?.form_key ?? 'unknown';
+                const description = JSON.stringify({ form_key: formKey, ...values });
+                await coreFetch<Task>('/tasks', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    title: `Formulario: ${form?.title ?? formKey}`,
+                    description,
+                    metadata: {
+                      source: 'playground',
+                      form_key: formKey,
+                      parent_task_id: entry.task.id,
+                      conversation_context: [
+                        { role: 'user', text: entry.order },
+                      ],
+                    },
+                  }),
+                });
+              }}
+            />
+          );
+        }
+        if (event.type === 'task.setup_required') {
+          const payload = event.payload as any;
+          return (
+            <div key={`setup-${index}`} className="flex justify-start animate-slide-up">
+              <div className="max-w-[85%] border border-amber-500/30 bg-amber-500/5 rounded-sm p-3 space-y-2">
+                <div className="flex items-center gap-2 text-amber-200">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span className="text-xs font-medium">{payload.setup_label ?? 'Conectar integración'}</span>
+                </div>
+                <p className="text-xs text-zinc-300 leading-relaxed">
+                  {payload.message ?? `Falta configurar ${payload.capability ?? 'esta integración'}.`}
+                </p>
+              </div>
+            </div>
+          );
+        }
+        return null;
+      })}
 
       {/* Typing indicator while working */}
       {working && (
@@ -430,83 +521,6 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
           </div>
         </div>
       )}
-
-      {/* Media attachments from the eva-media bucket */}
-      {mediaEvents.map((event, index) => {
-        const payload = event.payload as { kind?: string; url?: string };
-        if (!payload.url) return null;
-        return (
-          <div key={`media-${index}`} className="flex justify-start animate-slide-up">
-            <div className="max-w-[70%] border border-violet-500/30 bg-violet-500/5 rounded-sm p-2 space-y-1">
-              {payload.kind === 'image' ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={payload.url} alt="EVA attachment" className="max-h-56 rounded-sm" />
-              ) : (
-                <audio controls src={payload.url} className="h-8 w-64" />
-              )}
-              <p className="text-[9px] font-mono text-zinc-600 break-all">{payload.url}</p>
-            </div>
-          </div>
-        );
-      })}
-
-      {formEvents.map((event, index) => {
-        const payload = event.payload as {
-          message?: string;
-          form?: {
-            form_key?: string;
-            title?: string;
-            description?: string;
-            fields?: Array<{ id: string; type?: string; label?: string; placeholder?: string; required?: boolean; profile_path?: string }>;
-          };
-        };
-        const form = payload.form;
-        return (
-          <InteractiveFormBubble
-            key={`form-${index}`}
-            taskId={entry.task.id}
-            orgId={entry.task.org_id}
-            message={payload.message}
-            form={form}
-            onSubmit={async (values) => {
-              const formKey = form?.form_key ?? 'unknown';
-              const description = JSON.stringify({ form_key: formKey, ...values });
-              await coreFetch<Task>('/tasks', {
-                method: 'POST',
-                body: JSON.stringify({
-                  title: `Formulario: ${form?.title ?? formKey}`,
-                  description,
-                  metadata: {
-                    source: 'playground',
-                    form_key: formKey,
-                    parent_task_id: entry.task.id,
-                    conversation_context: [
-                      { role: 'user', text: entry.order },
-                    ],
-                  },
-                }),
-              });
-            }}
-          />
-        );
-      })}
-
-      {setupEvents.map((event, index) => {
-        const payload = event.payload as { message?: string; setup_label?: string; capability?: string };
-        return (
-          <div key={`setup-${index}`} className="flex justify-start animate-slide-up">
-            <div className="max-w-[85%] border border-amber-500/30 bg-amber-500/5 rounded-sm p-3 space-y-2">
-              <div className="flex items-center gap-2 text-amber-200">
-                <AlertTriangle className="w-3.5 h-3.5" />
-                <span className="text-xs font-medium">{payload.setup_label ?? 'Conectar integración'}</span>
-              </div>
-              <p className="text-xs text-zinc-300 leading-relaxed">
-                {payload.message ?? `Falta configurar ${payload.capability ?? 'esta integración'}.`}
-              </p>
-            </div>
-          </div>
-        );
-      })}
 
       {/* Final answer / failure */}
       {resultText && (
@@ -568,6 +582,40 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ThoughtBubble({ event }: { event: EvaEvent }) {
+  const [expanded, setExpanded] = useState(false);
+  const payload = event.payload as any;
+  return (
+    <div className="flex justify-start animate-slide-up my-1">
+      <div className={cn(
+        "max-w-[85%] min-w-[200px] rounded-sm border px-3 py-2 transition-colors",
+        expanded ? "bg-zinc-900 border-zinc-700" : "bg-transparent border-transparent hover:bg-zinc-900/50 cursor-pointer text-zinc-500"
+      )} onClick={() => setExpanded(!expanded)}>
+        <div className="flex items-center gap-2 select-none">
+          {expanded ? <ChevronDown className="w-3.5 h-3.5 text-zinc-400" /> : <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />}
+          <span className={cn("font-mono text-[10px] uppercase tracking-widest", expanded ? "text-zinc-400" : "text-zinc-600")}>
+            {expanded ? "EVA thought process" : "Thinking..."}
+          </span>
+        </div>
+        {expanded && (
+          <div className="mt-3 space-y-3 border-t border-zinc-800 pt-3 cursor-text" onClick={e => e.stopPropagation()}>
+            <p className="text-xs text-zinc-300 whitespace-pre-wrap leading-relaxed">{payload.thought}</p>
+            <div className="bg-zinc-950 p-2.5 rounded-sm border border-zinc-800 shadow-inner">
+              <span className="text-fuchsia-400 font-mono text-[10px] block mb-1.5 flex items-center gap-1.5">
+                <Cog className="w-3 h-3" />
+                {payload.tool}
+              </span>
+              <pre className="text-zinc-400 font-mono text-[10px] overflow-x-auto whitespace-pre-wrap break-all leading-relaxed">
+                {payload.args && Object.keys(payload.args).length > 0 ? JSON.stringify(payload.args, null, 2) : '(no args)'}
+              </pre>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

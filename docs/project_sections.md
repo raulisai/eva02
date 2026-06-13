@@ -27,7 +27,7 @@ eva/
 
 | Module | Location | Description / Responsibilities |
 |---|---|---|
-| **agent** | `src/agent/` | The core agentic loop (`AgentLoopService`), execution budget controls, sandbox manager (`SandboxService`), telemetry tracking (`AgentTrajectoryService`), and self-improvement flywheels. |
+| **agent** | `src/agent/` | The core agentic loop (`AgentLoopService`), horizon routing (`tier.ts`), execution budget controls, sandbox manager (`SandboxService`), telemetry tracking (`AgentTrajectoryService`), and self-improvement flywheels. |
 | **approvals** | `src/approvals/` | Request-response flow for sensitive actions (Levels 0-3) using cryptographically verified `action_hash` signatures. |
 | **auth** | `src/auth/` | Supabase JWT token verification, Passport strategies, and request user-context mount guards. |
 | **browser** | `src/browser/` | Controls local Playwright sessions, performs action predictions, and takes telemetry screenshots. |
@@ -43,7 +43,7 @@ eva/
 | **model-router** | `src/model-router/` | Abstracts LLM providers behind unified completion interfaces. |
 | **planner** | `src/planner/` | Dynamic step planner calculating required horizons based on task length. |
 | **skills** | `src/skills/` | Skill registry library, tool mapping selectors, and bundled presets. |
-| **tasks** | `src/tasks/` | Task status model state machine (pending -> planning -> running -> completed/failed). |
+| **tasks** | `src/tasks/` | Task status model state machine, including `waiting_for_input` pauses and `waiting_for_approval` gates. |
 | **tool-router** | `src/tool-router/` | Schema catalogs and routing logic for MCP tools. |
 | **wear-fast-path**| `src/wear-fast-path/`| Distributes ephemeral 300s tokens for direct watch-to-LLM audio streaming. |
 

@@ -138,6 +138,16 @@ describe('AgentIntelligenceService', () => {
     expect(result).toContain('WAITING_FOR_INPUT');
   });
 
+  it('allows long ask_user standby windows for external waits', async () => {
+    const before = Date.now();
+    await service.askUser(ORG, TASK, 'Avísame cuando responda Ana', [], 24 * 60);
+
+    const inserted = builder.insert.mock.calls[0][0] as { expires_at: string };
+    const deltaMinutes = (new Date(inserted.expires_at).getTime() - before) / 60_000;
+    expect(deltaMinutes).toBeGreaterThan(23 * 60);
+    expect(deltaMinutes).toBeLessThanOrEqual(24 * 60 + 1);
+  });
+
   it('expires timed-out input requests and requeues their tasks', async () => {
     builder.limit.mockResolvedValueOnce({ data: [{ id: 'req-1', task_id: TASK }], error: null });
 

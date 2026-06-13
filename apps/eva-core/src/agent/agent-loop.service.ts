@@ -470,6 +470,14 @@ export class AgentLoopService {
           await log(`agent-loop paso ${i + 1}/${maxSteps}: ${runnable.length} lecturas en paralelo (${runnable.map((r) => r.spec.name).join(', ')})`, 'loop');
           const results = await Promise.all(runnable.map(async ({ decision: d, spec: tool }) => {
             await this.announceAction(orgId, taskId, tool.name, d.args);
+            if (this.events) {
+              await this.events.publish({
+                type: 'task.step',
+                orgId,
+                taskId,
+                payload: { thought: d.thought, tool: tool.name, args: d.args },
+              });
+            }
             try {
               const rateLimit = depth === 0 && this.intelligence ? await this.intelligence.enforceToolRateLimit(orgId, tool.name) : null;
               if (rateLimit) return { tool, decision: d, observation: `ERROR: ${rateLimit}` };
@@ -511,6 +519,14 @@ export class AgentLoopService {
 
       await log(`agent-loop paso ${i + 1}/${maxSteps}: ${spec.name}(${JSON.stringify(decision.args).slice(0, 160)}) — ${decision.thought.slice(0, 120)}`, 'loop');
       await this.announceAction(orgId, taskId, spec.name, decision.args);
+      if (this.events) {
+        await this.events.publish({
+          type: 'task.step',
+          orgId,
+          taskId,
+          payload: { thought: decision.thought, tool: spec.name, args: decision.args },
+        });
+      }
 
       let observation: string;
       try {
@@ -714,11 +730,25 @@ export class AgentLoopService {
     blocks.push(
       '',
       'REGLAS:',
+      'HORIZONTE Y ESTADOS:',
+      '- Clasifica mentalmente cada objetivo antes de actuar: conversacion inmediata, trabajo de minutos, trabajo largo de fondo, tarea programada, espera externa, o accion sensible con approval.',
+      '- Si el objetivo debe repetirse, monitorear algo o despertar despues, usa scheduled_jobs en vez de simular una espera dentro del loop.',
+      '- Si falta una decision/dato o la tarea depende de que el usuario o un tercero responda, usa ask_user y deja la tarea pausada; no cierres como completado ni inventes que seguiras mirando.',
+      '- Si una accion toca dinero, produccion, datos sensibles, mensajes/envios o cambios de cuenta, prepara la accion y deja que el Approval Engine la autorice.',
+      'MEMORIA PROCEDIMENTAL RAIZ:',
+      '- Las skills son tu memoria procedimental: HOW hacer clases de tareas. Tratalas como parte de tu operacion base, no como un extra opcional.',
+      ...(has('skill_view')
+        ? ['- Antes de resolver desde cero, revisa el indice de skills del prompt (## Skills). Si alguna aplica, cargala con skill_view{"slug":"..."} y sigue sus instrucciones.']
+        : []),
+      ...(has('code_execute') || has('terminal_run')
+        ? ['- Usa code_execute/terminal_run para explorarte y corregirte: escribir, ejecutar, observar errores, ajustar y verificar es la ruta normal para mejorar tus propias soluciones.']
+        : []),
+      ...(has('skill_save') || has('skill_manage')
+        ? ['- Tras una tarea compleja, codigo reutilizable o un fix dificil, guarda o parchea el aprendizaje con skill_save/skill_manage antes del final_answer cuando tengas evidencia de que funciona.']
+        : []),
       ...(has('delegate')
         ? ['- Objetivos complejos (varias partes, código + datos externos): delega primero a "planeador" para descomponer, ejecuta las subpartes con "investigador"/"programador", y si generaste código sensible o acciones con riesgo, valida con "seguridad" antes del final_answer. Cada sub-agente recibe tus hallazgos previos.']
         : []),
-      '- Antes de resolver desde cero, revisa el índice de skills del prompt (## Skills). Si alguna aplica, cárgala con skill_view{"slug":"..."} y sigue sus instrucciones.',
-      '- Tras una tarea compleja (≥5 pasos de herramientas) o un fix difícil, guarda el enfoque como skill con skill_manage{"action":"create",...}. Si una skill que cargaste estaba desactualizada, corrígela con skill_manage{"action":"patch",...}.',
       '- Para código: aunque se sugiere dividir en pasos lógicos (inspeccionar→preparar→ejecutar→verificar), sé eficiente para no agotar tus pasos límite. Puedes escribir scripts completos que realicen múltiples acciones (como buscar, crear directorios y descargar) en una sola ejecución de code_execute. Los archivos en /work persisten entre pasos de esta tarea.',
       ...(has('code_execute') && has('telegram_send_file')
         ? ['- Para descargar medios/videos (YouTube, etc.): el sandbox tiene listo yt-dlp y ffmpeg. Escribe un script en code_execute (con "network": true) que use yt-dlp directamente. IMPORTANTE: yt-dlp puede buscar videos por ti sin que busques el enlace antes (ej: usar `yt-dlp --max-downloads 1 --format mp4 "ytsearch1:one piece quinto emperador"` busca y descarga el primer video de esa búsqueda). No malgastes pasos en web_search intentando encontrar enlaces exactos; ¡usa la búsqueda integrada de yt-dlp! Una vez descargado el archivo en /work, usa telegram_send_file para enviarlo de inmediato.']
@@ -1133,12 +1163,13 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
       },
       {
         name: 'ask_user',
-        usage: 'ask_user{"question","options"?}: pregunta al usuario cuando falta una decisión o dato crítico; pausa la tarea en waiting_for_input.',
+        usage: 'ask_user{"question","options"?,"timeout_minutes"?}: pregunta al usuario cuando falta una decisión, dato crítico o señal externa; pausa la tarea en waiting_for_input. Usa timeout_minutes largo (ej. 1440) para standby de horas/días.',
         inputSchema: {
           type: 'object',
           properties: {
             question: { type: 'string', description: 'Pregunta breve y concreta para el usuario.' },
             options: { type: 'array', items: { type: 'string' }, description: 'Opciones sugeridas opcionales.' },
+            timeout_minutes: { type: 'number', description: 'Minutos antes de reanudar por timeout; 15 por defecto, max 10080.' },
           },
           required: ['question'],
         },
@@ -1148,7 +1179,8 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
           const question = String(args.question ?? '').trim();
           if (!question) return 'ERROR: ask_user requiere args.question';
           const options = Array.isArray(args.options) ? args.options.map((o) => String(o)).filter(Boolean).slice(0, 5) : [];
-          return this.intelligence.askUser(orgId, taskId, question, options);
+          const timeoutMinutes = typeof args.timeout_minutes === 'number' ? args.timeout_minutes : 15;
+          return this.intelligence.askUser(orgId, taskId, question, options, timeoutMinutes);
         },
       },
       {
@@ -2028,6 +2060,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
       ask_user: z.object({
         question: z.string().min(1, 'La pregunta no puede estar vacía'),
         options: z.array(z.string()).optional(),
+        timeout_minutes: z.number().int().min(1).max(7 * 24 * 60).optional(),
       }),
       code_execute: z.object({
         language: z.enum(['python', 'node', 'bash']).optional(),

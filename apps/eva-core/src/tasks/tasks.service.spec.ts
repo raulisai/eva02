@@ -149,6 +149,17 @@ describe('TasksService', () => {
       );
     });
 
+    it('running → waiting_for_input emits task.waiting_input', async () => {
+      repo.findByIdOrThrow.mockResolvedValue(makeTask({ status: 'running' }));
+      repo.updateStatus.mockResolvedValue(makeTask({ status: 'waiting_for_input' }));
+
+      await service.transition(MOCK_TASK_ID, MOCK_ORG_ID, 'waiting_for_input');
+
+      expect(events.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'task.waiting_input' }),
+      );
+    });
+
     it('rejects invalid transition (completed → running)', async () => {
       repo.findByIdOrThrow.mockResolvedValue(makeTask({ status: 'completed' }));
 

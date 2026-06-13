@@ -39,6 +39,31 @@ stateDiagram-v2
 
 ---
 
+### Task Horizon Routing
+
+Before the runner chooses a route, it computes `task_horizon` and stores it on task metadata. This is separate from the short `tier` estimate: a quick action can be approval-gated, and a short sentence can create a long-lived standby.
+
+```mermaid
+flowchart TD
+    TaskCreated[Task pending] --> Horizon[decideTaskHorizon]
+    Horizon --> Immediate[Immediate: chat/quick/medium route]
+    Horizon --> Background[Background: agent loop / pipeline with resumable checkpoints]
+    Horizon --> Scheduled[Scheduled: create visible scheduled_job]
+    Horizon --> Standby[Standby: waiting_for_input with long timeout]
+    Horizon --> Approval[Approval: waiting_for_approval via Approval Engine]
+    Standby --> UserSignal[User replies or external signal arrives]
+    UserSignal --> Requeue[Requeue original task as pending]
+    Scheduled --> JobFire[Scheduler creates auditable task]
+```
+
+Rules of thumb:
+- `scheduled` is for recurring/monitoring/wakeup requests and should be visible in Jobs.
+- `standby` is for "wait until someone/something responds" and uses `ask_user` with a configurable timeout.
+- `approval` is only for sensitive actions; forms, setup, and missing data use `waiting_for_input`.
+- Long background work gets an early `task.say` ack and receives horizon policy in the generic loop context.
+
+---
+
 ## 2. Core Agent Loop (`AgentLoopService`)
 
 The step-by-step loop execution for planning, action selection, sandbox run, and reflection.
