@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 12:49Z
+C: integrations: Telegram outbound native videos over 50 MB now attempt ffmpeg compression before send; MCP HTTP/SSE test preflights OAuth-required remotes and hides tools until auth is connected; files=apps/eva-core/src/communication/telegram.adapter.ts,apps/eva-core/src/communication/__tests__/telegram.adapter.spec.ts,apps/eva-core/src/integrations/integrations.service.ts,apps/eva-core/src/integrations/__tests__/integrations.service.spec.ts,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/communication/__tests__/telegram.adapter.spec.ts --runInBand; cd apps/eva-core && npm test -- src/integrations/__tests__/integrations.service.spec.ts --runInBand; cd apps/eva-core && npm run build
+P: pending/improve -> MCP Stdio Secret Injection still needs runner-side env/secret mapping for stdio process launches.
+
 ### 2026-06-13 12:42Z
 C: dashboard/tasks: task detail renders task.metadata.pipeline phase chips; backlog removed completed pipeline UI and duplicate Profile Hub RLS item; files=apps/eva-dashboard/components/tasks/task-detail.tsx,apps/eva-dashboard/__tests__/tasks.test.tsx,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-dashboard && npm test -- --runInBand __tests__/tasks.test.tsx; cd apps/eva-dashboard && npm run build; npm run docs:check
 P: pending/improve -> Phase Retry remains: resume only failed/skipped pipeline phases without rerunning completed phases.
