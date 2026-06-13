@@ -10,12 +10,7 @@ This backlog keeps only relevant, actionable improvements. Completed items move 
 
 ---
 
-## 2. Integrations With Real Product Impact
-- [ ] **MCP Stdio Secret Injection**: Wire dashboard MCP presets to runner-side env/secret injection for stdio tools that need API tokens or database URLs.
-
----
-
-## 3. Profile Hub Roadmap
+## 2. Profile Hub Roadmap
 Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hub_plan.md).
 
 - [ ] **Fase 3 — Interaction**: direct edit/create for notes/todos/goals/events, drag reorder, dialogs, masking/reveal audit UI for private vault.
@@ -23,13 +18,7 @@ Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hu
 
 ---
 
-## 4. Multi-Phase Pipeline
-
-- [ ] **Phase Retry**: allow individual phase retry without rerunning the full pipeline (resume from last failed phase).
-
----
-
-## 5. External Validation Queue
+## 3. External Validation Queue
 These require live credentials/environment and are not code backlog until available.
 
 - [ ] **RLS Verification**: After applying migrations 027-033 to Supabase, run `RLS_TEST=true npm run test:e2e` and verify `agent_souls.private_context_ciphertext` and `profile_private_items.ciphertext` are unreadable through authenticated Data API.
