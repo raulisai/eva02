@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 01:00Z
+C: approvals-ux: human approval messages (no hash/screenshot), notify flag to dedupe channel notifications, broader si/no keywords, evidence-on-demand screenshots via agent/evidence.ts, long-task ack before context load; files=apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/evidence.ts,apps/eva-core/src/approvals/approvals.service.ts,apps/eva-core/src/approvals/dto/request-approval.dto.ts,apps/eva-core/src/communication/communication.service.ts,docs/process_flows.md,docs/backlog.md; tests=npm test (510 passed)
+P: pending/improve -> Telegram inline approval buttons (callback_query); evidence follow-up after execution
+
 ### 2026-06-13 00:11Z
 C: profile-hub: fixed suggestion accept flow so accepted low-confidence facts apply instead of re-entering inbox; files=apps/eva-core/src/agent/profile-facts.service.ts; tests=cd apps/eva-core && npm test -- src/agent/__tests__/profile-facts.service.spec.ts --runInBand; cd apps/eva-core && npm run build
 P: pending/improve -> add integration/e2e coverage for profile suggestion accept/dismiss once migration 033 is applied

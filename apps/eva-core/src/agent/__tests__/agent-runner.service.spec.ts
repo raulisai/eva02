@@ -882,7 +882,7 @@ describe('AgentRunnerService', () => {
     await service.run(ORG, TASK);
 
     const firstSay = events.publish.mock.calls.map(([event]) => event).find((event) => event.type === 'task.say');
-    expect((firstSay!.payload as { text: string }).text).toContain('segundo plano');
+    expect((firstSay!.payload as { text: string }).text).toContain('Va para largo');
     expect(publishedLogs().some((message) => message.includes('tier=long'))).toBe(true);
   });
 

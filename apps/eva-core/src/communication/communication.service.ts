@@ -276,13 +276,13 @@ export class CommunicationService implements OnApplicationBootstrap {
   }
 
   async sendApprovalRequest(approval: Approval, orgId: string) {
+    // Mensaje corto y humano: qué se va a ejecutar y cómo aprobarlo.
+    // Nada de hashes, niveles ni screenshots — la evidencia solo viaja si el
+    // usuario la pide después.
     const text = [
-      `Aprobacion requerida L${approval.level}: ${approval.action_type}`,
-      approval.summary ? `Resumen: ${approval.summary}` : undefined,
-      `Hash: ${approval.action_hash}`,
-      `Expira: ${approval.expires_at}`,
-      approval.screenshot_ref ? `Screenshot: ${approval.screenshot_ref}` : undefined,
-    ].filter(Boolean).join('\n');
+      `🛡️ Necesito tu aprobación para: ${this.describeApprovalAction(approval)}`,
+      'Responde "sí" para ejecutarlo o "no" para cancelar.',
+    ].join('\n\n');
 
     const account = approval.requested_by
       ? await this.findPreferredTelegramAccount(orgId, approval.requested_by)
@@ -309,6 +309,32 @@ export class CommunicationService implements OnApplicationBootstrap {
       notificationType: 'approval.requested',
       payload: { approval_id: approval.id },
     });
+  }
+
+  /**
+   * Describe en lenguaje natural la acción que la approval va a ejecutar.
+   * Prioriza el summary (ya viene humano desde quien la creó); si no hay,
+   * arma una descripción a partir del action_type + payload conocido.
+   */
+  private describeApprovalAction(approval: Approval): string {
+    if (approval.summary?.trim()) return approval.summary.trim();
+    const p = (approval.payload ?? {}) as Record<string, unknown>;
+    switch (approval.action_type) {
+      case 'whatsapp.message.send':
+        return `enviar un WhatsApp a ${p['contact']}: "${p['text']}"`;
+      case 'gmail.send':
+        return `enviar un correo a ${p['to']} con asunto "${p['subject'] ?? '(sin asunto)'}"`;
+      case 'gmail.reply':
+        return 'responder un correo';
+      case 'calendar.create':
+        return `crear el evento "${p['summary']}" en tu calendario`;
+      case 'calendar.delete':
+        return `eliminar el evento "${p['summary'] ?? p['event_id']}" de tu calendario`;
+      case 'sandbox.network_exec':
+        return 'ejecutar código con acceso a red';
+      default:
+        return `ejecutar la acción ${approval.action_type}`;
+    }
   }
 
   findRecentNotifications(orgId: string, limit = 20) {

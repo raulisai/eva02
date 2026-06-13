@@ -1,4 +1,4 @@
-import { IsEnum, IsInt, IsObject, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsInt, IsObject, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApprovalSource } from '../approval.types';
 
@@ -39,4 +39,12 @@ export class RequestApprovalDto {
   @IsOptional()
   @IsString()
   expires_at?: string;
+
+  /**
+   * false → no se notifica al usuario por su canal (Telegram/dashboard);
+   * el flujo que creó la approval ya entregó su propio mensaje de confirmación.
+   */
+  @IsOptional()
+  @IsBoolean()
+  notify?: boolean;
 }

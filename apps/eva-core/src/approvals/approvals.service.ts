@@ -58,7 +58,9 @@ export class ApprovalsService {
         taskId: approval.task_id ?? undefined,
         payload: { approvalId: approval.id, level, action_hash: approval.action_hash },
       });
-      await this.communication?.sendApprovalRequest(approval, orgId);
+      if (dto.notify !== false) {
+        await this.communication?.sendApprovalRequest(approval, orgId);
+      }
     }
 
     return approval;
@@ -177,6 +179,7 @@ export class ApprovalsService {
     summary?: string;
     screenshotRef?: string;
     source?: 'browser' | 'dev_manager' | 'core_path' | 'system';
+    notify?: boolean;
   }): Promise<Approval> {
     return this.request({
       task_id: input.taskId,
@@ -185,6 +188,7 @@ export class ApprovalsService {
       summary: input.summary,
       screenshot_ref: input.screenshotRef,
       source: input.source ?? 'core_path',
+      notify: input.notify,
     }, input.orgId, input.userId);
   }
 

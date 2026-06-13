@@ -8,6 +8,9 @@ This backlog keeps only relevant,compiles outstanding tasks, technical debt, act
 - [ ] **Scheduled Autonomy Rows**: Move `AgentIntelligenceService` periodic autonomy tick into explicit `scheduled_jobs` rows so wakeups are visible, pausable, and auditable in the dashboard.
 - [ ] **Ask User Resume on Startup**: On core startup, scan unresolved `agent_input_requests` and requeue tasks that are ready or timed out, so conversations survive restarts.
 - [x] **Tier Step Controls**: Dashboard controls `max_steps_by_tier`; runner uses org settings for medium/long loop depth with safe clamps.
+- [x] **Fluid Approvals UX**: human approval ask (no hash/level/screenshot), `notify` flag to avoid duplicate messages, natural sí/no keywords, evidence-on-demand screenshots, early long-task ack.
+- [ ] **Telegram Inline Approval Buttons**: add `reply_markup` inline keyboard (✅/❌) + `callback_query` webhook handling so approvals resolve with one tap instead of a typed reply.
+- [ ] **Evidence Follow-up Window**: allow "mándame la captura" AFTER an action executed (currently `send_evidence` must be requested in the original order; post-hoc requests need the session screenshot to be retrievable).
 - [x] **Spanish Verb Suffix Routing**: Tier classifier handles attached Spanish pronouns like `descárgamelo`, `mándaselo`, `envíaselo`, `recuérdamelo`.
 
 ---
@@ -44,3 +47,4 @@ These are important, but not code backlog until the real environment/credentials
 - [ ] **RLS Verification**: After applying migrations 027-032 to Supabase, run `RLS_TEST=true npm run test:e2e` and verify `agent_souls.private_context_ciphertext` is unreadable through authenticated Data API.
 - [ ] **Production Docker Check**: Verify Docker socket mount and `eva-sandbox-builder` image pull on the target Linux host.
 - [ ] **Live Telegram Media Smoke**: Test real Telegram webhook media limits, transcription, image analysis, `yt-dlp`, and document send flows with a live bot.
+- [ ] **Live PDF-To-Telegram Smoke**: Run an end-to-end task that researches, generates a PDF in `/work`, and sends it through Telegram, confirming the task log shows both `code_execute` and `telegram_send_file` before completion.

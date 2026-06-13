@@ -1047,6 +1047,47 @@ describe('AgentLoopService', () => {
   });
 
   describe('telegram_send_file tool', () => {
+    it('does not accept a final answer until requested PDF and Telegram file delivery are done', async () => {
+      const fs = require('fs/promises');
+      const path = require('path');
+      const pdfPath = path.join('/tmp', 'report.pdf');
+      await fs.writeFile(pdfPath, '%PDF-1.4\nmock report\n', 'utf8');
+      sandbox.execInSession.mockResolvedValueOnce({ ok: true, output: 'PDF creado en /work/report.pdf' });
+
+      modelRouter.generate
+        .mockResolvedValueOnce(modelReply('{"thought":"resumo","tool":"final_answer","args":{"text":"Aquí tienes el resumen ejecutivo."}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"creo pdf","tool":"code_execute","args":{"language":"python","code":"open(\\"report.pdf\\",\\"w\\").write(\\"pdf\\")"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"envio pdf","tool":"telegram_send_file","args":{"file":"report.pdf","caption":"Resumen ejecutivo","chat_id":"99999"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"fin","tool":"final_answer","args":{"text":"Listo: generé el PDF y lo envié a Telegram."}}'));
+
+      const result = await service.run(
+        ORG,
+        TASK,
+        'haz una investigacion breve sobre las 5 mejores empresas tech, genera un archivo pdf y envia el archivo a mi telegram',
+        { maxSteps: 4 },
+      );
+
+      const firstPrompt = modelRouter.generate.mock.calls[0][0] as string;
+      expect(firstPrompt).toContain('Te quedan 10 acciones');
+      const systemPrompt = modelRouter.generate.mock.calls[0][1]!.systemPrompt as string;
+      expect(systemPrompt).toContain('ENTREGABLES OBLIGATORIOS DETECTADOS');
+      expect(systemPrompt).toContain('crear archivo PDF');
+      expect(systemPrompt).toContain('enviar archivo por Telegram');
+      expect(result.steps[0].observation).toContain('Faltan entregables obligatorios');
+      expect(sandbox.execInSession).toHaveBeenCalled();
+      expect(telegram.sendDocument).toHaveBeenCalledWith(
+        { chat_id: '99999' },
+        expect.any(Buffer),
+        'report.pdf',
+        'Resumen ejecutivo',
+        null
+      );
+      expect(result.ok).toBe(true);
+      expect(result.text).toContain('generé el PDF');
+
+      await fs.rm(pdfPath, { force: true }).catch(() => undefined);
+    });
+
     it('sends file using communication_accounts fallback when task metadata lacks chat_id', async () => {
       const fs = require('fs/promises');
       const path = require('path');

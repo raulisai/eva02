@@ -485,6 +485,37 @@ describe('CommunicationService', () => {
     }));
   });
 
+  it('sends approval requests as a short human description with sí/no instructions (no hash, no screenshot)', async () => {
+    await service.sendApprovalRequest({
+      id: 'apr-1',
+      org_id: ORG,
+      task_id: 'task-1',
+      level: 2,
+      action_type: 'whatsapp.message.send',
+      action_hash: 'deadbeef'.repeat(8),
+      nonce: 'nonce-1',
+      status: 'pending',
+      payload: { contact: 'Juan', text: 'hola' },
+      summary: 'Enviar WhatsApp a Juan: hola',
+      screenshot_ref: 'https://media/shot.png',
+      source: 'browser',
+      requested_by: USER,
+      reviewed_by: null,
+      reviewed_by_2: null,
+      reviewed_at: null,
+      nonce_used_at: null,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      created_at: new Date().toISOString(),
+    } as any, ORG);
+
+    const notification = repo.createNotification.mock.calls.at(-1)![0] as { body: string };
+    expect(notification.body).toContain('Enviar WhatsApp a Juan: hola');
+    expect(notification.body).toContain('Responde "sí"');
+    expect(notification.body).not.toContain('deadbeef');
+    expect(notification.body).not.toContain('Screenshot');
+    expect(notification.body).not.toContain('Expira');
+  });
+
   describe('onApplicationBootstrap — Telegram response delivery', () => {
     let resultHandler: (event: EvaEvent) => Promise<void>;
     let mediaHandler: (event: EvaEvent) => Promise<void>;

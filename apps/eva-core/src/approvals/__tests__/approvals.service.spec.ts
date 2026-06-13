@@ -163,6 +163,22 @@ describe('ApprovalsService', () => {
     expect(communication.sendApprovalRequest).toHaveBeenCalledWith(approval, ORG);
   });
 
+  it('skips Communication Hub notification when notify=false (flow delivers its own message)', async () => {
+    const approval = makeApproval({ level: 1, status: 'pending' });
+    repo.create.mockResolvedValue(approval);
+
+    await service.request({
+      task_id: TASK,
+      action_type: 'whatsapp.message.send',
+      payload: { contact: 'Juan', text: 'hola' },
+      level: 1,
+      notify: false,
+    }, ORG, USER_A);
+
+    expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({ type: 'approval.requested' }));
+    expect(communication.sendApprovalRequest).not.toHaveBeenCalled();
+  });
+
   it('rejects resolving non-pending approvals', async () => {
     repo.findByIdOrThrow.mockResolvedValue(makeApproval({ status: 'approved' }));
     await expect(service.reject(APPROVAL, ORG, USER_A)).rejects.toThrow(BadRequestException);

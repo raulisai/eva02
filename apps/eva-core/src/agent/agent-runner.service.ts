@@ -29,6 +29,7 @@ import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
 import { AgentSoulContext, Goal, PersonalProfile, SoulContextService } from './soul-context.service';
 import { TierDecision, classifyTier } from './tier';
+import { wantsEvidence } from './evidence';
 import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
 import { CommunicationService } from '../communication/communication.service';
 import type { CommunicationChannel } from '../communication/communication.types';
@@ -84,9 +85,7 @@ const ACK_RULES: Array<{ pattern: RegExp; say: string; hint: string }> = [
 
 const DEFAULT_ACK = { say: 'Enseguida, ya estoy en ello ⚙️', hint: 'default' };
 
-const LONG_TASK_ACK =
-  'Va para largo, así que ya lo estoy ejecutando en segundo plano 🛠️. '
-  + 'Puedes seguir hablándome mientras tanto; te aviso en cuanto esté listo.';
+const LONG_TASK_ACK = 'Va para largo 🛠️ Ya estoy en ello; te aviso en cuanto lo tenga.';
 
 const SYSTEM_PROMPT = `Eres EVA, un agente operativo. Responde SIEMPRE en español,
 de forma directa y concisa (máximo ~120 palabras salvo que pidan detalle).
@@ -164,8 +163,8 @@ const CALENDAR_UPDATE_SIGNALS = /\b(cambia[r]?|mueve[r]?|modifica[r]?|actualiza[
 // Bulk/mass operation guard — reject any write that targets multiple items at once.
 const BULK_GUARD_SIGNALS = /\b(todos(?: mis)?|todas(?: mis)?|masiv[oa]|bulk|en masa|toda la bandeja|todos los correos|todas las citas|todos los eventos)\b/i;
 
-const APPROVE_KEYWORDS = /^\s*(aprovar|aprobar|aprobado|esta\s+bien|está\s+bien|sí|si|yes|dale|autorizado|aprueba|confirmado|confirmo|ok|okay|si,\s*dale|si\s+por\s*favor|sí\s+por\s*favor)\s*$/i;
-const REJECT_KEYWORDS = /^\s*(desaprovar|desaprobar|cancelar|no|rechazar|desaprueba|cancela|rechazo|denegar|denegado|no,\s*gracias)\s*$/i;
+const APPROVE_KEYWORDS = /^\s*(?:sí|si|yes|ok|okay|dale|va|sale|claro|adelante|perfecto|aprovar|aprobar|aprobado|apruebo|aprueba|apru[eé]balo|autorizado|autorizo|confirmado|confirmo|confirmar|hazlo|env[ií]alo|m[aá]ndalo|ejec[uú]talo|procede|est[aá]\s+bien)(?:[\s,]+(?:sí|si|dale|claro|adelante|hazlo|env[ií]alo|m[aá]ndalo|ejec[uú]talo|aprobado|por\s*favor|porfa|gracias))*\s*[.!]*\s*$/i;
+const REJECT_KEYWORDS = /^\s*(?:no|nel|nop|desaprovar|desaprobar|desaprueba|cancelar|cancela|canc[eé]lalo|rechazar|rechazo|rechazado|denegar|denegado|mejor\s+no|no\s+lo\s+(?:env[ií]es|hagas|mandes)|no,?\s*gracias)\s*[.!]*\s*$/i;
 
 // R1.2: signals that the user wants to retry a previously failed task
 const RETRY_INTENT_RE = /\b(reintenta|intenta\s+de\s+nuevo|vuelve\s+a\s+intentar|inténtalo?|prueba\s+de\s+nuevo|hazlo\s+de\s+nuevo|int[eé]ntalo\s+(?:de\s+nuevo|otra\s+vez)|opci[oó]n\s+(\d|uno|dos|tres|cuatro)|prueba\s+la\s+\d|elige\s+la\s+\d|la\s+opci[oó]n\s+\d|hazlo\s+as[ií])\b/i;
@@ -1010,6 +1009,26 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         return;
       }
     }
+    const startedAt = Date.now();
+    // Always classify tier and freshness from raw input — routingInput includes
+    // conversation history which can make short drive/email requests appear as
+    // tier='long' (length > 280) and produce wrong ACKs/routing.
+    const freshness = this.needsFreshness(input);
+    const tier = this.applyFreshnessToTier(classifyTier(input), freshness);
+    const wantsImage = this.media.wantsImage(input);
+    const pureImageRequest = wantsImage && this.isPureImageRequest(input);
+    const ack = tier.tier === 'long'
+      ? { say: LONG_TASK_ACK, hint: 'background' }
+      : this.pickAck(input);
+
+    // Tareas largas: el ack corto sale ANTES de cargar contexto (soul, agenda,
+    // memoria), para que el usuario sepa en <1s que EVA ya está en ello.
+    let ackSent = false;
+    if (tier.tier === 'long') {
+      await this.say(orgId, taskId, ack.say);
+      ackSent = true;
+    }
+
     const conversationContext = await this.getConversationContext(task);
 
     // Fetch soul, schedule, patterns, and memory recall in parallel — none blocks response
@@ -1037,17 +1056,6 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       input, conversationContext, soulContext, calendarBlock, patternBlock,
       proactiveTriggers.map(t => t.message), recallResult.context,
     );
-    const startedAt = Date.now();
-    // Always classify tier and freshness from raw input — routingInput includes
-    // conversation history which can make short drive/email requests appear as
-    // tier='long' (length > 280) and produce wrong ACKs/routing.
-    const freshness = this.needsFreshness(input);
-    const tier = this.applyFreshnessToTier(classifyTier(input), freshness);
-    const wantsImage = this.media.wantsImage(input);
-    const pureImageRequest = wantsImage && this.isPureImageRequest(input);
-    const ack = tier.tier === 'long'
-      ? { say: LONG_TASK_ACK, hint: 'background' }
-      : this.pickAck(input);
 
     const ctx: RouteContext = {
       orgId,
@@ -1080,7 +1088,10 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         if (matches) {
           if (route.priority <= 45 && !inStandardPipeline) {
             inStandardPipeline = true;
-            await this.say(orgId, taskId, ack.say);
+            if (!ackSent) {
+              await this.say(orgId, taskId, ack.say);
+              ackSent = true;
+            }
             await this.log(
               orgId, taskId,
               `tier=${tier.tier} est ~${tier.estimateSec}s (${tier.reason}) — ack "${ack.hint}" in ${Date.now() - startedAt}ms`,
@@ -1199,8 +1210,9 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     const wantsUnansweredStatus = WHATSAPP_UNANSWERED_SIGNALS.test(input);
     if (WHATSAPP_SEND_SIGNALS.test(input) && !wantsUnansweredStatus) {
       const session = await this.whatsapp.startSession(orgId, taskId);
-      await this.maybePublishWhatsAppQr(orgId, taskId, session.screenshot);
       if (session.state === 'qr_required') {
+        // El QR sí se envía como imagen: el usuario lo necesita para vincular.
+        await this.maybePublishWhatsAppQr(orgId, taskId, session.screenshot);
         const text = 'Primero escanea el QR para vincular WhatsApp Web. Después podré preparar una respuesta; cualquier envío real tendrá que pasar por Approval Engine.';
         await this.deliver(orgId, taskId, text, 'whatsapp-web', Date.now() - startedAt);
         return;
@@ -1233,10 +1245,12 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           session_id: session.session_id,
           contact: draft.contact,
           text: draft.text,
+          send_evidence: wantsEvidence(input),
         },
         summary: `Enviar WhatsApp a ${draft.contact}: ${draft.text.slice(0, 160)}`,
+        notify: false, // este texto ya es la solicitud de aprobación
       });
-      const text = `Preparé el WhatsApp para **${draft.contact}** con el texto: **"${draft.text}"**. ¿Me das tu aprobación para enviarlo? (Hash: \`${approval.action_hash}\`)`;
+      const text = `Voy a enviar este WhatsApp a **${draft.contact}**:\n\n"${draft.text}"\n\n¿Lo envío? Responde **sí** para enviarlo o **no** para cancelar.`;
       await this.events.publish({
         type: 'task.result',
         orgId,
@@ -1256,7 +1270,9 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     const shouldRead = WHATSAPP_READ_SIGNALS.test(input) || wantsUnansweredStatus || !!resolvedContact;
     if (!shouldRead) {
       const session = await this.whatsapp.startSession(orgId, taskId);
-      await this.maybePublishWhatsAppQr(orgId, taskId, session.screenshot);
+      if (session.state !== 'logged_in') {
+        await this.maybePublishWhatsAppQr(orgId, taskId, session.screenshot);
+      }
       const text = session.state === 'logged_in'
         ? 'WhatsApp Web está conectado y el perfil local quedó listo para consultas.'
         : 'Abrí WhatsApp Web. Escanea el QR con tu teléfono; cuando termine, la sesión quedará guardada en el perfil local.';
@@ -1271,9 +1287,10 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         : WHATSAPP_UNREAD_SIGNALS.test(input)
           ? await this.whatsapp.fetchUnreadMessages(orgId, taskId)
           : await this.whatsapp.fetchLatestMessage(orgId, taskId);
-    if (resolvedContact) {
+    // La captura solo se manda si el usuario pidió evidencia; el QR solo si hace falta vincular.
+    if (resolvedContact && wantsEvidence(input)) {
       await this.maybePublishBrowserScreenshot(orgId, taskId, result.session.screenshot, 'WhatsApp Web');
-    } else {
+    } else if (!resolvedContact && result.session.state === 'qr_required') {
       await this.maybePublishWhatsAppQr(orgId, taskId, result.session.screenshot);
     }
 
@@ -2974,8 +2991,9 @@ Responde directamente al usuario en español, con un tono amable y natural.
       actionType: 'gmail.send',
       payload: { to: params.to, subject, body: params.body },
       summary: `Enviar correo a ${params.to}: ${subject}`,
+      notify: false,
     });
-    const text = `📧 Borrador listo. Revísalo y aprueba en el dashboard o escribe "aprobar":\n\n${preview}\n\n_Hash: \`${approval.action_hash.slice(0, 12)}…\`_`;
+    const text = `📧 Voy a enviar este correo:\n\n${preview}\n\n¿Lo envío? Responde **sí** para enviarlo o **no** para cancelar.`;
     await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'gmail-write', latency_ms: Date.now() - startedAt } });
     await this.tasks.transition(taskId, orgId, 'waiting_for_approval', { result: { text, model: 'gmail-write', approval_id: approval.id } });
   }
@@ -3017,8 +3035,9 @@ Responde directamente al usuario en español, con un tono amable y natural.
       actionType: 'gmail.reply',
       payload: { message_id: msg.id, body },
       summary: `Responder a ${msg.from}: ${msg.subject}`,
+      notify: false,
     });
-    const text = `📧 Respuesta lista para aprobar:\n\n${preview}\n\n_Hash: \`${approval.action_hash.slice(0, 12)}…\`_`;
+    const text = `📧 Voy a responder este correo:\n\n${preview}\n\n¿La envío? Responde **sí** para enviarla o **no** para cancelar.`;
     await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'gmail-write', latency_ms: Date.now() - startedAt } });
     await this.tasks.transition(taskId, orgId, 'waiting_for_approval', { result: { text, model: 'gmail-write', approval_id: approval.id } });
   }
@@ -3052,8 +3071,9 @@ Responde directamente al usuario en español, con un tono amable y natural.
       actionType,
       payload: { message_id: msg.id, summary: `${msg.subject} — ${msg.from}` },
       summary: `${opLabel}: ${msg.subject} — ${msg.from}`,
+      notify: false,
     });
-    const text = `${opLabel}:\n\n${preview}\n\nAprueba en el dashboard para confirmar. _Hash: \`${approval.action_hash.slice(0, 12)}…\`_`;
+    const text = `${opLabel}:\n\n${preview}\n\n¿Confirmo? Responde **sí** para hacerlo o **no** para cancelar.`;
     await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'gmail-write', latency_ms: Date.now() - startedAt } });
     await this.tasks.transition(taskId, orgId, 'waiting_for_approval', { result: { text, model: 'gmail-write', approval_id: approval.id } });
   }
@@ -3113,8 +3133,9 @@ Responde directamente al usuario en español, con un tono amable y natural.
       actionType: 'calendar.create',
       payload: eventInput as unknown as Record<string, unknown>,
       summary: `Crear evento: ${eventInput.summary} el ${eventInput.startDateTime}`,
+      notify: false,
     });
-    const text = `🗓️ Evento listo para crear. Aprueba para confirmarlo:\n\n${preview}\n\n_Hash: \`${approval.action_hash.slice(0, 12)}…\`_`;
+    const text = `🗓️ Voy a crear este evento:\n\n${preview}\n\n¿Lo creo? Responde **sí** para confirmarlo o **no** para cancelar.`;
     await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'calendar-write', latency_ms: Date.now() - startedAt } });
     await this.tasks.transition(taskId, orgId, 'waiting_for_approval', { result: { text, model: 'calendar-write', approval_id: approval.id } });
   }
@@ -3150,8 +3171,9 @@ Responde directamente al usuario en español, con un tono amable y natural.
       actionType: 'calendar.delete',
       payload: { event_id: target.id, summary: target.summary },
       summary: `Eliminar evento: ${target.summary}`,
+      notify: false,
     });
-    const text = `🗓️ Listo para eliminar este evento:\n\n${preview}\n\nAprueba en el dashboard. _Hash: \`${approval.action_hash.slice(0, 12)}…\`_`;
+    const text = `🗓️ Voy a eliminar este evento:\n\n${preview}\n\n¿Lo elimino? Responde **sí** para confirmarlo o **no** para cancelar.`;
     await this.events.publish({ type: 'task.result', orgId, taskId, payload: { text, model: 'calendar-write', latency_ms: Date.now() - startedAt } });
     await this.tasks.transition(taskId, orgId, 'waiting_for_approval', { result: { text, model: 'calendar-write', approval_id: approval.id } });
   }
@@ -3274,7 +3296,8 @@ Responde directamente al usuario en español, con un tono amable y natural.
           const contact = String(payload.contact);
           const body = String(payload.text);
           const r = await this.whatsapp.sendMessage(orgId, contact, body, taskId);
-          if (r.session.screenshot) {
+          // Evidencia visual solo si el usuario la pidió al preparar el envío.
+          if (payload.send_evidence === true && r.session.screenshot) {
             await this.maybePublishBrowserScreenshot(orgId, taskId, r.session.screenshot, 'WhatsApp Web');
           }
           resultText = r.text;

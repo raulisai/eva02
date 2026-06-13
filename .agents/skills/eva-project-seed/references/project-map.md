@@ -60,6 +60,7 @@ Key Documentation References:
 - `IntegrationsModule`: org integrations, MCP connections, credential/model/channel tests.
 - `AgentModule`: agent loop/runner, skill library, sandbox, media, research, Gmail/Calendar/Drive, soul, schedule, behavior patterns.
 - Agent intelligence telemetry/flywheels: `AgentTrajectoryService` persists `agent_trajectories` checkpoints/finals; `AgentIntelligenceService` handles plan state helpers, replay examples, ask_user persistence/timeouts, token/tool/network safety limits, security review, memory consolidation, self-improvement digest, heartbeat task creation, and skill embeddings; `GET /agent/metrics` reads org-scoped metrics views.
+- Agent loop delivery guard: root loop derives explicit user-requested deliverables like generated PDFs and Telegram file sends, raises the step budget to 10 for those tasks, rejects premature `final_answer`, and reports pending deliverables if exhausted.
 - `ApprovalsModule`: approval request/resolve/validate.
 - `WearFastPathModule`: ephemeral watch tokens, request path, policy.
 - `JobsModule`: scheduled jobs + scheduler.

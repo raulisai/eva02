@@ -19,6 +19,7 @@ import { SkillLibraryService, SkillSummary } from './skill-library.service';
 import { EventBusService } from '../events/event-bus.service';
 import { TelegramAdapter } from '../communication/telegram.adapter';
 import { AgentProfile, DELEGATE_ROLE_CATALOG, resolveAgentProfile } from './agent-profiles';
+import { wantsEvidence } from './evidence';
 import { AgentTrajectoryService, ModelBudgetStep } from './agent-trajectory.service';
 import { AgentIntelligenceService, AgentPlanItem } from './agent-intelligence.service';
 import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
@@ -72,6 +73,14 @@ export interface AgentLoopOptions {
 
 type ToolExecutor = (orgId: string, taskId: string, args: Record<string, unknown>) => Promise<string>;
 type AgentDecision = { thought: string; tool: string; args: Record<string, unknown> };
+type DeliveryRequirementKind = 'pdf_file' | 'telegram_file';
+
+interface DeliveryRequirement {
+  kind: DeliveryRequirementKind;
+  label: string;
+  tool: string;
+  guidance: string;
+}
 
 interface ToolSpec {
   name: string;
@@ -175,9 +184,12 @@ export class AgentLoopService {
       opts.blackboard = {};
     }
     const depth = Math.min(Math.max(opts.depth ?? 0, 0), MAX_DEPTH);
+    const deliveryRequirements = depth === 0 ? this.deriveDeliveryRequirements(goal) : [];
     const profile = depth > 0 ? resolveAgentProfile(opts.role) : null;
     const defaultSteps = depth === 0 ? DEFAULT_ROOT_STEPS : profile?.maxSteps ?? DEFAULT_SUB_STEPS;
-    const maxSteps = Math.min(Math.max(opts.maxSteps ?? defaultSteps, 1), 10);
+    const requestedMaxSteps = opts.maxSteps ?? defaultSteps;
+    const minDeliverySteps = deliveryRequirements.length > 0 ? 10 : 1;
+    const maxSteps = Math.min(Math.max(requestedMaxSteps, minDeliverySteps), 10);
     const log = opts.log ?? (async () => undefined);
     const available = this.tools.filter((t) => {
       if (t.rootOnly && depth > 0) return false;
@@ -185,7 +197,7 @@ export class AgentLoopService {
       return true;
     });
     const extras = depth === 0 ? await this.resolveExtras(orgId, goal) : { skills: [], secretAliases: [] };
-    const systemPrompt = this.buildSystemPrompt(opts, available, extras, profile);
+    const systemPrompt = this.buildSystemPrompt(opts, available, extras, profile, deliveryRequirements);
     // Tool definitions para tool-use nativo — se construyen UNA vez por run.
     const toolDefinitions = this.buildToolDefinitions(available);
     const startedAt = Date.now();
@@ -226,7 +238,7 @@ export class AgentLoopService {
         );
         const parsed = JSON.parse(dodGenRes.text.trim());
         if (parsed && Array.isArray(parsed.criteria)) {
-          dodCriteria = parsed.criteria.map((c: any) => String(c));
+          dodCriteria = [...dodCriteria, ...parsed.criteria.map((c: any) => String(c))];
           await log(`agent-loop: DoD Criterios generados: [${dodCriteria.join(' | ')}]`, 'loop');
         }
       } catch (err) {
@@ -337,7 +349,7 @@ export class AgentLoopService {
         }
 
         const dodViolation = dodRejections < MAX_DOD_REJECTIONS && depth === 0
-          ? await this.validateFinalAnswer(text, steps, dodCriteria, orgId, taskId)
+          ? await this.validateFinalAnswer(text, steps, dodCriteria, orgId, taskId, deliveryRequirements)
           : null;
 
         if (dodViolation) {
@@ -526,6 +538,14 @@ export class AgentLoopService {
 
     // Out of steps — synthesise an answer from what was gathered instead of failing dry.
     const gathered = steps.filter((s) => !s.observation.startsWith('ERROR:'));
+    const missingRequirements = this.missingDeliveryRequirements(steps, deliveryRequirements);
+    if (missingRequirements.length > 0) {
+      const pendingText = this.deliveryBlockedText(goal, steps, missingRequirements);
+      await log(`agent-loop: pasos agotados con entregables pendientes: ${missingRequirements.map((r) => r.label).join(', ')}`, 'loop');
+      this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, pendingText);
+      this.recordTrajectory(orgId, taskId, goal, steps, 'degraded', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
+      return { ok: true, degraded: true, text: pendingText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
+    }
     if (gathered.length === 0) {
       if (depth === 0 && steps.length >= 2) {
         try {
@@ -580,7 +600,13 @@ export class AgentLoopService {
 
   // ── prompt ────────────────────────────────────────────────────────────────
 
-  private buildSystemPrompt(opts: AgentLoopOptions, tools: ToolSpec[], extras: LoopExtras, profile?: AgentProfile | null): string {
+  private buildSystemPrompt(
+    opts: AgentLoopOptions,
+    tools: ToolSpec[],
+    extras: LoopExtras,
+    profile?: AgentProfile | null,
+    deliveryRequirements: DeliveryRequirement[] = [],
+  ): string {
     const blocks: string[] = [
       `Eres EVA en modo agente autónomo${opts.role ? `, actuando como ${opts.role}` : ''}. Resuelve el OBJETIVO eligiendo UNA acción por turno.`,
       ...(profile ? [profile.mission] : []),
@@ -625,6 +651,15 @@ export class AgentLoopService {
       blocks.push('', opts.capabilityModel);
     }
 
+    if (deliveryRequirements.length > 0) {
+      blocks.push(
+        '',
+        'ENTREGABLES OBLIGATORIOS DETECTADOS:',
+        ...deliveryRequirements.map((req, idx) => `${idx + 1}. ${req.label}: ${req.guidance}`),
+        'No uses final_answer hasta que todos los entregables obligatorios tengan una observación exitosa de herramienta. Un resumen en texto NO sustituye un archivo ni un envío.',
+      );
+    }
+
     // R1.2: inject retry context to avoid repeating failed routes
     if (opts.retryContext) {
       const rc = opts.retryContext;
@@ -650,6 +685,9 @@ export class AgentLoopService {
       '- Para código: divide en pasos pequeños (inspeccionar→preparar→ejecutar→verificar). Los archivos en /work persisten entre pasos de esta tarea.',
       ...(has('code_execute') && has('telegram_send_file')
         ? ['- Para descargar medios/videos (YouTube, Platzi, etc.): el sandbox tiene preinstalado y listo para usar yt-dlp y ffmpeg. Escribe código de Python o Bash que use yt-dlp directamente para descargar el video/audio a /work. IMPORTANTE: Para que yt-dlp funcione y tenga acceso a internet, debes pasar el argumento "network": true al llamar a code_execute. Luego usa telegram_send_file para enviarlo. Evita clonar repositorios externos o instalar paquetes pesados.']
+        : []),
+      ...(has('code_execute') && has('telegram_send_file')
+        ? ['- Para reportes/archivos solicitados por el usuario: usa code_execute para crear el archivo en /work, verifica que exista con sandbox_ls si hace falta, y después usa telegram_send_file si el usuario pidió enviarlo por Telegram.']
         : []),
       '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
@@ -802,12 +840,81 @@ export class AgentLoopService {
     return /\?/.test(text);
   }
 
+  private deriveDeliveryRequirements(goal: string): DeliveryRequirement[] {
+    const normalized = goal.toLowerCase();
+    const requirements: DeliveryRequirement[] = [];
+
+    if (/\bpdf\b/.test(normalized) && /\b(genera|generar|crea|crear|haz|hacer|arma|armar|archivo|reporte|documento)\b/.test(normalized)) {
+      requirements.push({
+        kind: 'pdf_file',
+        label: 'crear archivo PDF',
+        tool: 'code_execute',
+        guidance: 'crea el PDF en /work con code_execute y deja evidencia de la ruta/nombre .pdf en la observación.',
+      });
+    }
+
+    if (/\btelegram\b/.test(normalized) && /\b(env[ií]a|enviar|mand[aá]|mandar|m[aá]ndalo|m[aá]ndame|comparte|compartir)\b/.test(normalized)) {
+      requirements.push({
+        kind: 'telegram_file',
+        label: 'enviar archivo por Telegram',
+        tool: 'telegram_send_file',
+        guidance: 'usa telegram_send_file con el archivo generado y espera una observación de envío exitoso.',
+      });
+    }
+
+    return requirements;
+  }
+
+  private missingDeliveryRequirements(steps: AgentLoopStep[], requirements: DeliveryRequirement[]): DeliveryRequirement[] {
+    return requirements.filter((req) => {
+      if (req.kind === 'pdf_file') {
+        return !steps.some((step) => {
+          const argsText = JSON.stringify(step.args).toLowerCase();
+          const observation = step.observation.toLowerCase();
+          return !step.observation.startsWith('ERROR:')
+            && (step.tool === 'code_execute' || step.tool === 'sandbox_ls' || step.tool === 'script_forge')
+            && (argsText.includes('.pdf') || observation.includes('.pdf') || observation.includes('pdf'));
+        });
+      }
+
+      if (req.kind === 'telegram_file') {
+        return !steps.some((step) =>
+          step.tool === 'telegram_send_file'
+          && !step.observation.startsWith('ERROR:')
+          && /enviado a telegram|message_id|archivo ".+" .*telegram/i.test(step.observation)
+        );
+      }
+
+      return false;
+    });
+  }
+
+  private deliveryBlockedText(goal: string, steps: AgentLoopStep[], missing: DeliveryRequirement[]): string {
+    const usefulFindings = steps
+      .filter((step) => !step.observation.startsWith('ERROR:') && step.tool !== 'final_answer')
+      .slice(-3)
+      .map((step) => `- ${step.tool}: ${this.compactObservation(step.observation)}`)
+      .join('\n');
+    const pending = missing.map((req, idx) => `${idx + 1}. ${req.label}: ${req.guidance}`).join('\n');
+
+    return [
+      'No puedo marcar esta tarea como terminada todavía: faltan entregables que el usuario pidió explícitamente.',
+      '',
+      `Objetivo: ${goal}`,
+      usefulFindings ? `\nLo que sí avancé:\n${usefulFindings}` : '',
+      `\nPendiente para completarla bien:\n${pending}`,
+      '',
+      'Reintenta la tarea y priorizaré esos pasos antes de volver a investigar.',
+    ].filter(Boolean).join('\n');
+  }
+
   private async validateFinalAnswer(
     text: string,
     steps: AgentLoopStep[],
     criteria: string[],
     orgId: string,
     taskId: string,
+    deliveryRequirements: DeliveryRequirement[] = [],
   ): Promise<string | null> {
     // Honest failure reports bypass DoD — they are valid step-level outputs.
     // R1.3 path-enforcement runs at the synthesis/delivery level (synthesizeRecoveryOptions),
@@ -821,6 +928,11 @@ export class AgentLoopService {
 
     if (lastCodeStep && lastCodeStep.observation.startsWith('ERROR:')) {
       return `El último código falló: "${lastCodeStep.observation.slice(7, 120)}". Verifica y corrige antes de declarar éxito, o reporta el estado real en tu respuesta.`;
+    }
+
+    const missingRequirements = this.missingDeliveryRequirements(steps, deliveryRequirements);
+    if (missingRequirements.length > 0) {
+      return `Faltan entregables obligatorios: ${missingRequirements.map((req) => req.label).join(', ')}. Debes ejecutar ${missingRequirements.map((req) => req.tool).join(' y ')} antes de final_answer.`;
     }
 
     if (criteria.length > 0) {
@@ -1357,13 +1469,13 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
 
           const { data: task } = await this.db.admin
             .from('tasks')
-            .select('created_by')
+            .select('created_by, description')
             .eq('id', taskId)
             .eq('org_id', orgId)
             .maybeSingle();
           const userId = task?.created_by ?? 'system';
 
-          const approval = await this.approvals.requestForPreparedAction({
+          await this.approvals.requestForPreparedAction({
             orgId,
             userId,
             taskId,
@@ -1373,11 +1485,12 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
               session_id: session.session_id,
               contact,
               text,
+              send_evidence: wantsEvidence(task?.description),
             },
             summary: `Enviar WhatsApp a ${contact}: ${text.slice(0, 160)}`,
           });
 
-          return `Petición de envío de WhatsApp creada para "${contact}" con el mensaje: "${text}". Estado: PENDIENTE DE APROBACIÓN (Hash: ${approval.action_hash})`;
+          return `Petición de envío de WhatsApp creada para "${contact}". El usuario ya recibió la solicitud de aprobación por su canal. Cierra con final_answer BREVE: dile qué mensaje se enviará a quién y que responda "sí" para aprobarlo o "no" para cancelar. No incluyas hashes ni detalles técnicos.`;
         }
       },
       {
@@ -1554,7 +1667,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
             payload = { message_id: messageId };
           }
 
-          const approval = await this.approvals.requestForPreparedAction({
+          await this.approvals.requestForPreparedAction({
             orgId,
             userId,
             taskId,
@@ -1564,7 +1677,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
             summary,
           });
 
-          return `Operación gmail.${action} preparada. Estado: PENDIENTE DE APROBACIÓN (Hash: ${approval.action_hash})`;
+          return `Operación gmail.${action} preparada (${summary}). El usuario ya recibió la solicitud de aprobación por su canal. Cierra con final_answer BREVE: describe qué se hará y que responda "sí" para aprobarlo o "no" para cancelar. No incluyas hashes ni detalles técnicos.`;
         }
       },
       {
@@ -1612,7 +1725,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
             payload = { event_id: eventId };
           }
 
-          const approval = await this.approvals.requestForPreparedAction({
+          await this.approvals.requestForPreparedAction({
             orgId,
             userId,
             taskId,
@@ -1622,7 +1735,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
             summary,
           });
 
-          return `Operación calendar.${action} preparada. Estado: PENDIENTE DE APROBACIÓN (Hash: ${approval.action_hash})`;
+          return `Operación calendar.${action} preparada (${summary}). El usuario ya recibió la solicitud de aprobación por su canal. Cierra con final_answer BREVE: describe qué se hará y que responda "sí" para aprobarlo o "no" para cancelar. No incluyas hashes ni detalles técnicos.`;
         }
       },
       {
