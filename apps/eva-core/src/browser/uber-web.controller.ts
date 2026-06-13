@@ -69,4 +69,24 @@ export class UberWebController {
       taskId: body.task_id,
     });
   }
+
+  @Post('request-ride')
+  @HttpCode(HttpStatus.OK)
+  requestRide(
+    @Body() body: { origin: string; destination: string; ride_type?: string; task_id?: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const origin = body?.origin?.trim();
+    const destination = body?.destination?.trim();
+    const rideType = body?.ride_type?.trim();
+    if (!origin || !destination) {
+      throw new BadRequestException('origin and destination are required');
+    }
+    return this.uber.requestRide(req.user.orgId, {
+      origin,
+      destination,
+      rideType,
+      taskId: body.task_id,
+    });
+  }
 }

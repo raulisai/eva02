@@ -80,6 +80,25 @@ export class MemoryService {
     return this.repo.findByIdOrThrow(memoryId, orgId);
   }
 
+  /**
+   * Search with a pre-computed embedding — skips the embed() call so callers
+   * that already have an embedding (e.g. proactive injection) don't pay twice.
+   */
+  async searchByEmbedding(
+    embedding: number[],
+    orgId: string,
+    limit = 5,
+    threshold = 0.7,
+  ): Promise<MemorySearchResult[]> {
+    const results = await this.repo.searchSimilar(embedding, orgId, limit, threshold);
+    if (results.length > 0) {
+      Promise.all(results.map((r) => this.repo.updateAccessedAt(r.id, orgId))).catch((err) =>
+        this.logger.warn('Failed to update accessed_at', err),
+      );
+    }
+    return results;
+  }
+
   // Importance heuristic (0–1):
   //   keyword density  0–0.4
   //   length score     0–0.2  (optimal ~200 chars)

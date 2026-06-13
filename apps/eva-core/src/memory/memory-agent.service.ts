@@ -25,4 +25,14 @@ export class MemoryAgentService {
   async get(memoryId: string, orgId: string): Promise<Memory> {
     return this.memoryService.getMemory(memoryId, orgId);
   }
+
+  /** Search with a pre-computed embedding — avoids a redundant embed() call. */
+  async searchByEmbedding(
+    embedding: number[],
+    orgId: string,
+    limit = 5,
+    threshold = 0.7,
+  ): Promise<MemorySearchResult[]> {
+    return this.memoryService.searchByEmbedding(embedding, orgId, limit, threshold);
+  }
 }

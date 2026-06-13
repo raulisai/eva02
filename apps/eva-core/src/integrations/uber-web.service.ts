@@ -60,6 +60,18 @@ export type UberEstimateResult =
       text: string;
     };
 
+export interface UberOrderResult {
+  ok: boolean;
+  reason: 'ordered' | 'login_required' | 'ride_not_found' | 'loading' | 'failed' | 'unknown';
+  session: UberSessionStatus;
+  origin: string;
+  destination: string;
+  ride_type: string;
+  price?: string;
+  text: string;
+}
+
+
 interface UberPageSignals {
   state: UberWebState;
   googleLoginAvailable: boolean;
@@ -138,6 +150,14 @@ export class UberWebService {
     };
   }
 
+  normalizeAddress(address: string): string {
+    if (!address) return '';
+    let clean = address.trim();
+    clean = clean.replace(/\bcmdx\b/gi, 'CDMX, México');
+    clean = clean.replace(/\bcdmx\b/gi, 'CDMX, México');
+    return clean;
+  }
+
   async estimateRide(orgId: string, input: {
     origin: string;
     destination: string;
@@ -145,7 +165,9 @@ export class UberWebService {
     taskId?: string;
     skipGoogleLogin?: boolean;
   }): Promise<UberEstimateResult> {
-    const targetUrl = input.url || this.buildRouteUrl(input.origin, input.destination);
+    const originNormalized = this.normalizeAddress(input.origin);
+    const destinationNormalized = this.normalizeAddress(input.destination);
+    const targetUrl = input.url || this.buildRouteUrl(originNormalized, destinationNormalized);
     const opened = await this.browser.open({
       service: UBER_SERVICE,
       url: targetUrl,
@@ -154,8 +176,8 @@ export class UberWebService {
       metadata: {
         service: UBER_SERVICE,
         purpose: 'uber-web-estimate',
-        origin: input.origin,
-        destination: input.destination,
+        origin: originNormalized,
+        destination: destinationNormalized,
         guardrail: 'quote-only-never-request-ride',
       },
     }, orgId);
@@ -164,8 +186,8 @@ export class UberWebService {
     const signals = await this.inspectPage(opened.id, orgId);
     const screenshot = await this.browser.screenshot(opened.id, orgId);
     await this.persistSessionCheck(opened.id, orgId, signals, screenshot, {
-      origin: input.origin,
-      destination: input.destination,
+      origin: originNormalized,
+      destination: destinationNormalized,
     });
     const session: UberSessionStatus = {
       session_id: opened.id,
@@ -192,8 +214,8 @@ export class UberWebService {
           ok: false,
           reason: 'login_required',
           session: login.session,
-          origin: input.origin,
-          destination: input.destination,
+          origin: originNormalized,
+          destination: destinationNormalized,
           candidates: [],
           text: login.text,
         };
@@ -202,8 +224,8 @@ export class UberWebService {
         ok: false,
         reason: 'login_required',
         session,
-        origin: input.origin,
-        destination: input.destination,
+        origin: originNormalized,
+        destination: destinationNormalized,
         candidates: [],
         text: this.loginRequiredText(session),
       };
@@ -214,8 +236,8 @@ export class UberWebService {
         ok: false,
         reason: 'loading',
         session,
-        origin: input.origin,
-        destination: input.destination,
+        origin: originNormalized,
+        destination: destinationNormalized,
         candidates: [],
         text: 'Uber Web abrió, pero todavía está cargando. Te envié screenshot; espera unos segundos y vuelve a intentar.',
       };
@@ -226,8 +248,8 @@ export class UberWebService {
         ok: false,
         reason: signals.state === 'unknown' ? 'unknown' : 'quote_not_found',
         session,
-        origin: input.origin,
-        destination: input.destination,
+        origin: originNormalized,
+        destination: destinationNormalized,
         candidates: [],
         text:
           'Abrí Uber Web con la ruta, pero no encontré una tarifa visible todavía. '
@@ -239,12 +261,158 @@ export class UberWebService {
       ok: true,
       reason: 'quote_ready',
       session: { ...session, state: 'quote_ready' },
-      origin: input.origin,
-      destination: input.destination,
+      origin: originNormalized,
+      destination: destinationNormalized,
       candidates: signals.quoteCandidates,
-      text: this.formatQuote(input.origin, input.destination, signals.quoteCandidates),
+      text: this.formatQuote(originNormalized, destinationNormalized, signals.quoteCandidates),
     };
   }
+
+  async requestRide(orgId: string, input: {
+    origin: string;
+    destination: string;
+    rideType?: string;
+    taskId?: string;
+    skipGoogleLogin?: boolean;
+  }): Promise<UberOrderResult> {
+    const originNormalized = this.normalizeAddress(input.origin);
+    const destinationNormalized = this.normalizeAddress(input.destination);
+    const rideType = input.rideType || 'UberX';
+
+    const targetUrl = this.buildRouteUrl(originNormalized, destinationNormalized);
+    const opened = await this.browser.open({
+      service: UBER_SERVICE,
+      url: targetUrl,
+      task_id: input.taskId,
+      reuse_open: true,
+      metadata: {
+        service: UBER_SERVICE,
+        purpose: 'uber-web-order',
+        origin: originNormalized,
+        destination: destinationNormalized,
+        ride_type: rideType,
+      },
+    }, orgId);
+
+    await this.browser.wait(opened.id, orgId, this.settleMs());
+    let signals = await this.inspectPage(opened.id, orgId);
+    let screenshot = await this.browser.screenshot(opened.id, orgId);
+    await this.persistSessionCheck(opened.id, orgId, signals, screenshot, {
+      origin: originNormalized,
+      destination: destinationNormalized,
+    });
+
+    const session: UberSessionStatus = {
+      session_id: opened.id,
+      state: signals.state,
+      current_url: signals.currentUrl ?? opened.current_url,
+      title: signals.title ?? opened.title,
+      google_login_available: signals.googleLoginAvailable,
+      screenshot,
+    };
+
+    if (signals.state === 'login_required') {
+      if (!input.skipGoogleLogin && signals.googleLoginAvailable && this.googleWeb && await this.googleWeb.hasCredential(orgId)) {
+        const login = await this.loginUberWithGoogleFromSession(orgId, opened.id, input.taskId);
+        if (login.ok) {
+          return this.requestRide(orgId, {
+            origin: input.origin,
+            destination: input.destination,
+            rideType: input.rideType,
+            taskId: input.taskId,
+            skipGoogleLogin: true,
+          });
+        }
+        return {
+          ok: false,
+          reason: 'login_required',
+          session: login.session,
+          origin: originNormalized,
+          destination: destinationNormalized,
+          ride_type: rideType,
+          text: login.text,
+        };
+      }
+      return {
+        ok: false,
+        reason: 'login_required',
+        session,
+        origin: originNormalized,
+        destination: destinationNormalized,
+        ride_type: rideType,
+        text: this.loginRequiredText(session),
+      };
+    }
+
+    if (signals.state === 'loading') {
+      return {
+        ok: false,
+        reason: 'loading',
+        session,
+        origin: originNormalized,
+        destination: destinationNormalized,
+        ride_type: rideType,
+        text: 'Uber Web está cargando. Espera un momento y vuelve a intentar.',
+      };
+    }
+
+    // Now choose/click the desired product
+    await this.browser.evaluate<boolean, { rideType: string }>(opened.id, orgId, ({ rideType }) => {
+      const elements = Array.from(document.querySelectorAll('*'));
+      const match = elements.find((el) => {
+        const text = el.textContent ?? '';
+        return new RegExp('\\b' + rideType + '\\b', 'i').test(text) && el.children.length === 0;
+      });
+      if (match) {
+        (match as HTMLElement).click();
+        return true;
+      }
+      const candidates = Array.from(document.querySelectorAll('div, p, span, button'));
+      const fallbackMatch = candidates.find((el) => new RegExp('\\b' + rideType + '\\b', 'i').test(el.textContent ?? ''));
+      if (fallbackMatch) {
+        (fallbackMatch as HTMLElement).click();
+        return true;
+      }
+      return false;
+    }, { rideType }).catch(() => {});
+
+    await this.browser.wait(opened.id, orgId, 1500);
+
+    // Click request/confirm button
+    await this.browser.evaluate<boolean, { rideType: string }>(opened.id, orgId, ({ rideType }) => {
+      const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+      const match = buttons.find((btn) => {
+        const text = btn.textContent?.toLowerCase() ?? '';
+        const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() ?? '';
+        return /choose|confirm|request|pedir|confirmar|siguiente|see prices/i.test(text) ||
+               /choose|confirm|request|pedir|confirmar|siguiente|see prices/i.test(ariaLabel);
+      });
+      if (match) {
+        (match as HTMLElement).click();
+        return true;
+      }
+      return false;
+    }, { rideType }).catch(() => {});
+
+    await this.browser.wait(opened.id, orgId, 5000); // Wait for booking state to load
+
+    signals = await this.inspectPage(opened.id, orgId);
+    screenshot = await this.browser.screenshot(opened.id, orgId);
+    await this.persistSessionCheck(opened.id, orgId, signals, screenshot);
+
+    const updatedSession = { ...session, screenshot, state: signals.state };
+
+    return {
+      ok: true,
+      reason: 'ordered',
+      session: updatedSession,
+      origin: originNormalized,
+      destination: destinationNormalized,
+      ride_type: rideType,
+      text: `✅ Viaje en Uber solicitado exitosamente (${rideType}) desde ${originNormalized} hacia ${destinationNormalized}. Te envié la captura de pantalla con la confirmación.`,
+    };
+  }
+
 
   async startGoogleLogin(orgId: string, taskId?: string): Promise<UberGoogleLoginResult> {
     const opened = await this.browser.open({

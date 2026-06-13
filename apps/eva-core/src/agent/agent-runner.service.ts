@@ -25,7 +25,7 @@ import { MediaService } from './media.service';
 import { MemoryRecallService } from './memory-recall.service';
 import { MissingInformationError, ResearchToolsService } from './research-tools.service';
 import { SandboxService } from './sandbox.service';
-import { ScheduleService } from './schedule.service';
+import { ScheduleService, haversineMeters, KnownPlace } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
 import { AgentSoulContext, Goal, PersonalProfile, SoulContextService } from './soul-context.service';
 import { ConversationContextTurn, ProfileContextBuilderService } from './profile-context-builder.service';
@@ -1827,24 +1827,96 @@ Responde directamente al usuario en español, con un tono amable y natural.
     return null;
   }
 
-  private async normalizeUberPlace(value: string, orgId: string, taskId?: string): Promise<string> {
-    const cleaned = this.cleanUberPlace(value);
-    if (!/\b(mi ubicaci[oó]n|ubicaci[oó]n actual|aqu[ií]|aqui|donde estoy|mi casa|casa|depa|departamento|mi depa|mi departamento)\b/i.test(cleaned)) return cleaned;
-    
-    if (taskId) {
-      try {
-        const task = await this.tasks.getTask(taskId, orgId);
-        const deviceLocation = task.metadata?.device_location as { latitude: number; longitude: number } | null;
-        if (deviceLocation && typeof deviceLocation.latitude === 'number' && typeof deviceLocation.longitude === 'number') {
-          const address = await this.reverseGeocode(deviceLocation.latitude, deviceLocation.longitude);
-          if (address) {
-            return address;
-          }
-        }
-      } catch (e) {
-        this.logger.warn(`Could not resolve device location for normalizeUberPlace in task ${taskId}: ${(e as Error).message}`);
+  private async resolvePlaceContext(value: string, orgId: string, taskId?: string): Promise<string | null> {
+    const cleaned = this.cleanUberPlace(value).toLowerCase();
+
+    // Map common spanish place labels to standard keys
+    let placeLabel = cleaned;
+    if (cleaned === 'trabajo' || cleaned === 'mi trabajo' || cleaned === 'oficina') placeLabel = 'work';
+    if (cleaned === 'casa' || cleaned === 'mi casa' || cleaned === 'depa' || cleaned === 'mi depa' || cleaned === 'hogar') placeLabel = 'home';
+
+    // If it's a specific place like "work" or "home"
+    if (placeLabel === 'work' || placeLabel === 'home') {
+      const kp = await this.schedule.getPlace(orgId, placeLabel);
+      if (kp?.address) {
+        return kp.address;
       }
     }
+
+    const isCurrentLocation = /\b(mi ubicaci[oó]n|ubicaci[oó]n actual|aqu[ií]|aqui|donde estoy)\b/i.test(cleaned) || !cleaned;
+
+    if (isCurrentLocation) {
+      // 1. Try task metadata
+      if (taskId) {
+        try {
+          const task = await this.tasks.getTask(taskId, orgId);
+          const deviceLocation = task.metadata?.device_location as { latitude: number; longitude: number } | null;
+          if (deviceLocation && typeof deviceLocation.latitude === 'number' && typeof deviceLocation.longitude === 'number') {
+            const matchedPlace = await this.matchCoordinatesToPlace(orgId, deviceLocation.latitude, deviceLocation.longitude);
+            if (matchedPlace?.address) {
+              return matchedPlace.address;
+            }
+            const address = await this.reverseGeocode(deviceLocation.latitude, deviceLocation.longitude);
+            if (address) return address;
+          }
+        } catch (e) {
+          this.logger.warn(`Could not resolve device location from metadata: ${e.message}`);
+        }
+      }
+
+      // 2. Try latest location_visits from ScheduleService
+      try {
+        const latestLoc = await this.schedule.getLatestLocation(orgId);
+        if (latestLoc && typeof latestLoc.lat === 'number' && typeof latestLoc.lng === 'number') {
+          const matchedPlace = await this.matchCoordinatesToPlace(orgId, latestLoc.lat, latestLoc.lng);
+          if (matchedPlace?.address) {
+            return matchedPlace.address;
+          }
+          const address = await this.reverseGeocode(latestLoc.lat, latestLoc.lng);
+          if (address) return address;
+        }
+      } catch (e) {
+        this.logger.warn(`Could not resolve latest location from location_visits: ${e.message}`);
+      }
+
+      // 3. Fallback to 'home' place
+      const homePlace = await this.schedule.getPlace(orgId, 'home');
+      if (homePlace?.address) {
+        return homePlace.address;
+      }
+    }
+
+    // If it's a place label other than work/home that was registered in known_places
+    if (cleaned) {
+      const kp = await this.schedule.getPlace(orgId, cleaned);
+      if (kp?.address) {
+        return kp.address;
+      }
+    }
+
+    return null;
+  }
+
+  private async matchCoordinatesToPlace(orgId: string, lat: number, lng: number): Promise<KnownPlace | null> {
+    try {
+      const places = await this.schedule.getPlaces(orgId);
+      for (const place of places) {
+        if (!place.lat || !place.lng) continue;
+        const dist = haversineMeters(lat, lng, place.lat, place.lng);
+        if (dist <= place.radius_m) {
+          return place;
+        }
+      }
+    } catch (e) {
+      this.logger.warn(`matchCoordinatesToPlace failed: ${e.message}`);
+    }
+    return null;
+  }
+
+  private async normalizeUberPlace(value: string, orgId: string, taskId?: string): Promise<string> {
+    const cleaned = this.cleanUberPlace(value);
+    const resolved = await this.resolvePlaceContext(cleaned, orgId, taskId);
+    if (resolved) return resolved;
 
     const profile = await this.soul.getPersonalProfile(orgId).catch(() => ({} as PersonalProfile));
     const fallback = String(profile.current_location ?? profile.address ?? '').trim();
@@ -1853,21 +1925,8 @@ Responde directamente al usuario en español, con un tono amable y natural.
   }
 
   private async defaultUberOrigin(orgId: string, taskId?: string): Promise<string> {
-    if (taskId) {
-      try {
-        const task = await this.tasks.getTask(taskId, orgId);
-        const deviceLocation = task.metadata?.device_location as { latitude: number; longitude: number } | null;
-        if (deviceLocation && typeof deviceLocation.latitude === 'number' && typeof deviceLocation.longitude === 'number') {
-          const address = await this.reverseGeocode(deviceLocation.latitude, deviceLocation.longitude);
-          if (address) {
-            this.logger.log(`Resolved Uber origin from device location coordinates in task ${taskId}: ${address}`);
-            return address;
-          }
-        }
-      } catch (e) {
-        this.logger.warn(`Could not resolve device location for defaultUberOrigin in task ${taskId}: ${(e as Error).message}`);
-      }
-    }
+    const resolved = await this.resolvePlaceContext('', orgId, taskId);
+    if (resolved) return resolved;
 
     const profile = await this.soul.getPersonalProfile(orgId).catch(() => ({} as PersonalProfile));
     const origin = String(profile.current_location ?? profile.address ?? '').trim();
@@ -3348,6 +3407,22 @@ Responde directamente al usuario en español, con un tono amable y natural.
           // Evidencia visual solo si el usuario la pidió al preparar el envío.
           if (payload.send_evidence === true && r.session.screenshot) {
             await this.maybePublishBrowserScreenshot(orgId, taskId, r.session.screenshot, 'WhatsApp Web');
+          }
+          resultText = r.text;
+          break;
+        }
+        case 'uber.ride.order': {
+          const origin = String(payload.origin);
+          const destination = String(payload.destination);
+          const rideType = String(payload.ride_type || 'UberX');
+          const r = await this.uber.requestRide(orgId, {
+            origin,
+            destination,
+            rideType,
+            taskId,
+          });
+          if (r.session.screenshot) {
+            await this.maybePublishBrowserScreenshot(orgId, taskId, r.session.screenshot, 'Uber Web');
           }
           resultText = r.text;
           break;

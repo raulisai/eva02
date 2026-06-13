@@ -28,6 +28,7 @@ import { RappiWebService } from '../integrations/rappi-web.service';
 import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
 import { SkillDocsService } from './skill-docs.service';
 import { BackgroundReviewService } from './background-review.service';
+import { MemoryRecallService } from './memory-recall.service';
 import { tryParseDirty } from './json-repair';
 import {
   BudgetState,
@@ -194,6 +195,7 @@ export class AgentLoopService {
     @Optional() private readonly telegram?: TelegramAdapter,
     @Optional() private readonly trajectories?: AgentTrajectoryService,
     @Optional() private readonly intelligence?: AgentIntelligenceService,
+    @Optional() private readonly memoryRecall?: MemoryRecallService,
   ) {
     this.tools = this.buildToolCatalog();
     this.attachZodSchemas();
@@ -239,7 +241,16 @@ export class AgentLoopService {
     // R4.5: inject failure anti-patterns so the agent avoids routes that already failed
     const failureAntiPattern = depth === 0 && this.intelligence ? await this.intelligence.replayFailureExample(orgId, goal).catch(() => null) : null;
     const inputContext = depth === 0 ? await this.latestInputAnswerContext(orgId, taskId).catch(() => null) : null;
-    const dynamicContext = [opts.context, replayContext, failureAntiPattern, inputContext].filter(Boolean).join('\n\n') || undefined;
+    // Proactive memory: for long/medium tasks inject relevant user context via
+    // embedding similarity — one cheap embed() call, no LLM, never blocks startup.
+    // Skipped for sub-agents (depth>0) and trivial tiers (chat/quick without deliverables).
+    const isComplexTask = depth === 0 && (
+      opts.tier === 'long' || opts.tier === 'medium' || deliveryRequirements.length > 0
+    );
+    const proactiveMemory = isComplexTask && this.memoryRecall
+      ? await this.memoryRecall.proactiveContext(goal, orgId).catch(() => null)
+      : null;
+    const dynamicContext = [opts.context, proactiveMemory, replayContext, failureAntiPattern, inputContext].filter(Boolean).join('\n\n') || undefined;
     // ── Pre-execution: Plan → Verify → Execute (long tasks only) ─────────────
     // For tasks with ≥10 steps: use powerful model to build a detailed multi-phase
     // plan, verify which tools/skills are actually available, then inject the
@@ -1226,7 +1237,7 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     if (/código|code|programa|script|python|javascript|typescript/i.test(goal)) signals.add('code');
     if (/recurrente|programar\s+tarea|job|cron|cada\s+d[ií]a|mensual/i.test(goal)) signals.add('schedule');
     if (/whatsapp/i.test(goal)) signals.add('whatsapp');
-    if (/uber|rappi|pedido|delivery|comida/i.test(goal)) signals.add('services');
+    if (/uber|rappi|pedido|delivery|comida|casa|trabajo|ubicacion|ubicación|lugar|dirección|direccion/i.test(goal)) signals.add('services');
     if (/bolsa|acciones|stock|precio|finanz/i.test(goal)) signals.add('finance');
     return signals;
   }
@@ -1267,7 +1278,7 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     const SKILLS_ADVANCED = new Set(['skill_save', 'skill_manage', 'script_forge']);
     const SCHEDULE_GROUP = new Set(['schedule_job_manage']);
     const WHATSAPP_GROUP = new Set(['whatsapp_send', 'whatsapp_read']);
-    const SERVICES_GROUP = new Set(['uber_quote', 'uber_login', 'rappi_login']);
+    const SERVICES_GROUP = new Set(['uber_quote', 'uber_login', 'rappi_login', 'uber_request_ride', 'known_places_manage']);
 
     return allTools.filter((t) => {
       if (usedTools.has(t.name)) return true;
@@ -2083,6 +2094,124 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
         }
       },
       {
+        name: 'uber_request_ride',
+        usage: 'uber_request_ride{"origin","destination","ride_type"?}: prepara un viaje en Uber y solicita la aprobación del usuario para pedirlo. ride_type por defecto es "UberX".',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            origin: { type: 'string', description: 'Dirección o lugar de salida.' },
+            destination: { type: 'string', description: 'Dirección o lugar de destino.' },
+            ride_type: { type: 'string', description: 'Tipo de viaje (ej: UberX, Comfort).' },
+          },
+          required: ['origin', 'destination'],
+        },
+        execute: async (orgId, taskId, args) => {
+          if (!this.approvals) return 'ERROR: ApprovalsService no disponible.';
+          const origin = String(args.origin ?? '').trim();
+          const destination = String(args.destination ?? '').trim();
+          const rideType = String(args.ride_type ?? 'UberX').trim();
+          if (!origin || !destination) return 'ERROR: uber_request_ride requiere origin y destination.';
+
+          const originNormalized = this.uber.normalizeAddress(origin);
+          const destinationNormalized = this.uber.normalizeAddress(destination);
+
+          const estimate = await this.uber.estimateRide(orgId, {
+            origin: originNormalized,
+            destination: destinationNormalized,
+            taskId,
+          });
+
+          let price = 'Precio no disponible';
+          if (estimate.ok && estimate.candidates.length > 0) {
+            const matched = estimate.candidates.find(c => c.label.toLowerCase().includes(rideType.toLowerCase()));
+            price = matched ? matched.price : estimate.candidates[0].price;
+          }
+
+          const { data: task } = await this.db.admin
+            .from('tasks')
+            .select('created_by')
+            .eq('id', taskId)
+            .eq('org_id', orgId)
+            .maybeSingle();
+          const userId = task?.created_by ?? 'system';
+
+          const approval = await this.approvals.requestForPreparedAction({
+            orgId,
+            userId,
+            taskId,
+            actionType: 'uber.ride.order',
+            source: 'browser',
+            payload: {
+              origin: originNormalized,
+              destination: destinationNormalized,
+              ride_type: rideType,
+              price,
+            },
+            summary: `Pedir Uber (${rideType}) de ${originNormalized} a ${destinationNormalized} por ${price}`,
+          });
+
+          return `Petición de viaje de Uber creada. El precio estimado para ${rideType} es ${price}. El usuario ya recibió la solicitud de aprobación por su canal. Cierra con final_answer BREVE: dile el origen, destino y costo estimado, y pídele que apruebe el viaje diciendo "sí" o rechazarlo diciendo "no".`;
+        }
+      },
+      {
+        name: 'known_places_manage',
+        usage: 'known_places_manage{"action":"list|save","label"?, "address"?, "lat"?, "lng"?}: gestiona las ubicaciones conocidas del usuario (casa, trabajo, etc.).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['list', 'save'], description: 'Acción a realizar.' },
+            label: { type: 'string', description: 'Nombre/etiqueta del lugar (ej. "casa", "trabajo").' },
+            address: { type: 'string', description: 'Dirección física del lugar.' },
+            lat: { type: 'number', description: 'Latitud opcional.' },
+            lng: { type: 'number', description: 'Longitud opcional.' },
+          },
+          required: ['action'],
+        },
+        execute: async (orgId, taskId, args) => {
+          const action = String(args.action ?? '').trim();
+          if (action === 'list') {
+            const places = await this.schedule.getPlaces(orgId);
+            if (places.length === 0) return 'No tienes ubicaciones conocidas guardadas.';
+            return places.map(p => `- ${p.label}: ${p.address || 'Sin dirección'}${p.lat && p.lng ? ` (${p.lat}, ${p.lng})` : ''}`).join('\n');
+          } else if (action === 'save') {
+            const label = String(args.label ?? '').trim().toLowerCase();
+            const address = String(args.address ?? '').trim();
+            if (!label || !address) return 'ERROR: guardar requiere label y address.';
+
+            const addressNormalized = this.uber.normalizeAddress(address);
+
+            let lat: number | undefined = typeof args.lat === 'number' ? args.lat : undefined;
+            let lng: number | undefined = typeof args.lng === 'number' ? args.lng : undefined;
+
+            if (lat === undefined || lng === undefined) {
+              try {
+                const res = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(addressNormalized)}&format=json&limit=1`, {
+                  headers: { 'User-Agent': 'EVA-Agentic-Platform/1.0 (djoker@eva.ai)' }
+                });
+                if (res.ok) {
+                  const data = await res.json() as any[];
+                  if (data && data[0]) {
+                    lat = parseFloat(data[0].lat);
+                    lng = parseFloat(data[0].lon);
+                  }
+                }
+              } catch (err) {
+                this.logger.warn(`Failed to auto-geocode place label ${label}: ${(err as Error).message}`);
+              }
+            }
+
+            const upserted = await this.schedule.upsertPlace(orgId, label, {
+              address: addressNormalized,
+              lat,
+              lng,
+              metadata: {}
+            });
+            return `✅ Ubicación guardada exitosamente: "${upserted.label}" -> ${upserted.address}${upserted.lat && upserted.lng ? ` (${upserted.lat}, ${upserted.lng})` : ''}`;
+          }
+          return 'ERROR: acción no soportada.';
+        }
+      },
+      {
         name: 'uber_login',
         usage: 'uber_login{"email","password"?}: inicia el flujo de login por correo en Uber. Enviará un OTP al correo del usuario y después tendrás que pedirle al usuario el código usando ask_user.',
         inputSchema: {
@@ -2505,6 +2634,18 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
       uber_quote: z.object({
         origin: z.string().min(1, 'El origen no puede estar vacío'),
         destination: z.string().min(1, 'El destino no puede estar vacío'),
+      }),
+      uber_request_ride: z.object({
+        origin: z.string().min(1, 'El origen no puede estar vacío'),
+        destination: z.string().min(1, 'El destino no puede estar vacío'),
+        ride_type: z.string().optional(),
+      }),
+      known_places_manage: z.object({
+        action: z.enum(['list', 'save']),
+        label: z.string().optional(),
+        address: z.string().optional(),
+        lat: z.number().optional(),
+        lng: z.number().optional(),
       }),
       uber_login: z.object({
         email: z.string().email('Debe ser un correo válido'),
