@@ -30,6 +30,7 @@ import { Task } from '../../tasks/task.types';
 import { ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
 import { CommunicationService } from '../../communication/communication.service';
 import { AgentIntelligenceService } from '../agent-intelligence.service';
+import { PipelineRunnerService } from '../pipeline-runner.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -500,6 +501,13 @@ describe('AgentRunnerService', () => {
             registerCapabilityGap: jest.fn().mockResolvedValue(undefined),
             getCapabilityGapsDigest: jest.fn().mockResolvedValue(null),
             maxStepsForTier: jest.fn().mockResolvedValue(4),
+          },
+        },
+        {
+          provide: PipelineRunnerService,
+          useValue: {
+            isMultiPhase: jest.fn().mockReturnValue(false),
+            run: jest.fn().mockResolvedValue({ ok: true, text: 'pipeline done', phases: [], totalTokens: 0, totalSteps: 0, durationMs: 0 }),
           },
         },
       ],

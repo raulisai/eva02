@@ -33,6 +33,7 @@ import { wantsEvidence } from './evidence';
 import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
 import { CommunicationService } from '../communication/communication.service';
 import type { CommunicationChannel } from '../communication/communication.types';
+import { PipelineRunnerService } from './pipeline-runner.service';
 
 /**
  * Immediate spoken acknowledgments — EVA answers in <100ms with one of these
@@ -285,6 +286,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly agentLoop: AgentLoopService,
     private readonly sandbox: SandboxService,
     private readonly intelligence: AgentIntelligenceService,
+    private readonly pipeline: PipelineRunnerService,
   ) {
     this.initRoutes();
   }
@@ -672,6 +674,45 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
           return true;
         }
+      },
+      {
+        name: 'multi-phase-pipeline',
+        priority: 43,
+        risk: 'high',
+        matches: (ctx) => ctx.tier.tier !== 'chat' && this.pipeline.isMultiPhase(ctx.input),
+        handler: async (ctx) => {
+          this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'pipeline');
+          await this.log(ctx.orgId, ctx.taskId, `multi-phase pipeline detectado — sintetizando fases`, 'pipeline');
+
+          // Build identity context so phases know who the user is
+          const contextParts: string[] = [];
+          const identity = ctx.soulContext ? this.slimIdentityLine(ctx.soulContext) : null;
+          if (identity) contextParts.push(`Usuario: ${identity}`);
+          if (ctx.conversationContext.length > 0) {
+            contextParts.push(
+              ctx.conversationContext
+                .slice(-4)
+                .map((t) => `${t.role === 'user' ? 'Usuario' : 'EVA'}: ${t.text.slice(0, 300)}`)
+                .join('\n'),
+            );
+          }
+
+          const outcome = await this.pipeline.run(ctx.orgId, ctx.taskId, ctx.input, {
+            userId: ctx.task.created_by,
+            context: contextParts.join('\n') || undefined,
+            log: (message, scope) => this.log(ctx.orgId, ctx.taskId, message, scope),
+          });
+
+          await this.log(
+            ctx.orgId, ctx.taskId,
+            `pipeline terminado — ${outcome.phases.length} fases, ${outcome.totalSteps} pasos totales, ${outcome.totalTokens} tokens, ${(outcome.durationMs / 1000).toFixed(1)}s`,
+            'pipeline',
+          );
+          await this.deliver(ctx.orgId, ctx.taskId, outcome.text, 'multi-phase-pipeline', Date.now() - ctx.startedAt);
+          await this.log(ctx.orgId, ctx.taskId, `done in ${Date.now() - ctx.startedAt}ms total`, 'pipeline');
+          this.digester.digestAsync({ orgId: ctx.orgId, taskId: ctx.taskId, userInput: ctx.input, evaReply: outcome.text, conversationContext: ctx.conversationContext });
+          return true;
+        },
       },
       {
         name: 'medium-agent-loop',

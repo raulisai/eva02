@@ -41,7 +41,19 @@ Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hu
 
 ---
 
-## 5. External Validation Queue
+## 5. Multi-Phase Pipeline
+
+- [x] **PipelineRunnerService**: detects multi-phase goals (pronoun back-references, connector chains, artifact → format → delivery), synthesizes phases via LLM, runs each phase as a separate AgentLoop with shared sandbox workspace so files written in Phase N are readable in Phase N+1.  
+  Files: `src/agent/pipeline-runner.types.ts`, `src/agent/pipeline-runner.service.ts`.  
+  Route: `multi-phase-pipeline` at priority 43 in AgentRunnerService.
+- [ ] **Parallel Phases**: execute independent phases (empty `dependsOn`) concurrently using `Promise.all` — currently sequential.
+- [ ] **Phase Retry**: allow individual phase retry without rerunning the full pipeline (resume from last failed phase).
+- [ ] **Pipeline Progress in UI**: display per-phase status chips in the frontend task detail view using `task.metadata.pipeline`.
+- [ ] **Live Pipeline Smoke**: End-to-end test: "Crea un informe de ventas, conviértelo a PDF y envíalo por Telegram" — confirm 3 phase logs, PDF artifact in `/work`, Telegram delivery.
+
+---
+
+## 6. External Validation Queue
 These are important, but not code backlog until the real environment/credentials are available.
 
 - [ ] **RLS Verification**: After applying migrations 027-032 to Supabase, run `RLS_TEST=true npm run test:e2e` and verify `agent_souls.private_context_ciphertext` is unreadable through authenticated Data API.

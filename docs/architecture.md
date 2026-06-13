@@ -52,6 +52,7 @@ EVA is a highly distributed agentic platform built to perform complex, multi-mod
 Orchestrates backend operations, models routing, memory management, and agent workflow state machines. Key components:
 - **Intent Router**: Classifies incoming requests into either `Fast Path` (requires instant voice response) or `Core Path` (complex planning task).
 - **Agent Loop / Runner**: An autonomous task-runner style system that plans, reflects, selects skills/tools, executes inside sandboxes, handles user input requests, and logs trajectories.
+- **Pipeline Runner** (`pipeline-runner.service.ts`): Detects multi-phase goals (pattern matching), decomposes them into an ordered `PipelineDefinition` via a cheap LLM call, then executes each phase as a separate `AgentLoop` invocation. Phase outputs are injected as context into subsequent phases via `{{outputKey}}` interpolation; the shared sandbox filesystem acts as a zero-copy file channel between phases. Route: `multi-phase-pipeline` at priority 43 in `AgentRunnerService`.
 - **Memory / Soul / Profile Services**: Manage semantic memory with pgvector embeddings, agent identity, and the user-owned Profile Hub. `/soul` is agent identity; `/profile` stores structured todos, notes, goals, relationship/profile context, schedule context, and encrypted private vault items. Sensitive profile values are masked in normal tables and decrypted only by eva-core with reveal audit logs.
 - **Model Router**: Abstracts LLM providers (Anthropic, OpenAI, local) behind a single standardized interface.
 

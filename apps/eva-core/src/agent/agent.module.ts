@@ -12,6 +12,7 @@ import { ModelRouterModule } from '../model-router/model-router.module';
 import { TasksModule } from '../tasks/tasks.module';
 import { ToolRouterModule } from '../tool-router/tool-router.module';
 import { AgentLoopService } from './agent-loop.service';
+import { PipelineRunnerService } from './pipeline-runner.service';
 import { AgentFeedbackController } from './agent-feedback.controller';
 import { AgentIntelligenceService } from './agent-intelligence.service';
 import { AgentMetricsController } from './agent-metrics.controller';
@@ -44,6 +45,7 @@ import { CommunicationModule } from '../communication/communication.module';
   ],
   providers: [
     AgentLoopService,
+    PipelineRunnerService,
     AgentRunnerService,
     AgentTrajectoryService,
     AgentIntelligenceService,
