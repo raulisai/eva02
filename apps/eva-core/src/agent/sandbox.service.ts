@@ -616,7 +616,14 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
       } catch (err) {
         return this.execError(err, masks);
       }
-      command = kind === 'python' ? `python ${file}` : `sh ${file}`;
+      // Ruta ABSOLUTA: el shell vivo conserva su cwd entre pasos (un `cd` previo
+      // del modelo persiste), pero el archivo de código siempre vive en /work.
+      const abs = `/work/${file}`;
+      // python: preferir ipython (tracebacks ricos, como Agent Zero) cuando está
+      // en la imagen; el propio shell elige el binario y cae a python si no.
+      command = kind === 'python'
+        ? `if command -v ipython >/dev/null 2>&1; then ipython --no-banner --colors=NoColor "${abs}"; else python "${abs}"; fi`
+        : `sh "${abs}"`;
     }
 
     try {

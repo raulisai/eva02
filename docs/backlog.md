@@ -13,11 +13,11 @@ This backlog keeps only relevant, actionable improvements. Completed items move 
 ## 1a. Code Execution (Agent Zero parity)
 El sandbox foreground corre en un **shell persistente con PTY** ([sandbox-shell.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/sandbox-shell.ts) + `execInSession` en [sandbox.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/sandbox.service.ts)): estado de shell vivo entre pasos (env/cd/venv/procesos), timeouts multi-fase (`completed/running/awaiting_input`), detección de diálogo + tool `terminal_input`, terminales multiplexadas (`session` 0-9), limpieza ANSI/marker. Espejo de `plugins/_code_execution` de Agent Zero.
 
-Pendientes del análisis (Tier 2-3, no implementados aún):
-- [ ] **IPython para python**: correr `ipython` en la imagen enriquecida en vez de `python file.py` → tracebacks ricos, menos reintentos del modelo.
-- [ ] **DirtyJson en `parseDecision`** ([agent-loop.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/agent-loop.service.ts)): reparar JSON malformado (llaves sin cerrar, comas colgantes, comillas simples) antes de devolver null.
-- [ ] **Smoke real del PTY**: extender `scripts/sandbox-smoke.ts` para validar estado persistente (`export X=1` → leerlo en el paso siguiente) y un diálogo `[y/n]` → `terminal_input` contra Docker real.
-- [ ] **Time Travel**: snapshots de `/work` con revert en fronteras de fase.
+Hecho (Tier 2-3): **IPython** para python en la imagen enriquecida con fallback a `python` (el shell elige el binario); **DirtyJson** en `parseDecision` ([json-repair.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/json-repair.ts): fences, comas colgantes, prosa, objetos truncados); **smoke real del PTY** extendido ([sandbox-smoke.ts](file:///Users/djoker/code/eva02/apps/eva-core/scripts/sandbox-smoke.ts), validado contra Docker — cazó y fijó un bug de ruta relativa tras `cd`: el código ahora se ejecuta con ruta absoluta `/work/...`).
+
+Pendiente:
+- [ ] **Rebuild de la imagen** para activar ipython: `docker build -t eva-sandbox docker/sandbox` (la imagen actual aún corre sin ipython → cae a python; Python 3.12 ya da tracebacks decentes).
+- [ ] **Time Travel** (Tier 4): snapshots de `/work` con revert en fronteras de fase.
 
 ---
 

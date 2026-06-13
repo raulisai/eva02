@@ -211,6 +211,17 @@ describe('SandboxService', () => {
     expect(shellProcs[0].writes.some((w) => w.trim() === 'y')).toBe(true);
   });
 
+  it('runs python from an absolute /work path so a prior cd does not break it', async () => {
+    await service.execInSession('task-1', { kind: 'python', code: 'print(1)' });
+
+    // El comando referencia el archivo por ruta absoluta (/work/...), no relativa,
+    // porque el shell vivo conserva su cwd entre pasos (un `cd` previo persiste).
+    const pyWrite = shellProcs[0].writes.find((w) => w.includes('.eva-s0-step-'));
+    expect(pyWrite).toMatch(/"\/work\/\.eva-s0-step-\d+\.py"/);
+    // Y prefiere ipython con fallback a python.
+    expect(pyWrite).toContain('command -v ipython');
+  });
+
   it('multiplexes independent shells per session number', async () => {
     await service.execInSession('task-1', { kind: 'terminal', code: 'echo a', session: 0 });
     await service.execInSession('task-1', { kind: 'terminal', code: 'echo b', session: 1 });

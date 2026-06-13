@@ -28,6 +28,7 @@ import { RappiWebService } from '../integrations/rappi-web.service';
 import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
 import { SkillDocsService } from './skill-docs.service';
 import { BackgroundReviewService } from './background-review.service';
+import { tryParseDirty } from './json-repair';
 import { z } from 'zod';
 
 
@@ -810,15 +811,9 @@ export class AgentLoopService {
   }
 
   private parseDecision(raw: string): { thought: string; tool: string; args: Record<string, unknown> } | null {
-    let obj: Record<string, unknown> | null = null;
-    try {
-      obj = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      const match = raw.match(/\{[\s\S]*\}/);
-      if (match) {
-        try { obj = JSON.parse(match[0]) as Record<string, unknown>; } catch { obj = null; }
-      }
-    }
+    // Tolerant parse: handles ```json fences, trailing commas, prose around the
+    // object and truncated/unclosed braces (Agent Zero DirtyJson parity).
+    const obj = tryParseDirty(raw);
     if (!obj || typeof obj['tool'] !== 'string' || !obj['tool']) return null;
     const args = (obj['args'] && typeof obj['args'] === 'object') ? obj['args'] as Record<string, unknown> : {};
     return { thought: String(obj['thought'] ?? '').slice(0, 300), tool: obj['tool'], args };
