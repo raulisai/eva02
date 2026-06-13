@@ -34,6 +34,8 @@ import { SandboxService } from './sandbox.service';
 import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
 import { SkillLibraryService } from './skill-library.service';
+import { SkillDocsService } from './skill-docs.service';
+import { BackgroundReviewService } from './background-review.service';
 import { SoulContextService } from './soul-context.service';
 import { JobsModule } from '../jobs/jobs.module';
 import { CommunicationModule } from '../communication/communication.module';
@@ -56,6 +58,8 @@ import { CommunicationModule } from '../communication/communication.module';
     SandboxService,
     ScriptForgeService,
     SkillLibraryService,
+    SkillDocsService,
+    BackgroundReviewService,
     SoulContextService,
     GmailService,
     GoogleCalendarService,

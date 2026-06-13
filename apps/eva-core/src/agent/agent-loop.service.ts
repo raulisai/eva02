@@ -26,6 +26,8 @@ import { WhatsAppWebService } from '../integrations/whatsapp-web.service';
 import { UberWebService } from '../integrations/uber-web.service';
 import { RappiWebService } from '../integrations/rappi-web.service';
 import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
+import { SkillDocsService } from './skill-docs.service';
+import { BackgroundReviewService } from './background-review.service';
 import { z } from 'zod';
 
 
@@ -98,6 +100,8 @@ interface ToolSpec {
 interface LoopExtras {
   skills: SkillSummary[];
   secretAliases: string[];
+  /** Índice estable de skills (mandatory tier) — siempre presente en el system prompt raíz. */
+  skillsIndexBlock: string;
 }
 
 const MAX_DEPTH = 1;
@@ -164,10 +168,12 @@ export class AgentLoopService {
     private readonly forge: ScriptForgeService,
     private readonly sandbox: SandboxService,
     private readonly skillLibrary: SkillLibraryService,
+    private readonly skillDocs: SkillDocsService,
     private readonly whatsapp: WhatsAppWebService,
     private readonly uber: UberWebService,
     private readonly rappi: RappiWebService,
     private readonly scheduledJobs: ScheduledJobsService,
+    @Optional() private readonly backgroundReview?: BackgroundReviewService,
     @Optional() private readonly approvals?: ApprovalsService,
     @Optional() private readonly integrations?: IntegrationsService,
     @Optional() private readonly events?: EventBusService,
@@ -196,7 +202,7 @@ export class AgentLoopService {
       if (profile?.tools && !profile.tools.includes(t.name)) return false;
       return true;
     });
-    const extras = depth === 0 ? await this.resolveExtras(orgId, goal) : { skills: [], secretAliases: [] };
+    const extras = depth === 0 ? await this.resolveExtras(orgId, goal) : { skills: [], secretAliases: [], skillsIndexBlock: '' };
     const systemPrompt = this.buildSystemPrompt(opts, available, extras, profile, deliveryRequirements);
     // Tool definitions para tool-use nativo — se construyen UNA vez por run.
     const toolDefinitions = this.buildToolDefinitions(available);
@@ -386,6 +392,10 @@ export class AgentLoopService {
         this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, refinedText);
         this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
         this.recordTrajectory(orgId, taskId, goal, steps, 'ok', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
+        // Background learning loop — fires async, never blocks the response
+        if (depth === 0) {
+          this.backgroundReview?.scheduleReview({ orgId, taskId, goal, steps, finalText: refinedText });
+        }
         return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
       }
 
@@ -589,6 +599,9 @@ export class AgentLoopService {
       this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, refinedText);
       this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
       this.recordTrajectory(orgId, taskId, goal, steps, 'ok', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
+      if (depth === 0) {
+        this.backgroundReview?.scheduleReview({ orgId, taskId, goal, steps, finalText: refinedText });
+      }
       return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     } catch (error) {
       await log(`agent-loop: síntesis falló — ${(error as Error).message}`, 'loop');
@@ -610,34 +623,56 @@ export class AgentLoopService {
     const blocks: string[] = [
       `Eres EVA en modo agente autónomo${opts.role ? `, actuando como ${opts.role}` : ''}. Resuelve el OBJETIVO eligiendo UNA acción por turno.`,
       ...(profile ? [profile.mission] : []),
+    ];
+
+    // ── Stable tier: Skills index (mandatory — mirrors Hermes prompt_builder.py) ──
+    // This block is always present so the model sees ALL available procedural knowledge
+    // before deciding anything. Skills encode HOW to do task classes; memory encodes WHO
+    // the user is. Never remove or gate this block — it is the procedural memory anchor.
+    if (extras.skillsIndexBlock) {
+      blocks.push('', extras.skillsIndexBlock);
+    }
+
+    blocks.push(
       '',
       'HERRAMIENTAS:',
       ...tools.map((t) => `- ${t.usage}`),
       '- final_answer{"text"}: entrega la respuesta final al usuario (español, directa).',
-    ];
+    );
+
+    // ── Contextual tier: relevant executable skills (code-based, ranked by outcome) ──
     if (extras.skills.length > 0) {
-      blocks.push(
-        '',
-        'CATÁLOGO INTELIGENTE DE SKILLS (ordenado por aptitud, resultados previos y concurrencia):',
-        ...extras.skills.map((s) => {
-          const mode = s.useMode === 'run' ? 'ejecutable con skill_run' : 'guía para razonar/delegar';
-          const role = s.agentRole ? `; sub-agente sugerido: ${s.agentRole}` : '';
-          const reason = s.reason ? `; ${s.reason}` : '';
-          const prov = s.isProvisional ? ' [provisional, no verificada aún]' : '';
-          return `- ${s.slug} [${s.source ?? 'unknown'}, ${mode}${prov}${role}${reason}]: ${s.description}`;
-        }),
-      );
-      const roles = extras.skills
-        .filter((s) => s.agentRole && s.useMode !== 'run')
-        .slice(0, 3)
-        .map((s) => `${s.slug}→${s.agentRole}`)
-        .join(', ');
-      if (roles) blocks.push(`DISTRIBUCIÓN SUGERIDA: si delegas, divide por especialidad (${roles}). No delegues todo el objetivo completo.`);
-      if (extras.skills.some((s) => s.useMode === 'run')) {
-        blocks.push('Las skills ejecutables son código ya probado: usa skill_run solo para las marcadas como "ejecutable con skill_run".');
+      blocks.push('', 'CATÁLOGO INTELIGENTE DE SKILLS (relevantes para este objetivo):');
+      const executableSkills = extras.skills.filter((s) => s.useMode === 'run');
+      const guideSkills = extras.skills.filter((s) => s.useMode !== 'run');
+
+      if (executableSkills.length > 0) {
+        blocks.push(
+          '',
+          'SKILLS EJECUTABLES (código ya verificado — relevantes para este objetivo):',
+          ...executableSkills.map((s) => {
+            const prov = s.isProvisional ? ' [provisional]' : '';
+            const reason = s.reason ? `; ${s.reason}` : '';
+            return `- ${s.slug}${prov}${reason}: ${s.description}`;
+          }),
+          'Usa skill_run{"slug":"..."} para ejecutarlas directamente.',
+        );
       }
-      if (extras.skills.some((s) => s.useMode !== 'run')) {
-        blocks.push('Las skills guía NO se ejecutan con skill_run: úsalas para elegir enfoque, pruebas, revisión o rol del sub-agente.');
+      if (guideSkills.length > 0) {
+        blocks.push(
+          '',
+          'SKILLS GUÍA (carga con skill_view para ver instrucciones completas):',
+          ...guideSkills.map((s) => {
+            const role = s.agentRole ? `; sub-agente: ${s.agentRole}` : '';
+            return `- ${s.slug}${role}: ${s.description}`;
+          }),
+        );
+        const roles = guideSkills
+          .filter((s) => s.agentRole)
+          .slice(0, 3)
+          .map((s) => `${s.slug}→${s.agentRole}`)
+          .join(', ');
+        if (roles) blocks.push(`DISTRIBUCIÓN SUGERIDA: si delegas, divide por especialidad (${roles}).`);
       }
     }
     if (extras.secretAliases.length > 0) {
@@ -681,7 +716,8 @@ export class AgentLoopService {
       ...(has('delegate')
         ? ['- Objetivos complejos (varias partes, código + datos externos): delega primero a "planeador" para descomponer, ejecuta las subpartes con "investigador"/"programador", y si generaste código sensible o acciones con riesgo, valida con "seguridad" antes del final_answer. Cada sub-agente recibe tus hallazgos previos.']
         : []),
-      '- Antes de resolver desde cero, revisa memory_recall y el CATÁLOGO INTELIGENTE DE SKILLS.',
+      '- Antes de resolver desde cero, revisa el índice de skills del prompt (## Skills). Si alguna aplica, cárgala con skill_view{"slug":"..."} y sigue sus instrucciones.',
+      '- Tras una tarea compleja (≥5 pasos de herramientas) o un fix difícil, guarda el enfoque como skill con skill_manage{"action":"create",...}. Si una skill que cargaste estaba desactualizada, corrígela con skill_manage{"action":"patch",...}.',
       '- Para código: divide en pasos pequeños (inspeccionar→preparar→ejecutar→verificar). Los archivos en /work persisten entre pasos de esta tarea.',
       ...(has('code_execute') && has('telegram_send_file')
         ? ['- Para descargar medios/videos (YouTube, Platzi, etc.): el sandbox tiene preinstalado y listo para usar yt-dlp y ffmpeg. Escribe código de Python o Bash que use yt-dlp directamente para descargar el video/audio a /work. IMPORTANTE: Para que yt-dlp funcione y tenga acceso a internet, debes pasar el argumento "network": true al llamar a code_execute. Luego usa telegram_send_file para enviarlo. Evita clonar repositorios externos o instalar paquetes pesados.']
@@ -1208,6 +1244,141 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
             language, skill_slug: result.slug, origin: 'agent-loop',
           });
           return `Skill "${result.slug}" v${result.version} guardada (y como artifact). Reutilízala con skill_run{"slug":"${result.slug}"}.`;
+        },
+      },
+      {
+        name: 'skill_view',
+        usage: 'skill_view{"slug","file_path"?}: carga el contenido completo de una skill (SKILL.md) o un archivo de soporte (references/api.md, templates/config.yaml, scripts/check.sh). Usa cuando el índice de skills indica que una es relevante.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            slug: { type: 'string', description: 'Slug de la skill a cargar.' },
+            file_path: { type: 'string', description: 'Ruta de archivo de soporte opcional: "references/api.md", "templates/config.yaml", etc.' },
+          },
+          required: ['slug'],
+        },
+        execute: async (orgId, _taskId, args) => {
+          const slug = String(args.slug ?? '').trim();
+          if (!slug) return 'ERROR: skill_view requiere args.slug';
+          const filePath = args.file_path ? String(args.file_path).trim() : undefined;
+
+          if (filePath) {
+            const content = await this.skillDocs.viewSkillFile(orgId, slug, filePath);
+            if (!content) return `ERROR: Archivo '${filePath}' no encontrado en skill '${slug}'.`;
+            return `[${slug}/${filePath}]\n\n${content}`;
+          }
+
+          const skill = await this.skillDocs.viewSkill(orgId, slug);
+          if (!skill) return `ERROR: Skill '${slug}' no encontrada. Usa skill_manage(action="list") o revisa el índice de skills.`;
+
+          const parts: string[] = [
+            `[Skill: ${skill.display_name} (${slug})]`,
+            skill.description,
+            '',
+            skill.content_md ?? '(sin contenido — usa skill_manage para añadir instrucciones)',
+          ];
+
+          if (skill.files.length > 0) {
+            parts.push('', '[Archivos de soporte:]');
+            for (const f of skill.files) {
+              parts.push(`  - ${f.path}  →  skill_view{"slug":"${slug}","file_path":"${f.path}"}`);
+            }
+            parts.push('Carga cualquiera con skill_view(slug, file_path="...").');
+          }
+
+          return parts.join('\n');
+        },
+      },
+      {
+        name: 'skill_manage',
+        usage: 'skill_manage{"action":"create|patch|edit|write_file|remove_file|delete","slug","content_md"?,...}: gestiona skills como memoria procedimental. create=nueva skill, patch=find&replace, edit=reescribir, write_file=guardar archivo de soporte, delete=archivar.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            action: {
+              type: 'string',
+              enum: ['create', 'patch', 'edit', 'write_file', 'remove_file', 'delete'],
+              description: 'Acción a realizar.',
+            },
+            slug: { type: 'string', description: 'Slug de la skill (lowercase, guiones).' },
+            display_name: { type: 'string', description: 'Nombre legible (solo para create).' },
+            description: { type: 'string', description: 'Descripción corta ≤120 chars (solo para create).' },
+            category: { type: 'string', description: 'Categoría slug, ej: "coding", "research", "workflow".' },
+            content_md: { type: 'string', description: 'Contenido Markdown de SKILL.md (para create/edit).' },
+            patch_find: { type: 'string', description: 'Texto exacto a buscar (solo para patch).' },
+            patch_replace: { type: 'string', description: 'Texto de reemplazo (solo para patch).' },
+            file_path: { type: 'string', description: 'Ruta del archivo de soporte, ej: "references/api.md" (para write_file/remove_file/patch).' },
+            file_content: { type: 'string', description: 'Contenido del archivo de soporte (para write_file).' },
+          },
+          required: ['action', 'slug'],
+        },
+        execute: async (orgId, _taskId, args) => {
+          const action = String(args.action ?? '').trim();
+          const slug = String(args.slug ?? '').trim();
+          if (!action || !slug) return 'ERROR: skill_manage requiere args.action y args.slug';
+
+          let result;
+          switch (action) {
+            case 'create': {
+              const contentMd = String(args.content_md ?? '').trim();
+              if (!contentMd) return 'ERROR: skill_manage create requiere args.content_md';
+              result = await this.skillDocs.createSkill(orgId, {
+                slug,
+                displayName: String(args.display_name ?? slug),
+                description: String(args.description ?? '').slice(0, 500),
+                category: args.category ? String(args.category) : undefined,
+                contentMd,
+                origin: 'agent-loop',
+              });
+              break;
+            }
+            case 'edit': {
+              const contentMd = String(args.content_md ?? '').trim();
+              if (!contentMd) return 'ERROR: skill_manage edit requiere args.content_md';
+              result = await this.skillDocs.editSkill(orgId, slug, contentMd);
+              break;
+            }
+            case 'patch': {
+              const find = String(args.patch_find ?? '').trim();
+              const replace = String(args.patch_replace ?? '');
+              if (!find) return 'ERROR: skill_manage patch requiere args.patch_find';
+              result = await this.skillDocs.patchSkill(orgId, {
+                slug,
+                find,
+                replace,
+                filePath: args.file_path ? String(args.file_path) : undefined,
+              });
+              break;
+            }
+            case 'write_file': {
+              const filePath = String(args.file_path ?? '').trim();
+              const fileContent = String(args.file_content ?? '').trim();
+              if (!filePath || !fileContent) return 'ERROR: skill_manage write_file requiere args.file_path y args.file_content';
+              const parts = filePath.split('/');
+              if (parts.length !== 2) return 'ERROR: file_path debe ser "subdir/filename", ej: "references/api.md"';
+              const [subdir, filename] = parts;
+              const validSubdirs = ['references', 'templates', 'scripts', 'assets'];
+              if (!validSubdirs.includes(subdir)) return `ERROR: subdir debe ser uno de: ${validSubdirs.join(', ')}`;
+              result = await this.skillDocs.writeSkillFile(orgId, {
+                slug, subdir: subdir as 'references' | 'templates' | 'scripts' | 'assets', filename, content: fileContent,
+              });
+              break;
+            }
+            case 'remove_file': {
+              const filePath = String(args.file_path ?? '').trim();
+              if (!filePath) return 'ERROR: skill_manage remove_file requiere args.file_path';
+              result = await this.skillDocs.removeSkillFile(orgId, slug, filePath);
+              break;
+            }
+            case 'delete':
+              result = await this.skillDocs.deleteSkill(orgId, slug);
+              break;
+            default:
+              return `ERROR: action desconocida "${action}". Usa: create, patch, edit, write_file, remove_file, delete.`;
+          }
+
+          if (!result.ok) return `ERROR: ${result.error}`;
+          return result.message;
         },
       },
       {
@@ -2023,9 +2194,10 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
   // ── extras (skills + secrets, solo raíz) ──────────────────────────────────
 
   private async resolveExtras(orgId: string, goal: string): Promise<LoopExtras> {
-    const [skills, secretAliases] = await Promise.all([
+    const [skills, secretAliases, skillsIndexBlock] = await Promise.all([
       this.skillLibrary.findRelevant(orgId, goal).catch(() => []),
       this.listSecretAliases(orgId),
+      this.skillDocs.getSkillIndexBlock(orgId).catch(() => ''),
     ]);
     return {
       skills: skills.map((s) => ({
@@ -2042,6 +2214,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
         isProvisional: s.isProvisional,
       })),
       secretAliases,
+      skillsIndexBlock,
     };
   }
 

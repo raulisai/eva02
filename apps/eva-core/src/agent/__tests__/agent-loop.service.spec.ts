@@ -19,6 +19,7 @@ import { WhatsAppWebService } from '../../integrations/whatsapp-web.service';
 import { UberWebService } from '../../integrations/uber-web.service';
 import { RappiWebService } from '../../integrations/rappi-web.service';
 import { ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
+import { SkillDocsService } from '../skill-docs.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -158,6 +159,21 @@ describe('AgentLoopService', () => {
             register: jest.fn().mockResolvedValue({ ok: true, slug: 'mi-skill', version: '1.0.0' }),
             recordOutcome: jest.fn().mockResolvedValue(undefined),
             beginSelection: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        {
+          provide: SkillDocsService,
+          useValue: {
+            getSkillIndexBlock: jest.fn().mockResolvedValue(''),
+            getSkillIndex: jest.fn().mockResolvedValue([]),
+            viewSkill: jest.fn().mockResolvedValue(null),
+            viewSkillFile: jest.fn().mockResolvedValue(null),
+            createSkill: jest.fn().mockResolvedValue({ ok: true, slug: 'test', action: 'create', message: 'ok' }),
+            editSkill: jest.fn().mockResolvedValue({ ok: true, slug: 'test', action: 'edit', message: 'ok' }),
+            patchSkill: jest.fn().mockResolvedValue({ ok: true, slug: 'test', action: 'patch', message: 'ok' }),
+            writeSkillFile: jest.fn().mockResolvedValue({ ok: true, slug: 'test', action: 'write_file', message: 'ok' }),
+            removeSkillFile: jest.fn().mockResolvedValue({ ok: true, slug: 'test', action: 'remove_file', message: 'ok' }),
+            deleteSkill: jest.fn().mockResolvedValue({ ok: true, slug: 'test', action: 'delete', message: 'ok' }),
           },
         },
         {
