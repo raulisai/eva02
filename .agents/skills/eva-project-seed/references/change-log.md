@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 01:33Z
+C: agent,communication: parallel pipeline waves + startup input resume + Telegram inline approval buttons; files=apps/eva-core/src/agent/pipeline-runner.service.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/communication/telegram.adapter.ts,apps/eva-core/src/communication/communication.service.ts,apps/eva-core/src/communication/communication.types.ts,docs/backlog.md; tests=npm test (524 passed)
+P: pending/improve -> Phase Retry, Pipeline Progress in UI, Evidence Follow-up Window, Large Media Compression
+
 ### 2026-06-13 01:00Z
 C: approvals-ux: human approval messages (no hash/screenshot), notify flag to dedupe channel notifications, broader si/no keywords, evidence-on-demand screenshots via agent/evidence.ts, long-task ack before context load; files=apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/evidence.ts,apps/eva-core/src/approvals/approvals.service.ts,apps/eva-core/src/approvals/dto/request-approval.dto.ts,apps/eva-core/src/communication/communication.service.ts,docs/process_flows.md,docs/backlog.md; tests=npm test (510 passed)
 P: pending/improve -> Telegram inline approval buttons (callback_query); evidence follow-up after execution

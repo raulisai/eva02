@@ -146,79 +146,102 @@ export class PipelineRunnerService {
 
     await this.savePipelineMetadata(orgId, taskId, pipeline, phaseResults);
 
-    // ── 2. Phase execution loop ──────────────────────────────────────────────
+    // ── 2. Phase execution — wave-based parallel execution ──────────────────
+    // Phases in the same wave (same dependency depth) run concurrently.
+    // Phases with dependsOn execute only after all their dependencies complete.
     try {
-      for (let i = 0; i < pipeline.phases.length; i++) {
-        const phase = pipeline.phases[i];
-        const result = phaseResults[i];
-
-        // Skip if a dependency failed or was skipped
-        const blockedBy = phase.dependsOn.filter((dep) => {
-          const depR = phaseResults.find((r) => r.name === dep);
-          return !depR || depR.status !== 'completed';
-        });
-        if (blockedBy.length > 0) {
-          result.status = 'skipped';
-          result.error = `Dependencias no completadas: ${blockedBy.join(', ')}`;
-          await log(`⏭ Fase "${phase.name}" omitida — ${result.error}`, 'pipeline');
-          continue;
-        }
-
-        result.status = 'running';
-        await log(`▶ Fase ${i + 1}/${pipeline.phases.length}: "${phase.name}"`, 'pipeline-phase');
-        await this.savePipelineMetadata(orgId, taskId, pipeline, phaseResults, i);
-
-        // Interpolate {{outputKey}} references in this phase's goal
-        const interpolatedGoal = this.interpolate(phase.goal, pipelineCtx);
-
-        // Build per-phase context: outer context + outputs from completed phases
-        const contextParts: string[] = [];
-        if (opts.context) contextParts.push(opts.context);
-        if (Object.keys(pipelineCtx).length > 0) {
-          contextParts.push('[PIPELINE — salidas de fases anteriores]');
-          for (const [key, val] of Object.entries(pipelineCtx)) {
-            const excerpt = val.length > PHASE_CTX_LIMIT ? val.slice(0, PHASE_CTX_LIMIT) + '…' : val;
-            contextParts.push(`${key}:\n${excerpt}`);
-          }
-        }
-        const phaseContext = contextParts.length > 0 ? contextParts.join('\n\n') : undefined;
-
-        const phaseStart = Date.now();
-        try {
-          const outcome = await this.agentLoop.run(orgId, taskId, interpolatedGoal, {
-            maxSteps: phase.maxSteps,
-            context: phaseContext,
-            userId: opts.userId,
-            log,
+      let wave = 0;
+      while (phaseResults.some((r) => r.status === 'pending')) {
+        // Collect all phases that are ready to run (all deps completed)
+        const ready = pipeline.phases.filter((phase, i) => {
+          if (phaseResults[i].status !== 'pending') return false;
+          return phase.dependsOn.every((dep) => {
+            const depR = phaseResults.find((r) => r.name === dep);
+            return depR?.status === 'completed';
           });
+        });
 
-          result.durationMs = Date.now() - phaseStart;
-          result.stepsUsed = outcome.steps.length;
-          result.tokensUsed = outcome.tokensUsed;
-          totalTokens += outcome.tokensUsed;
-          totalSteps += outcome.steps.length;
-
-          if (outcome.ok && outcome.text) {
-            result.status = 'completed';
-            result.output = outcome.text;
-            pipelineCtx[phase.outputKey] = outcome.text;
-            await log(
-              `✓ "${phase.name}" completada — ${outcome.steps.length} pasos, ${outcome.tokensUsed} tokens, ${(result.durationMs / 1000).toFixed(1)}s`,
-              'pipeline-phase',
-            );
-          } else {
-            result.status = 'failed';
-            result.error = outcome.text || 'La fase no produjo resultado';
-            await log(`✗ "${phase.name}" falló: ${result.error.slice(0, 200)}`, 'pipeline-phase');
+        // If nothing is ready but pending phases remain, deps failed → skip them
+        if (ready.length === 0) {
+          for (let i = 0; i < pipeline.phases.length; i++) {
+            if (phaseResults[i].status !== 'pending') continue;
+            const phase = pipeline.phases[i];
+            const blockedBy = phase.dependsOn.filter((dep) => {
+              const depR = phaseResults.find((r) => r.name === dep);
+              return !depR || depR.status !== 'completed';
+            });
+            phaseResults[i].status = 'skipped';
+            phaseResults[i].error = `Dependencias no completadas: ${blockedBy.join(', ')}`;
+            await log(`⏭ Fase "${phase.name}" omitida — ${phaseResults[i].error}`, 'pipeline');
           }
-        } catch (err) {
-          result.status = 'failed';
-          result.error = (err as Error).message;
-          result.durationMs = Date.now() - phaseStart;
-          await log(`✗ "${phase.name}" error: ${result.error.slice(0, 200)}`, 'pipeline-phase');
+          break;
         }
 
-        await this.savePipelineMetadata(orgId, taskId, pipeline, phaseResults, i + 1);
+        wave++;
+        if (ready.length > 1) {
+          await log(`▶ Wave ${wave}: ${ready.map((p) => `"${p.name}"`).join(', ')} (paralelo)`, 'pipeline-phase');
+        }
+
+        await Promise.all(ready.map(async (phase) => {
+          const i = pipeline.phases.indexOf(phase);
+          const result = phaseResults[i];
+
+          result.status = 'running';
+          if (ready.length === 1) {
+            await log(`▶ Fase ${i + 1}/${pipeline.phases.length}: "${phase.name}"`, 'pipeline-phase');
+          }
+          await this.savePipelineMetadata(orgId, taskId, pipeline, phaseResults, i);
+
+          const interpolatedGoal = this.interpolate(phase.goal, pipelineCtx);
+
+          const contextParts: string[] = [];
+          if (opts.context) contextParts.push(opts.context);
+          if (Object.keys(pipelineCtx).length > 0) {
+            contextParts.push('[PIPELINE — salidas de fases anteriores]');
+            for (const [key, val] of Object.entries(pipelineCtx)) {
+              const excerpt = val.length > PHASE_CTX_LIMIT ? val.slice(0, PHASE_CTX_LIMIT) + '…' : val;
+              contextParts.push(`${key}:\n${excerpt}`);
+            }
+          }
+          const phaseContext = contextParts.length > 0 ? contextParts.join('\n\n') : undefined;
+
+          const phaseStart = Date.now();
+          try {
+            const outcome = await this.agentLoop.run(orgId, taskId, interpolatedGoal, {
+              maxSteps: phase.maxSteps,
+              context: phaseContext,
+              userId: opts.userId,
+              log,
+            });
+
+            result.durationMs = Date.now() - phaseStart;
+            result.stepsUsed = outcome.steps.length;
+            result.tokensUsed = outcome.tokensUsed;
+            totalTokens += outcome.tokensUsed;
+            totalSteps += outcome.steps.length;
+
+            if (outcome.ok && outcome.text) {
+              result.status = 'completed';
+              result.output = outcome.text;
+              pipelineCtx[phase.outputKey] = outcome.text;
+              await log(
+                `✓ "${phase.name}" completada — ${outcome.steps.length} pasos, ${outcome.tokensUsed} tokens, ${(result.durationMs / 1000).toFixed(1)}s`,
+                'pipeline-phase',
+              );
+            } else {
+              result.status = 'failed';
+              result.error = outcome.text || 'La fase no produjo resultado';
+              await log(`✗ "${phase.name}" falló: ${result.error.slice(0, 200)}`, 'pipeline-phase');
+            }
+          } catch (err) {
+            result.status = 'failed';
+            result.error = (err as Error).message;
+            result.durationMs = Date.now() - phaseStart;
+            await log(`✗ "${phase.name}" error: ${result.error.slice(0, 200)}`, 'pipeline-phase');
+          }
+
+          await this.savePipelineMetadata(orgId, taskId, pipeline, phaseResults, i + 1);
+        }));
       }
     } finally {
       // Release shared sandbox workspace after all phases finish

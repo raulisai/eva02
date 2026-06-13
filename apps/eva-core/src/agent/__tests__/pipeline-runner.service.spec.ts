@@ -188,6 +188,31 @@ describe('PipelineRunnerService', () => {
       expect(outcome.phases[2].status).toBe('skipped');
     });
 
+    it('runs independent phases concurrently (parallel wave)', async () => {
+      const parallelDef = {
+        phases: [
+          { name: 'buscar_datos', goal: 'Buscar datos de ventas', outputKey: 'ventas', dependsOn: [], maxSteps: 3 },
+          { name: 'buscar_costos', goal: 'Buscar datos de costos', outputKey: 'costos', dependsOn: [], maxSteps: 3 },
+          { name: 'consolidar', goal: 'Consolidar {{ventas}} y {{costos}}', outputKey: 'result', dependsOn: ['buscar_datos', 'buscar_costos'], maxSteps: 4 },
+        ],
+      };
+      modelRouter.generate.mockResolvedValue({ text: JSON.stringify(parallelDef), model: 'stub', backend: 'google', usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 } });
+
+      const callOrder: string[] = [];
+      agentLoop.run.mockImplementation(async (_org, _task, goal) => {
+        callOrder.push(goal.slice(0, 15));
+        return { ok: true, text: `resultado: ${goal.slice(0, 20)}`, steps: [], tokensUsed: 50, toolsUsed: [] };
+      });
+
+      const outcome = await service.run(ORG, TASK, 'Busca datos y consolídalos');
+      expect(outcome.ok).toBe(true);
+      expect(outcome.phases).toHaveLength(3);
+      expect(outcome.phases.every((p) => p.status === 'completed')).toBe(true);
+      // Consolidar must run after both search phases
+      expect(callOrder[2]).toContain('Consolidar');
+      expect(agentLoop.run).toHaveBeenCalledTimes(3);
+    });
+
     it('releases sandbox after all phases finish', async () => {
       const module = await makeModule();
       const svc = module.get(PipelineRunnerService);

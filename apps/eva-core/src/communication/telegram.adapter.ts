@@ -49,6 +49,50 @@ export class TelegramAdapter {
     return { ok: true, externalMessageId: body.result?.message_id ? String(body.result.message_id) : null };
   }
 
+  async sendMessageWithInlineKeyboard(
+    target: Record<string, unknown>,
+    text: string,
+    buttons: Array<{ text: string; callbackData: string }>,
+    token?: string | null,
+  ): Promise<ChannelSendResult> {
+    const chatId = String(target['chat_id'] ?? '');
+    if (!chatId) return { ok: false, error: 'Missing Telegram chat_id' };
+
+    const botToken = token ?? this.envToken;
+    if (!botToken) return { ok: true, skipped: true, externalMessageId: null };
+
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [buttons.map((b) => ({ text: b.text, callback_data: b.callbackData }))],
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      return { ok: false, error: await response.text() };
+    }
+
+    const body = (await response.json()) as { result?: { message_id?: number } };
+    return { ok: true, externalMessageId: body.result?.message_id ? String(body.result.message_id) : null };
+  }
+
+  async answerCallbackQuery(callbackQueryId: string, text?: string, token?: string | null): Promise<void> {
+    const botToken = token ?? this.envToken;
+    if (!botToken) return;
+    await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackQueryId, text: text ?? '', show_alert: false }),
+    }).catch(() => undefined);
+  }
+
   async sendPhoto(
     target: Record<string, unknown>,
     photoUrl: string,

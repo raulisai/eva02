@@ -311,8 +311,9 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
   /**
    * On startup: re-queue tasks stuck in `pending` (Redis event was lost during
-   * a crash/restart) and fail tasks stuck in `planning` or `running` (process
-   * died mid-execution).
+   * a crash/restart), fail tasks stuck in `planning` or `running` (process died
+   * mid-execution), and expire timed-out `waiting_for_input` tasks so conversations
+   * survive restarts.
    */
   private async recoverStuckTasks(): Promise<void> {
     const STUCK_PENDING_MS = 60_000;      // pending > 60s → re-fire task.created
@@ -321,7 +322,17 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       const stuck = await this.tasks.findStuck({ pendingOlderThanMs: STUCK_PENDING_MS, runningOlderThanMs: STUCK_RUNNING_MS });
       if (!stuck.length) return;
       this.logger.warn(`Found ${stuck.length} stuck task(s) — recovering`);
+
+      // Expire timed-out input requests org-by-org before processing waiting tasks.
+      const waitingOrgs = new Set(stuck.filter((t) => t.status === 'waiting_for_input').map((t) => t.org_id));
+      await Promise.allSettled([...waitingOrgs].map((orgId) => this.intelligence.expireTimedOutInputs(orgId)));
+
       for (const task of stuck) {
+        if (task.status === 'waiting_for_input') {
+          // expireTimedOutInputs already re-queued timed-out ones; leave valid ones alone.
+          this.logger.log(`waiting_for_input task ${task.id} handled by expireTimedOutInputs`);
+          continue;
+        }
         if (task.status === 'pending') {
           await this.events.publish({ type: 'task.created', orgId: task.org_id, taskId: task.id, payload: { taskId: task.id, title: task.title } });
           this.logger.log(`Re-queued stuck pending task ${task.id}: "${task.title}"`);

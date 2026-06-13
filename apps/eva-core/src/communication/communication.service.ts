@@ -118,6 +118,11 @@ export class CommunicationService implements OnApplicationBootstrap {
       throw new ForbiddenException('Telegram channel is disabled for this organization');
     }
 
+    // ── Inline keyboard callback (approval tap) ──────────────────────────────
+    if (update.callback_query) {
+      return this.handleApprovalCallback(orgId, update.callback_query, settings?.secret);
+    }
+
     const message = update.message;
     const text = this.telegramMessageText(message);
     const externalUserId = message?.from?.id ? String(message.from.id) : null;
@@ -276,13 +281,8 @@ export class CommunicationService implements OnApplicationBootstrap {
   }
 
   async sendApprovalRequest(approval: Approval, orgId: string) {
-    // Mensaje corto y humano: qué se va a ejecutar y cómo aprobarlo.
-    // Nada de hashes, niveles ni screenshots — la evidencia solo viaja si el
-    // usuario la pide después.
-    const text = [
-      `🛡️ Necesito tu aprobación para: ${this.describeApprovalAction(approval)}`,
-      'Responde "sí" para ejecutarlo o "no" para cancelar.',
-    ].join('\n\n');
+    const description = this.describeApprovalAction(approval);
+    const text = `🛡️ Necesito tu aprobación para: ${description}`;
 
     const account = approval.requested_by
       ? await this.findPreferredTelegramAccount(orgId, approval.requested_by)
@@ -294,19 +294,31 @@ export class CommunicationService implements OnApplicationBootstrap {
         userId: approval.requested_by,
         channel: 'dashboard',
         target: { route: '/approvals', approval_id: approval.id },
-        text,
+        text: `${text}\n\nResponde "sí" para ejecutarlo o "no" para cancelar.`,
         notificationType: 'approval.requested',
         payload: { approval_id: approval.id },
       });
     }
 
-    return this.sendMessage({
-      orgId,
-      userId: approval.requested_by,
-      channel: 'telegram',
-      target: { chat_id: account.external_chat_id },
+    const settings = await this.integrations.getChannelSettings(orgId, 'telegram');
+    await this.telegram.sendMessageWithInlineKeyboard(
+      { chat_id: account.external_chat_id },
       text,
+      [
+        { text: '✅ Aprobar', callbackData: `approval:approve:${approval.id}` },
+        { text: '❌ Cancelar', callbackData: `approval:reject:${approval.id}` },
+      ],
+      settings?.secret,
+    );
+
+    return this.repo.createNotification({
+      orgId,
+      channel: 'telegram',
       notificationType: 'approval.requested',
+      title: 'Aprobación enviada por Telegram',
+      body: text,
+      target: { chat_id: account.external_chat_id },
+      status: 'sent',
       payload: { approval_id: approval.id },
     });
   }
@@ -799,5 +811,73 @@ export class CommunicationService implements OnApplicationBootstrap {
     if (/wav/i.test(contentType)) return 'wav';
     if (/mpeg|mp3/i.test(contentType)) return 'mp3';
     return 'bin';
+  }
+
+  /**
+   * Handle an inline keyboard tap for approval resolution.
+   * callback_data format: "approval:approve|reject:<approval_id>"
+   * Uses DB directly to avoid circular dependency with ApprovalsService.
+   */
+  private async handleApprovalCallback(
+    orgId: string,
+    cbq: NonNullable<TelegramWebhookUpdate['callback_query']>,
+    botToken?: string | null,
+  ): Promise<{ ok: boolean; handled?: string }> {
+    const data = cbq.data ?? '';
+    const match = /^approval:(approve|reject):(.+)$/.exec(data);
+
+    if (!match) {
+      await this.telegram.answerCallbackQuery(cbq.id, undefined, botToken);
+      return { ok: true, handled: 'unknown_callback' };
+    }
+
+    const [, action, approvalId] = match;
+    const externalUserId = String(cbq.from.id);
+
+    // Resolve the EVA user from their Telegram ID
+    const account = await this.repo.findAccount({ orgId, channel: 'telegram', externalUserId });
+    const userId = account?.user_id;
+
+    const { data: approval, error } = await this.db.admin
+      .from('approvals')
+      .select('*')
+      .eq('org_id', orgId)
+      .eq('id', approvalId)
+      .eq('status', 'pending')
+      .single();
+
+    if (error || !approval) {
+      await this.telegram.answerCallbackQuery(cbq.id, '⚠️ Esta aprobación ya no está activa.', botToken);
+      return { ok: false, handled: 'approval_not_found' };
+    }
+
+    const newStatus = action === 'approve' ? 'approved' : 'rejected';
+    await this.db.admin
+      .from('approvals')
+      .update({
+        status: newStatus,
+        reviewed_by: userId ?? null,
+        reviewed_at: new Date().toISOString(),
+        ...(action === 'reject' ? { summary: 'Cancelado desde Telegram' } : {}),
+      })
+      .eq('org_id', orgId)
+      .eq('id', approvalId);
+
+    await this.events.publish({
+      type: 'approval.resolved',
+      orgId,
+      taskId: (approval as Record<string, unknown>)['task_id'] as string | undefined,
+      payload: { approvalId, status: newStatus },
+    });
+
+    const ackText = action === 'approve' ? '✅ Aprobado — ejecutando acción.' : '❌ Cancelado.';
+    await this.telegram.answerCallbackQuery(cbq.id, ackText, botToken);
+
+    const chatId = cbq.message?.chat?.id ? String(cbq.message.chat.id) : null;
+    if (chatId) {
+      await this.telegram.sendMessage({ chat_id: chatId }, ackText, botToken);
+    }
+
+    return { ok: true, handled: newStatus };
   }
 }
