@@ -60,22 +60,25 @@ export class ModelRouterService {
 
   // ── rate-limit retry helper ───────────────────────────────────────────────
 
-  /** Waits the delay indicated in a 429 response body, then re-runs fn once. */
+  /** Retries up to 3 attempts on 429 with exponential backoff (1×, 2×, 4× the API-suggested delay). */
   private async withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
-    try {
-      return await fn();
-    } catch (err) {
-      const msg = (err as Error).message ?? '';
-      if (!msg.includes('429')) throw err;
-      // Parse "try again in X.XXXs" from OpenAI / Claude error text
-      const secondsMatch = msg.match(/try again in (\d+\.?\d*)s/i);
-      const waitMs = secondsMatch
-        ? Math.ceil(parseFloat(secondsMatch[1]) * 1000) + 500
-        : 8000;
-      this.logger.warn(`Rate limit hit — retrying in ${waitMs}ms`);
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-      return fn();
+    const MAX_ATTEMPTS = 3;
+    let lastError: Error = new Error('unknown');
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastError = err as Error;
+        const msg = lastError.message ?? '';
+        if (!msg.includes('429')) throw lastError; // non-rate-limit: rethrow immediately
+        const secondsMatch = msg.match(/try again in (\d+\.?\d*)s/i);
+        const baseMs = secondsMatch ? Math.ceil(parseFloat(secondsMatch[1]) * 1000) + 500 : 8000;
+        const waitMs = baseMs * Math.pow(2, attempt); // 1×, 2×, 4×
+        this.logger.warn(`Rate limit (attempt ${attempt + 1}/${MAX_ATTEMPTS}) — retrying in ${waitMs}ms`);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
     }
+    throw lastError;
   }
 
   // ── generate ──────────────────────────────────────────────────────────────

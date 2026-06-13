@@ -209,4 +209,113 @@ describe('AgentIntelligenceService', () => {
     expect(model.generate).toHaveBeenCalled();
     expect(review).toEqual({ ok: true, text: 'seguro' });
   });
+
+  describe('prepareExecution', () => {
+    const validPlanJson = JSON.stringify({
+      objective: 'Investigar y generar PDF',
+      phases: [
+        {
+          id: 'phase_1',
+          name: 'Investigación',
+          description: 'Buscar información en web',
+          tools: ['web_search'],
+          skills: [],
+          scratchpadKey: 'phase:phase_1',
+          estimatedSteps: 3,
+        },
+        {
+          id: 'phase_2',
+          name: 'Generación PDF',
+          description: 'Crear PDF con reportlab',
+          tools: ['code_execute'],
+          skills: [],
+          scratchpadKey: 'phase:phase_2',
+          estimatedSteps: 2,
+        },
+      ],
+      requiredTools: ['web_search', 'code_execute'],
+      requiredSkills: [],
+      estimatedTotalSteps: 5,
+      notes: 'Requiere sandbox con reportlab',
+    });
+
+    it('returns a verified plan with executionBrief when model responds with valid JSON', async () => {
+      model.generate.mockResolvedValueOnce({ text: validPlanJson, model: 'gpt-4', backend: 'openai' as any, usage: { promptTokens: 300, completionTokens: 100, totalTokens: 400 } });
+
+      const result = await service.prepareExecution(
+        ORG, TASK, 'Investiga empresas tech y genera PDF',
+        ['web_search', 'code_execute', 'telegram_send_file'],
+        [],
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.plan.phases).toHaveLength(2);
+      expect(result!.missingTools).toEqual([]);
+      expect(result!.canProceed).toBe(true);
+      expect(result!.executionBrief).toContain('PLAN DE EJECUCIÓN VERIFICADO');
+      expect(result!.executionBrief).toContain('Investigación');
+      expect(result!.executionBrief).toContain('scratchpad["phase:phase_1"]');
+    });
+
+    it('detects missing tools and includes gap warnings in executionBrief', async () => {
+      const planWithMissingTool = JSON.stringify({
+        ...JSON.parse(validPlanJson),
+        requiredTools: ['web_search', 'code_execute', 'gmail_read'],
+        phases: [
+          ...JSON.parse(validPlanJson).phases,
+          {
+            id: 'phase_3',
+            name: 'Email',
+            description: 'Leer email',
+            tools: ['gmail_read'],
+            skills: [],
+            scratchpadKey: 'phase:phase_3',
+            estimatedSteps: 1,
+          },
+        ],
+      });
+      model.generate.mockResolvedValueOnce({ text: planWithMissingTool, model: 'gpt-4', backend: 'openai' as any, usage: { promptTokens: 300, completionTokens: 100, totalTokens: 400 } });
+
+      const result = await service.prepareExecution(
+        ORG, TASK, 'Investiga y lee emails',
+        ['web_search', 'code_execute'],
+        [],
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.missingTools).toContain('gmail_read');
+      expect(result!.canProceed).toBe(false);
+      expect(result!.executionBrief).toContain('⚠️ Tools no disponibles: gmail_read');
+    });
+
+    it('returns null when model returns invalid JSON', async () => {
+      model.generate.mockResolvedValueOnce({ text: 'no es JSON', model: 'gpt-4', backend: 'openai' as any, usage: { promptTokens: 10, completionTokens: 0, totalTokens: 10 } });
+
+      const result = await service.prepareExecution(ORG, TASK, 'tarea', [], []);
+
+      expect(result).toBeNull();
+    });
+
+    it('returns null when model returns JSON without phases', async () => {
+      model.generate.mockResolvedValueOnce({
+        text: JSON.stringify({ objective: 'algo', phases: [] }),
+        model: 'gpt-4', backend: 'openai' as any, usage: { promptTokens: 20, completionTokens: 0, totalTokens: 20 },
+      });
+
+      const result = await service.prepareExecution(ORG, TASK, 'tarea', [], []);
+
+      expect(result).toBeNull();
+    });
+
+    it('uses powerful budget for the planning request', async () => {
+      model.generate.mockResolvedValueOnce({ text: validPlanJson, model: 'gpt-4', backend: 'openai' as any, usage: { promptTokens: 300, completionTokens: 100, totalTokens: 400 } });
+
+      await service.prepareExecution(ORG, TASK, 'tarea larga', ['web_search'], []);
+
+      expect(model.generate).toHaveBeenCalledWith(
+        expect.stringContaining('planificador experto'),
+        expect.objectContaining({ budget: 'powerful' }),
+      );
+    });
+  });
 });

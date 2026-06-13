@@ -16,6 +16,38 @@ export interface AgentPlanItem {
   owner?: 'eva' | 'user';
 }
 
+/** One execution phase produced by the powerful-model pre-planner. */
+export interface TaskPhase {
+  id: string;
+  name: string;
+  description: string;
+  tools: string[];
+  skills: string[];
+  /** Scratchpad key where this phase should save its output. */
+  scratchpadKey: string;
+  estimatedSteps: number;
+}
+
+export interface DetailedTaskPlan {
+  objective: string;
+  phases: TaskPhase[];
+  requiredTools: string[];
+  requiredSkills: string[];
+  estimatedTotalSteps: number;
+  notes: string;
+}
+
+export interface PlanCapabilityCheck {
+  plan: DetailedTaskPlan;
+  availableTools: string[];
+  missingTools: string[];
+  availableSkills: string[];
+  missingSkills: string[];
+  canProceed: boolean;
+  /** Compact text block injected into the agent loop's system prompt for the execution phase. */
+  executionBrief: string;
+}
+
 /** Persisted when a task fails — used by the retry handler to inject context into the next run. */
 export interface RetryContext {
   goal: string;
@@ -219,6 +251,133 @@ export class AgentIntelligenceService implements OnApplicationBootstrap {
       { id: 'p2', text: 'Ejecutar la herramienta o verificación principal', status: 'pending' },
       { id: 'p3', text: 'Verificar resultado y responder con estado real', status: 'pending' },
     ];
+  }
+
+  /**
+   * Pre-execution pipeline for long/complex tasks:
+   * 1. Generates a detailed multi-phase plan using the `powerful` model.
+   * 2. Verifies which required tools and skills are actually available.
+   * 3. Returns a `PlanCapabilityCheck` with the verified plan + an executionBrief
+   *    ready to be injected into the agent loop's system prompt.
+   *
+   * Only called when maxSteps >= 10 (long tasks). Falls back to null on any error
+   * so the loop can continue with the simpler createInitialPlan.
+   */
+  async prepareExecution(
+    orgId: string,
+    taskId: string,
+    goal: string,
+    availableToolNames: string[],
+    availableSkillSlugs: string[],
+  ): Promise<PlanCapabilityCheck | null> {
+    const toolList = availableToolNames.join(', ');
+    const skillList = availableSkillSlugs.length > 0 ? availableSkillSlugs.join(', ') : 'ninguna';
+
+    const planPrompt = `Eres un planificador experto para un agente de IA. Tu tarea es crear un plan de ejecución detallado y verificable para el siguiente objetivo.
+
+OBJETIVO: ${goal}
+
+HERRAMIENTAS DISPONIBLES: ${toolList}
+SKILLS DISPONIBLES: ${skillList}
+
+Genera un plan de ejecución en fases. Para cada fase especifica exactamente qué herramientas y skills necesita. Si el objetivo necesita algo que NO está en las listas de disponibles, inclúyelo igual en requiredTools/requiredSkills para que se detecte como gap.
+
+Responde ÚNICAMENTE con este JSON (sin markdown, sin texto extra):
+{
+  "objective": "<objetivo reformulado con claridad>",
+  "phases": [
+    {
+      "id": "phase_1",
+      "name": "<nombre corto>",
+      "description": "<qué se hace en esta fase>",
+      "tools": ["<tool_name>"],
+      "skills": ["<skill_slug>"],
+      "scratchpadKey": "phase:<id>",
+      "estimatedSteps": <número>
+    }
+  ],
+  "requiredTools": ["<todas las tools necesarias, de todas las fases>"],
+  "requiredSkills": ["<todos los skills necesarios>"],
+  "estimatedTotalSteps": <número>,
+  "notes": "<advertencias importantes o dependencias externas>"
+}`;
+
+    try {
+      const res = await this.modelRouter.generate(planPrompt, {
+        orgId,
+        taskId,
+        budget: 'powerful',
+        requestType: 'reasoning',
+        responseFormat: 'json',
+        maxTokens: 1200,
+        temperature: 0,
+      });
+
+      let plan: DetailedTaskPlan;
+      try {
+        plan = JSON.parse(res.text.trim()) as DetailedTaskPlan;
+        if (!plan.phases || !Array.isArray(plan.phases) || plan.phases.length === 0) {
+          throw new Error('invalid plan structure');
+        }
+      } catch {
+        this.logger.debug('prepareExecution: plan JSON unparseable, skipping');
+        return null;
+      }
+
+      // ── Capability check ──────────────────────────────────────────────────
+      const availableToolSet = new Set(availableToolNames);
+      const availableSkillSet = new Set(availableSkillSlugs);
+
+      const missingTools = (plan.requiredTools ?? []).filter((t) => !availableToolSet.has(t));
+      const missingSkills = (plan.requiredSkills ?? []).filter((s) => !availableSkillSet.has(s));
+      const canProceed = missingTools.length === 0 || missingTools.every((t) =>
+        // Tools that are "nice to have" but have alternatives still let us proceed
+        ['whatsapp_send', 'uber_quote', 'rappi_login'].includes(t),
+      );
+
+      // ── Execution brief (injected into system prompt) ────────────────────
+      const phaseSummary = plan.phases
+        .map((p, idx) =>
+          `  Fase ${idx + 1} — ${p.name} (≈${p.estimatedSteps} pasos): ${p.description}` +
+          `\n    Tools: ${p.tools.join(', ') || 'ninguna específica'}` +
+          `\n    Guarda en: scratchpad["${p.scratchpadKey}"]`,
+        )
+        .join('\n');
+
+      const gapLines = [
+        ...(missingTools.length > 0 ? [`⚠️ Tools no disponibles: ${missingTools.join(', ')} — adapta la fase que las usa`] : []),
+        ...(missingSkills.length > 0 ? [`⚠️ Skills no disponibles: ${missingSkills.join(', ')} — realiza esa lógica directamente con code_execute`] : []),
+      ].join('\n');
+
+      const executionBrief = [
+        'PLAN DE EJECUCIÓN VERIFICADO:',
+        `Objetivo: ${plan.objective}`,
+        'Fases:',
+        phaseSummary,
+        plan.notes ? `Notas: ${plan.notes}` : '',
+        gapLines,
+        'INSTRUCCIÓN: sigue las fases en orden. Guarda el output de cada fase en su scratchpad key antes de avanzar a la siguiente. No saltes fases. La síntesis final lee todos los scratchpad y genera el entregable.',
+      ].filter(Boolean).join('\n');
+
+      this.logger.log(
+        `prepareExecution: plan con ${plan.phases.length} fases, ` +
+        `${plan.estimatedTotalSteps} pasos estimados, ` +
+        `${missingTools.length} gaps de tools`,
+      );
+
+      return {
+        plan,
+        availableTools: availableToolNames,
+        missingTools,
+        availableSkills: availableSkillSlugs,
+        missingSkills,
+        canProceed,
+        executionBrief,
+      };
+    } catch (err) {
+      this.logger.debug(`prepareExecution failed: ${(err as Error).message}`);
+      return null;
+    }
   }
 
   updatePlanFromObservation(plan: AgentPlanItem[], observation: string): AgentPlanItem[] {
