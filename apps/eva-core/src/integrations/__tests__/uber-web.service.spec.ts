@@ -1,6 +1,7 @@
 import { UberWebService } from '../uber-web.service';
 import { BrowserService } from '../../browser/browser.service';
 import { GoogleWebLoginService } from '../google-web-login.service';
+import { SmartNavigatorService } from '../../browser/smart-navigator.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -283,6 +284,98 @@ describe('UberWebService', () => {
     expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, expect.stringContaining('password'), { timeout: 1500 });
     expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, 'mypassword', 80);
     expect(browser.updateSessionMetadata).toHaveBeenCalledWith(SESSION, ORG, expect.not.objectContaining({ temp_password: expect.any(String) }));
+  });
+
+  it('normalizes cmdx and cdmx typos to CDMX, México', () => {
+    expect(service.normalizeAddress('Roma Norte, cmdx')).toBe('Roma Norte, CDMX, México');
+    expect(service.normalizeAddress('Condesa, CDMX')).toBe('Condesa, CDMX, México');
+    expect(service.normalizeAddress('Aeropuerto CDMX T2')).toBe('Aeropuerto CDMX, México T2');
+    expect(service.normalizeAddress('Av. Reforma, cdmx, 06600')).toBe('Av. Reforma, CDMX, México, 06600');
+  });
+
+  it('requestRide selects ride type and clicks confirm via JS fast path', async () => {
+    browser.evaluate
+      // inspectPage initial
+      .mockResolvedValueOnce({
+        state: 'quote_ready',
+        googleLoginAvailable: false,
+        quoteCandidates: [{ label: 'UberX', price: '$180', raw_lines: ['UberX'] }],
+        textSample: 'UberX $180',
+        currentUrl: 'https://m.uber.com/looking',
+        title: 'Uber',
+      })
+      // resilientSelectRideType JS click
+      .mockResolvedValueOnce(true)
+      // resilientClickRequestRide JS click
+      .mockResolvedValueOnce(true)
+      // inspectPage final
+      .mockResolvedValueOnce({
+        state: 'logged_in',
+        googleLoginAvailable: false,
+        quoteCandidates: [],
+        textSample: 'Your driver is on the way',
+        currentUrl: 'https://m.uber.com/looking',
+        title: 'Uber',
+      });
+
+    const result = await service.requestRide(ORG, {
+      origin: 'Roma Norte',
+      destination: 'Aeropuerto',
+      rideType: 'UberX',
+      taskId: TASK,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBe('ordered');
+    expect(result.text).toContain('UberX');
+  });
+
+  it('requestRide falls back to SmartNavigator when JS does not find ride type', async () => {
+    const smartNav = {
+      available: true,
+      navigate: jest.fn().mockResolvedValue({ ok: true, reason: 'goal reached', steps: [] }),
+    } as unknown as jest.Mocked<SmartNavigatorService>;
+
+    const svc = new UberWebService(browser, googleWeb, smartNav);
+
+    browser.evaluate
+      // inspectPage initial
+      .mockResolvedValueOnce({
+        state: 'quote_ready',
+        googleLoginAvailable: false,
+        quoteCandidates: [{ label: 'UberX', price: '$180', raw_lines: ['UberX'] }],
+        textSample: 'UberX $180',
+        currentUrl: 'https://m.uber.com/looking',
+        title: 'Uber',
+      })
+      // resilientSelectRideType JS returns false (element not found)
+      .mockResolvedValueOnce(false)
+      // resilientClickRequestRide JS returns false
+      .mockResolvedValueOnce(false)
+      // inspectPage final
+      .mockResolvedValueOnce({
+        state: 'logged_in',
+        googleLoginAvailable: false,
+        quoteCandidates: [],
+        textSample: 'Your driver is on the way',
+        currentUrl: 'https://m.uber.com/looking',
+        title: 'Uber',
+      });
+
+    const result = await svc.requestRide(ORG, {
+      origin: 'Condesa, CDMX',
+      destination: 'Aeropuerto',
+      rideType: 'UberX',
+      taskId: TASK,
+    });
+
+    expect(smartNav.navigate).toHaveBeenCalledTimes(2);
+    expect(smartNav.navigate).toHaveBeenCalledWith(
+      ORG, SESSION,
+      expect.stringContaining('UberX'),
+      expect.objectContaining({ maxSteps: 4 }),
+    );
+    expect(result.ok).toBe(true);
   });
 
   it('returns stored status with last screenshot and email', async () => {

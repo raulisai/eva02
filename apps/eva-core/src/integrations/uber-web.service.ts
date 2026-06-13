@@ -152,10 +152,8 @@ export class UberWebService {
 
   normalizeAddress(address: string): string {
     if (!address) return '';
-    let clean = address.trim();
-    clean = clean.replace(/\bcmdx\b/gi, 'CDMX, México');
-    clean = clean.replace(/\bcdmx\b/gi, 'CDMX, México');
-    return clean;
+    // Single-pass alternation avoids double-expanding CDMX when cmdx is replaced first.
+    return address.trim().replace(/\b(?:cmdx|cdmx)\b/gi, 'CDMX, México');
   }
 
   async estimateRide(orgId: string, input: {
@@ -356,43 +354,19 @@ export class UberWebService {
       };
     }
 
-    // Now choose/click the desired product
-    await this.browser.evaluate<boolean, { rideType: string }>(opened.id, orgId, ({ rideType }) => {
-      const elements = Array.from(document.querySelectorAll('*'));
-      const match = elements.find((el) => {
-        const text = el.textContent ?? '';
-        return new RegExp('\\b' + rideType + '\\b', 'i').test(text) && el.children.length === 0;
-      });
-      if (match) {
-        (match as HTMLElement).click();
-        return true;
-      }
-      const candidates = Array.from(document.querySelectorAll('div, p, span, button'));
-      const fallbackMatch = candidates.find((el) => new RegExp('\\b' + rideType + '\\b', 'i').test(el.textContent ?? ''));
-      if (fallbackMatch) {
-        (fallbackMatch as HTMLElement).click();
-        return true;
-      }
-      return false;
-    }, { rideType }).catch(() => {});
+    // Choose/click the desired product — resilient: JS fast-path → SmartNavigator fallback
+    const rideSelected = await this.resilientSelectRideType(opened.id, orgId, rideType);
+    if (!rideSelected) {
+      this.logger.warn(`Could not select ride type "${rideType}" via JS or SmartNavigator`);
+    }
 
     await this.browser.wait(opened.id, orgId, 1500);
 
-    // Click request/confirm button
-    await this.browser.evaluate<boolean, { rideType: string }>(opened.id, orgId, ({ rideType }) => {
-      const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
-      const match = buttons.find((btn) => {
-        const text = btn.textContent?.toLowerCase() ?? '';
-        const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() ?? '';
-        return /choose|confirm|request|pedir|confirmar|siguiente|see prices/i.test(text) ||
-               /choose|confirm|request|pedir|confirmar|siguiente|see prices/i.test(ariaLabel);
-      });
-      if (match) {
-        (match as HTMLElement).click();
-        return true;
-      }
-      return false;
-    }, { rideType }).catch(() => {});
+    // Click request/confirm button — resilient: JS fast-path → SmartNavigator fallback
+    const rideRequested = await this.resilientClickRequestRide(opened.id, orgId, rideType);
+    if (!rideRequested) {
+      this.logger.warn(`Could not find request/confirm button for "${rideType}" via JS or SmartNavigator`);
+    }
 
     await this.browser.wait(opened.id, orgId, 5000); // Wait for booking state to load
 
@@ -1174,6 +1148,82 @@ export class UberWebService {
       '',
       'Te envié screenshot para confirmar. No pedí ni confirmé ningún viaje.',
     ].join('\n');
+  }
+
+  /**
+   * Selects a ride type on the current Uber page.
+   * Fast path: text-based JS DOM scan.
+   * Fallback: SmartNavigatorService (DOM index + screenshot vision via cheap model).
+   */
+  private async resilientSelectRideType(sessionId: string, orgId: string, rideType: string): Promise<boolean> {
+    const jsClicked = await this.browser.evaluate<boolean, { rideType: string }>(
+      sessionId, orgId,
+      ({ rideType }) => {
+        const elements = Array.from(document.querySelectorAll('*'));
+        const leaf = elements.find(
+          (el) => new RegExp('\\b' + rideType + '\\b', 'i').test(el.textContent ?? '') && el.children.length === 0,
+        );
+        if (leaf) { (leaf as HTMLElement).click(); return true; }
+        const broad = Array.from(document.querySelectorAll('div, p, span, button, li')).find(
+          (el) => new RegExp('\\b' + rideType + '\\b', 'i').test(el.textContent ?? ''),
+        );
+        if (broad) { (broad as HTMLElement).click(); return true; }
+        return false;
+      },
+      { rideType },
+    ).catch(() => false);
+
+    if (jsClicked) return true;
+
+    if (this.smartNav?.available) {
+      this.logger.log(`Ride type "${rideType}" not found via JS — delegating to SmartNavigator`);
+      const result = await this.smartNav.navigate(
+        orgId, sessionId,
+        `Selecciona la opción de viaje "${rideType}" en la lista de opciones visible en la página de Uber. Solo selecciónala; NO confirmes ni solicites el viaje todavía.`,
+        { maxSteps: 4 },
+      );
+      return result.ok;
+    }
+    return false;
+  }
+
+  /**
+   * Clicks the request/confirm ride button on Uber Web.
+   * Fast path: aria-label / text-based JS scan.
+   * Fallback: SmartNavigatorService (DOM index + screenshot vision via cheap model).
+   * The SmartNavigator's built-in PAYMENT_GUARD prevents accidental purchase confirmations.
+   */
+  private async resilientClickRequestRide(sessionId: string, orgId: string, rideType: string): Promise<boolean> {
+    const jsClicked = await this.browser.evaluate<boolean, { rideType: string }>(
+      sessionId, orgId,
+      ({ rideType }) => {
+        const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+        const match = buttons.find((btn) => {
+          const text = btn.textContent?.toLowerCase() ?? '';
+          const aria = btn.getAttribute('aria-label')?.toLowerCase() ?? '';
+          return /choose|confirm|request|pedir|confirmar|siguiente|see prices/i.test(text) ||
+                 /choose|confirm|request|pedir|confirmar|siguiente|see prices/i.test(aria);
+        });
+        if (match) { (match as HTMLElement).click(); return true; }
+        return false;
+      },
+      { rideType },
+    ).catch(() => false);
+
+    if (jsClicked) return true;
+
+    if (this.smartNav?.available) {
+      this.logger.log(`Request button for "${rideType}" not found via JS — delegating to SmartNavigator`);
+      const result = await this.smartNav.navigate(
+        orgId, sessionId,
+        `Haz clic en el botón para solicitar o pedir el viaje en Uber (${rideType}). ` +
+        `Busca botones como "Request ${rideType}", "Choose ${rideType}", "See prices", "Pedir", "Elegir". ` +
+        `NO hagas ningún pago ni confirmes un cargo; solo solicita el viaje.`,
+        { maxSteps: 4 },
+      );
+      return result.ok;
+    }
+    return false;
   }
 
   async getProfile(orgId: string) {
