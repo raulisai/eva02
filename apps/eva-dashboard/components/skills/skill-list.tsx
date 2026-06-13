@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Puzzle, Power, Loader2, ChevronDown, FlaskConical, Wrench } from 'lucide-react';
+import { Puzzle, Power, Loader2, ChevronDown, FlaskConical, Wrench, Trash2 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { coreFetch } from '@/lib/core-api';
 import { Badge } from '@/components/ui/badge';
@@ -43,6 +43,26 @@ export function SkillList({ initialSkills, toolsBySkill }: SkillListProps) {
       if (error) throw error;
       setSkills((prev) => prev.map((entry) => entry.id === skill.id ? { ...entry, status: next } : entry));
       toast(`${skill.display_name} → ${next}`, 'success');
+    } catch (error) {
+      toast((error as Error).message, 'error');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function removeSkill(skill: Skill) {
+    if (!confirm(`Are you sure you want to permanently delete the skill "${skill.display_name}"?`)) return;
+    setBusyId(skill.id);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase
+        .from('skills')
+        .delete()
+        .eq('id', skill.id)
+        .eq('org_id', skill.org_id);
+      if (error) throw error;
+      setSkills((prev) => prev.filter((entry) => entry.id !== skill.id));
+      toast(`Deleted skill: ${skill.display_name}`, 'success');
     } catch (error) {
       toast((error as Error).message, 'error');
     } finally {
@@ -115,11 +135,17 @@ export function SkillList({ initialSkills, toolsBySkill }: SkillListProps) {
                 <div className="border-t border-zinc-800 px-4 py-3 space-y-3 animate-expand-y overflow-hidden">
                   <div className="flex items-center justify-between">
                     <p className="text-[10px] font-mono uppercase tracking-widest text-zinc-600">Tools</p>
-                    {(skill.status === 'active' || skill.status === 'disabled') && (
-                      <Button size="sm" variant="outline" onClick={() => toggle(skill)} disabled={busyId === skill.id}>
-                        {busyId === skill.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Power className="w-3 h-3" />}
-                        {skill.status === 'active' ? 'Disable skill' : 'Enable skill'}
-                      </Button>
+                    {(skill.status === 'active' || skill.status === 'disabled' || skill.status === 'draft') && (
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" variant="outline" onClick={() => toggle(skill)} disabled={busyId === skill.id}>
+                          {busyId === skill.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Power className="w-3 h-3" />}
+                          {skill.status === 'active' ? 'Disable skill' : 'Enable skill'}
+                        </Button>
+                        <Button size="sm" variant="outline" className="text-red-400 hover:text-red-300 hover:bg-red-400/10 hover:border-red-400/30 border-red-500/20" onClick={() => removeSkill(skill)} disabled={busyId === skill.id}>
+                          {busyId === skill.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                          Delete
+                        </Button>
+                      </div>
                     )}
                   </div>
 
