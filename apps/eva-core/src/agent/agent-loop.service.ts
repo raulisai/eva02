@@ -481,6 +481,8 @@ export class AgentLoopService {
             try {
               const rateLimit = depth === 0 && this.intelligence ? await this.intelligence.enforceToolRateLimit(orgId, tool.name) : null;
               if (rateLimit) return { tool, decision: d, observation: `ERROR: ${rateLimit}` };
+              const policyError = this.validateRuntimePolicy(tool.name, steps, deliveryRequirements);
+              if (policyError) return { tool, decision: d, observation: policyError };
               const validationError = this.validateToolArgs(tool, d.args);
               if (validationError) return { tool, decision: d, observation: validationError };
               
@@ -531,9 +533,12 @@ export class AgentLoopService {
       let observation: string;
       try {
         const rateLimit = depth === 0 && this.intelligence ? await this.intelligence.enforceToolRateLimit(orgId, spec.name) : null;
+        const policyError = this.validateRuntimePolicy(spec.name, steps, deliveryRequirements);
         const validationError = this.validateToolArgs(spec, decision.args);
         if (rateLimit) {
           observation = `ERROR: ${rateLimit}`;
+        } else if (policyError) {
+          observation = policyError;
         } else if (validationError) {
           observation = validationError;
         } else
@@ -754,7 +759,7 @@ export class AgentLoopService {
         ? ['- Para descargar medios/videos (YouTube, etc.): el sandbox tiene listo yt-dlp y ffmpeg. Escribe un script en code_execute (con "network": true) que use yt-dlp directamente. IMPORTANTE: yt-dlp puede buscar videos por ti sin que busques el enlace antes (ej: usar `yt-dlp --max-downloads 1 --format mp4 "ytsearch1:one piece quinto emperador"` busca y descarga el primer video de esa búsqueda). No malgastes pasos en web_search intentando encontrar enlaces exactos; ¡usa la búsqueda integrada de yt-dlp! Una vez descargado el archivo en /work, usa telegram_send_file para enviarlo de inmediato.']
         : []),
       ...(has('code_execute') && has('telegram_send_file')
-        ? ['- Para reportes/archivos solicitados por el usuario: usa code_execute para crear el archivo en /work, verifica que exista con sandbox_ls si hace falta, y después usa telegram_send_file si el usuario pidió enviarlo por Telegram. Para PDF, NO dependas de pip/npm install: primero intenta librerias ya disponibles y, si fallan, genera un PDF minimo sin dependencias externas con escritura binaria/texto PDF valido.']
+        ? ['- Para reportes/archivos solicitados por el usuario: usa code_execute para crear el archivo en /work, verifica que exista y que tenga contenido, y después usa telegram_send_file si el usuario pidió enviarlo por Telegram. Para PDF puedes escribir código propio, pero NO guardes/reutilices una skill hasta que el PDF pase validación de calidad y el envío haya funcionado. Evita bytes PDF crudos con offsets hardcodeados; si haces PDF manual, calcula xref/startxref desde el contenido real.']
         : []),
       '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
@@ -1047,6 +1052,30 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     return null;
   }
 
+  private validateRuntimePolicy(
+    toolName: string,
+    steps: AgentLoopStep[],
+    deliveryRequirements: DeliveryRequirement[] = [],
+  ): string | null {
+    if (toolName !== 'web_search' || deliveryRequirements.length === 0) return null;
+    const webSearches = steps.filter((step) => step.tool === 'web_search' && !step.observation.startsWith('ERROR:')).length;
+    if (webSearches < 2) return null;
+    return [
+      'ERROR: presupuesto de investigación web agotado para esta tarea con entregables.',
+      'Ya hiciste 2 búsquedas. Deja de buscar, consolida los hallazgos existentes y usa code_execute para crear/verificar el archivo pendiente; después usa la herramienta de entrega solicitada.',
+    ].join(' ');
+  }
+
+  private isBrittleRawPdfSkill(code: string): boolean {
+    const normalized = code.toLowerCase();
+    const writesPdfLiteral = normalized.includes('%pdf-') && normalized.includes('startxref') && normalized.includes('xref');
+    const hardcodedOffsets = /startxref\s*\\?n?\s*\d{2,}/i.test(code)
+      || /000000\d{4,}\s+00000\s+n/.test(code);
+    const byteStringPdf = /pdf_content\s*=\s*b?["'`]{3}[\s\S]*%PDF-/i.test(code)
+      || /open\([^)]*\.pdf[^)]*['"]wb['"][\s\S]*write\(\s*pdf_content/i.test(code);
+    return writesPdfLiteral && hardcodedOffsets && byteStringPdf;
+  }
+
   // ── A: tool definitions para tool-use nativo ──────────────────────────────
 
   /** Construye el array de ToolDefinition desde los ToolSpec disponibles + final_answer. */
@@ -1281,6 +1310,18 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
           if (!slug) return 'ERROR: skill_run requiere args.slug';
           const skill = await this.skillLibrary.getRunnable(orgId, slug);
           if (!skill) return `ERROR: no encontré la skill "${slug}" (¿slug correcto y activa?)`;
+          if (this.isBrittleRawPdfSkill(skill.code)) {
+            const deleted = await this.skillDocs.deleteSkill(orgId, slug).catch((err) => ({
+              ok: false,
+              error: (err as Error).message,
+            }));
+            const suffix = deleted.ok ? 'La archivé para que no vuelva a contaminar el índice.' : `No pude archivarla automáticamente: ${deleted.error}`;
+            return [
+              `ERROR: la skill "${slug}" parece generar PDF crudo con xref/startxref hardcodeado, una ruta que ya produjo PDFs en blanco o inválidos.`,
+              suffix,
+              'Reimplementa con code_execute desde cero, calcula/verifica el PDF en runtime y guarda una skill nueva sólo después de que telegram_send_file confirme un envío exitoso.',
+            ].join(' ');
+          }
           const result = await this.sandbox.execInSession(taskId, {
             kind: skill.language, code: skill.code, orgId,
           });
@@ -1644,6 +1685,8 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
 
           const caption = String(args.caption ?? '').trim() || undefined;
           const filename = pathLib.basename(fileArg);
+          const qualityError = this.validateOutgoingArtifact(filename, buffer);
+          if (qualityError) return qualityError;
 
           let chatId = String(args.chat_id ?? '').trim();
           if (!chatId) {
@@ -2174,6 +2217,55 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
       return `ERROR: Argumentos inválidos. Detalles: ${errMsg}`;
     }
     return null;
+  }
+
+  private validateOutgoingArtifact(filename: string, buffer: Buffer): string | null {
+    if (!filename.toLowerCase().endsWith('.pdf')) return null;
+    return this.validatePdfArtifact(buffer);
+  }
+
+  private validatePdfArtifact(buffer: Buffer): string | null {
+    const fail = (reason: string) =>
+      `ERROR: el PDF no pasó validación de calidad (${reason}). Regenera el PDF antes de enviarlo: debe abrir con contenido visible, tener texto renderizable y una tabla xref/startxref coherente. No lo envíes todavía.`;
+
+    if (buffer.length < 500) return fail(`archivo demasiado pequeño: ${buffer.length} bytes`);
+
+    const text = buffer.toString('latin1');
+    if (!text.slice(0, 1024).includes('%PDF-')) return fail('no tiene cabecera %PDF');
+    if (!text.includes('%%EOF')) return fail('falta %%EOF');
+    if (!/\/Type\s*\/Page\b/.test(text) && !/\/Pages\b/.test(text)) return fail('no declara páginas PDF');
+
+    const startXrefMatch = /startxref\s+(\d+)/.exec(text);
+    if (startXrefMatch) {
+      const offset = Number(startXrefMatch[1]);
+      const nearOffset = Number.isFinite(offset) && offset >= 0 && offset < buffer.length
+        ? text.slice(offset, Math.min(offset + 80, text.length))
+        : '';
+      if (!nearOffset.startsWith('xref') && !nearOffset.includes('/XRef')) {
+        return fail(`startxref apunta a ${offset}, pero ahí no hay tabla xref válida`);
+      }
+    } else if (!text.includes('/XRef')) {
+      return fail('falta startxref/xref');
+    }
+
+    const visibleText = this.extractPdfLiteralText(text);
+    const hasCompressedContent = /\/Filter\s*\//.test(text) && /\/Contents\b/.test(text) && buffer.length > 2500;
+    if (visibleText.length < 60 && !hasCompressedContent) {
+      return fail(`muy poco texto visible detectado (${visibleText.length} caracteres)`);
+    }
+
+    return null;
+  }
+
+  private extractPdfLiteralText(pdfText: string): string {
+    const streamBlocks = [...pdfText.matchAll(/stream\r?\n([\s\S]*?)\r?\nendstream/g)]
+      .map((match) => match[1])
+      .join('\n');
+    const source = streamBlocks || pdfText;
+    const literalStrings = [...source.matchAll(/\((?:\\.|[^\\)]){2,}\)/g)]
+      .map((match) => match[0].slice(1, -1).replace(/\\([()\\])/g, '$1'))
+      .join(' ');
+    return literalStrings.replace(/[^\x20-\x7eáéíóúÁÉÍÓÚñÑüÜ]/g, ' ').replace(/\s+/g, ' ').trim();
   }
 
   /** code_execute con manejo de red: sin red ejecuta directo; con red crea approval. */

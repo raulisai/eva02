@@ -46,6 +46,40 @@ function modelReplyWithTool(toolName: string, args: Record<string, unknown>, tok
   };
 }
 
+function makeMinimalPdf(lines: string[]): Buffer {
+  const escapedLines = lines.map((line) => line.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)'));
+  const content = [
+    'BT',
+    '/F1 12 Tf',
+    '72 760 Td',
+    ...escapedLines.flatMap((line, index) => [
+      index === 0 ? `(${line}) Tj` : `0 -18 Td (${line}) Tj`,
+    ]),
+    'ET',
+  ].join('\n');
+  const objects = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n',
+    `4 0 obj\n<< /Length ${Buffer.byteLength(content, 'latin1')} >>\nstream\n${content}\nendstream\nendobj\n`,
+    '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+  ];
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  for (const obj of objects) {
+    offsets.push(Buffer.byteLength(pdf, 'latin1'));
+    pdf += obj;
+  }
+  const xrefOffset = Buffer.byteLength(pdf, 'latin1');
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += '0000000000 65535 f \n';
+  for (const offset of offsets.slice(1)) {
+    pdf += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(pdf, 'latin1');
+}
+
 describe('AgentLoopService', () => {
   let service: AgentLoopService;
   let modelRouter: jest.Mocked<ModelRouterService>;
@@ -1105,7 +1139,11 @@ describe('AgentLoopService', () => {
       const fs = require('fs/promises');
       const path = require('path');
       const pdfPath = path.join('/tmp', 'report.pdf');
-      await fs.writeFile(pdfPath, '%PDF-1.4\nmock report\n', 'utf8');
+      await fs.writeFile(pdfPath, makeMinimalPdf([
+        'Resumen ejecutivo de empresas tecnologicas para inversion.',
+        'Microsoft, Nvidia, Apple, Alphabet y Amazon.',
+        'Incluye proyectos clave, tesis de inversion y riesgos principales.',
+      ]));
       sandbox.execInSession.mockResolvedValueOnce({ ok: true, output: 'PDF creado en /work/report.pdf' });
 
       modelRouter.generate
@@ -1142,6 +1180,30 @@ describe('AgentLoopService', () => {
       await fs.rm(pdfPath, { force: true }).catch(() => undefined);
     });
 
+    it('blocks malformed or blank-looking PDFs before sending them to Telegram', async () => {
+      const fs = require('fs/promises');
+      const path = require('path');
+      const pdfPath = path.join('/tmp', 'blank-report.pdf');
+      await fs.writeFile(pdfPath, Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n', 'latin1'));
+
+      modelRouter.generate
+        .mockResolvedValueOnce(modelReply('{"thought":"envio","tool":"telegram_send_file","args":{"file":"blank-report.pdf","caption":"Resumen","chat_id":"99999"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"fallo honesto","tool":"final_answer","args":{"text":"No se pudo enviar: el PDF generado no pasó validación de calidad."}}'));
+
+      const result = await service.run(
+        ORG,
+        TASK,
+        'genera un archivo pdf y envia el archivo a mi telegram',
+        { maxSteps: 2 },
+      );
+
+      expect(result.steps[0].observation).toContain('ERROR: el PDF no pasó validación de calidad');
+      expect(telegram.sendDocument).not.toHaveBeenCalled();
+      expect(result.text).toContain('no pasó validación');
+
+      await fs.rm(pdfPath, { force: true }).catch(() => undefined);
+    });
+
     it('returns a non-ok outcome when required Telegram file delivery remains pending after step exhaustion', async () => {
       sandbox.execInSession.mockResolvedValueOnce({ ok: true, output: 'PDF creado en /work/report.pdf' });
 
@@ -1173,6 +1235,24 @@ describe('AgentLoopService', () => {
       expect(result.degraded).toBe(true);
       expect(result.text).toContain('No puedo marcar esta tarea como terminada todavía');
       expect(result.text).toContain('enviar archivo por Telegram');
+    });
+
+    it('enforces a hard web-search budget for deliverable-heavy tasks', async () => {
+      modelRouter.generate
+        .mockResolvedValueOnce(modelReply('{"thought":"buscar 1","tool":"web_search","args":{"query":"top tech stocks"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"buscar 2","tool":"web_search","args":{"query":"tech stocks market cap PE"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"buscar 3","tool":"web_search","args":{"query":"more tech stock data"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"fallo honesto","tool":"final_answer","args":{"text":"No se pudo completar el PDF porque prioricé corregir el exceso de búsqueda."}}'));
+
+      const result = await service.run(
+        ORG,
+        TASK,
+        'investiga empresas tech, genera un pdf y envia el archivo a mi telegram',
+        { maxSteps: 4 },
+      );
+
+      expect(research.answer).toHaveBeenCalledTimes(2);
+      expect(result.steps[2].observation).toContain('presupuesto de investigación web agotado');
     });
 
     it('sends file using communication_accounts fallback when task metadata lacks chat_id', async () => {

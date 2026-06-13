@@ -295,13 +295,13 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     if (typeof this.events.on !== 'function') return; // test stub without consumer
     this.events.on('task.created', async (event) => {
       if (!event.taskId) return;
-      await this.run(event.orgId, event.taskId);
+      this.run(event.orgId, event.taskId).catch((err) => this.logger.error('task.created run error', err));
     });
     // Close the approval → execute loop for Gmail / Calendar write operations.
     this.events.on('approval.resolved', async (event) => {
       const payload = event.payload as { approvalId?: string; status?: string } | undefined;
       if (payload?.status !== 'approved' || !payload.approvalId || !event.taskId) return;
-      await this.executeApprovedAction(event.orgId, event.taskId, payload.approvalId);
+      this.executeApprovedAction(event.orgId, event.taskId, payload.approvalId).catch((err) => this.logger.error('approval.resolved run error', err));
     });
     this.logger.log('Agent runner subscribed to task.created + approval.resolved');
     // Re-queue any tasks that got stuck in a non-terminal state during a

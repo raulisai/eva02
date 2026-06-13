@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 18:25Z
+C: agent-loop: added runtime intelligence guardrails for report/delivery tasks: hard web_search budget after 2 successful searches, outgoing PDF quality validation before Telegram upload, and regression tests for blank/malformed PDFs and search-loop prevention; files=apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/agent-loop.service.spec.ts --runInBand; cd apps/eva-core && npm run build; npm run docs:check
+P: pending/improve -> add a real renderer-backed PDF screenshot/OCR smoke in the sandbox image so visual blank-page detection can graduate from structural heuristics to rendered-page validation
+
 ### 2026-06-13 18:16Z
 C: agent-loop: fixed explicit deliverable exhaustion so PDF/Telegram tasks enter final delivery mode, avoid dependency installs for PDFs, and return ok=false when required delivery is still pending instead of completing the task; files=apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/agent-loop.service.spec.ts --runInBand; cd apps/eva-core && npm run build; npm run docs:check
 P: pending/improve -> run the live PDF-to-Telegram smoke with real Telegram credentials and verify pending delivery remains non-completed in the dashboard/task log
