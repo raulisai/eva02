@@ -1,13 +1,21 @@
 import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy, Optional } from '@nestjs/common';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { IntegrationsService } from '../integrations/integrations.service';
+import {
+  PersistentShell,
+  ShellProcess,
+  ShellTimeouts,
+  DEFAULT_SHELL_TIMEOUTS,
+} from './sandbox-shell';
 
 const execFileAsync = promisify(execFile);
+
+type SecretMask = { value: string; alias: string };
 
 export type SandboxLanguage = 'python' | 'node' | 'bash';
 
@@ -17,6 +25,14 @@ export interface SandboxRunResult {
   output: string;
   timedOut?: boolean;
   error?: string;
+  /**
+   * Estado de un comando ejecutado en el shell persistente:
+   *  - completed: terminó (exitCode disponible).
+   *  - running: sigue corriendo; reanuda con readShellOutput.
+   *  - awaiting_input: espera stdin; responde con sendShellInput.
+   */
+  status?: 'completed' | 'running' | 'awaiting_input';
+  exitCode?: number;
 }
 
 export interface OneShotOptions {
@@ -39,6 +55,24 @@ export interface SessionExecOptions {
   background?: boolean;
   /** true → ejecutar con acceso a red (solo cuando EVA_SANDBOX_ALLOW_NETWORK=true). */
   network?: boolean;
+  /** Número de shell multiplexado dentro del contenedor (0 por defecto). */
+  session?: number;
+  /** Overrides de los timeouts multi-fase del shell persistente. */
+  timeouts?: Partial<ShellTimeouts>;
+}
+
+export interface SessionInputOptions {
+  /** Texto a enviar al stdin del comando que espera input. */
+  keyboard: string;
+  session?: number;
+  network?: boolean;
+  timeouts?: Partial<ShellTimeouts>;
+}
+
+export interface SessionReadOptions {
+  session?: number;
+  network?: boolean;
+  timeouts?: Partial<ShellTimeouts>;
 }
 
 interface SandboxSession {
@@ -49,6 +83,10 @@ interface SandboxSession {
   stepCount: number;
   /** true → este contenedor tiene --network bridge (para downloads, yt-dlp, etc.) */
   networkEnabled: boolean;
+  /** Shells persistentes multiplexados por número (estado vivo entre pasos). */
+  shells: Map<number, PersistentShell>;
+  /** Masks de secrets por shell — para enmascarar la salida en reanudaciones. */
+  shellMasks: Map<number, SecretMask[]>;
 }
 
 /** Alias de secret en código generado: §§secret(provider) o §§secret(kind.provider). */
@@ -329,34 +367,47 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
       return this.runNodeOnSharedWorkspace(session, resolved.code, resolved.masks, opts.timeoutMs, networkRequested);
     }
 
-    try {
-      if (opts.kind === 'terminal') {
-        if (opts.background) {
-          await this.runDocker([
-            'exec', '-d', session.containerName,
-            'sh', '-c', `cd /work && { ${resolved.code} ; } >> /work/${BG_LOG} 2>&1`,
-          ], { timeout: 10_000, maxBuffer: 1024 * 64 });
-          return { ok: true, output: `Proceso lanzado en background. Usa terminal_output para leer su salida (log: /work/${BG_LOG}).` };
-        }
-        const { stdout, stderr } = await this.runDocker([
-          'exec', session.containerName,
-          'sh', '-c', `cd /work && ${resolved.code}`,
-        ], { timeout: opts.timeoutMs ?? 30_000, maxBuffer: 1024 * 512 });
-        return { ok: true, output: this.formatOutput(stdout, stderr, resolved.masks) };
-      }
-
-      // python / bash: el archivo va al workspace (host) y se ejecuta dentro.
-      const file = `step-${session.stepCount}.${FILE_EXT[opts.kind]}`;
-      await writeFile(join(session.hostDir, file), resolved.code, 'utf8');
-      const interp = opts.kind === 'python' ? 'python' : 'sh';
-      const { stdout, stderr } = await this.runDocker([
-        'exec', '-w', '/work', session.containerName,
-        interp, file,
-      ], { timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, maxBuffer: 1024 * 512 });
-      return { ok: true, output: this.formatOutput(stdout, stderr, resolved.masks) };
-    } catch (error) {
-      return this.execError(error, resolved.masks);
+    // terminal en background → proceso detached con log (orthogonal al shell vivo).
+    if (opts.kind === 'terminal' && opts.background) {
+      return this.runDetachedBackground(session, resolved.code, resolved.masks);
     }
+
+    // Foreground (terminal/python/bash) → shell PERSISTENTE: el estado (env, cwd,
+    // procesos) sobrevive entre pasos, con timeouts multi-fase y detección de diálogo.
+    const sessionNum = opts.session ?? 0;
+    const shellRes = await this.execViaShell(session, sessionNum, opts.kind, resolved.code, resolved.masks, opts.timeouts);
+    if (shellRes) return shellRes;
+
+    // Shell no disponible (imagen sin bash, spawn falló) → exec stateless de respaldo.
+    return this.execStateless(session, opts.kind, resolved.code, resolved.masks, opts.timeoutMs);
+  }
+
+  /**
+   * Envía texto al stdin de un comando que espera input (diálogo detectado) y
+   * reanuda la lectura. Espejo del tool `input` de Agent Zero.
+   */
+  async sendShellInput(taskId: string, opts: SessionInputOptions): Promise<SandboxRunResult> {
+    const { session, num } = this.resolveShell(taskId, opts.session ?? 0, opts.network === true);
+    if (!session) return { ok: false, output: '', error: 'No hay sesión sandbox activa para esta tarea.' };
+    const shell = session.shells.get(num);
+    if (!shell || shell.exited) return { ok: false, output: '', error: `No hay un shell vivo en la sesión ${num}.` };
+    session.lastUsedAt = Date.now();
+    const res = await shell.sendInput(opts.keyboard, this.mergeTimeouts(opts.timeouts));
+    return this.shellResultToSandbox(res, session.shellMasks.get(num) ?? []);
+  }
+
+  /** Reanuda la lectura de un comando del shell que seguía corriendo. */
+  async readShellOutput(taskId: string, opts: SessionReadOptions = {}): Promise<SandboxRunResult> {
+    const { session, num } = this.resolveShell(taskId, opts.session ?? 0, opts.network === true);
+    if (!session) return { ok: false, output: '', error: 'No hay sesión sandbox activa para esta tarea.' };
+    const shell = session.shells.get(num);
+    if (!shell || shell.exited) {
+      // Sin shell vivo: cae a leer el log del proceso en background.
+      return this.readBackgroundOutput(taskId);
+    }
+    session.lastUsedAt = Date.now();
+    const res = await shell.read(this.mergeTimeouts(opts.timeouts));
+    return this.shellResultToSandbox(res, session.shellMasks.get(num) ?? []);
   }
 
   async readBackgroundOutput(taskId: string): Promise<SandboxRunResult> {
@@ -383,6 +434,9 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
       const session = this.sessions.get(key);
       if (!session) continue;
       this.sessions.delete(key);
+      // Cerrar shells vivos antes de tumbar el contenedor.
+      for (const shell of session.shells.values()) shell.close();
+      session.shells.clear();
       await this.runDocker(['rm', '-f', session.containerName], { timeout: 15_000, maxBuffer: 1024 * 16 })
         .catch(() => undefined);
       hostDirToDelete = session.hostDir;
@@ -490,6 +544,8 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
       containerName, hostDir, image,
       lastUsedAt: Date.now(), stepCount: 0,
       networkEnabled,
+      shells: new Map(),
+      shellMasks: new Map(),
     };
     this.sessions.set(sessionKey, session);
     this.logger.log(`sandbox session ${containerName} (${image}, net=${networkEnabled}) ready for task ${taskId}`);
@@ -527,6 +583,173 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
     } catch (error) {
       return this.execError(error, masks);
     }
+  }
+
+  // ── shell persistente (PTY vivo) ──────────────────────────────────────────
+
+  /**
+   * Ejecuta código foreground en el shell persistente de la sesión. Para
+   * python/bash escribe un archivo y lo corre con el intérprete DENTRO del
+   * shell vivo, así cwd y variables exportadas en pasos previos aplican.
+   * Devuelve null si no se pudo obtener un shell (para caer al fallback).
+   */
+  private async execViaShell(
+    session: SandboxSession,
+    num: number,
+    kind: SandboxLanguage | 'terminal',
+    code: string,
+    masks: SecretMask[],
+    timeouts?: Partial<ShellTimeouts>,
+  ): Promise<SandboxRunResult | null> {
+    const shell = await this.getOrCreateShell(session, num);
+    if (!shell) return null;
+
+    session.shellMasks.set(num, masks);
+
+    let command: string;
+    if (kind === 'terminal') {
+      command = code;
+    } else {
+      const file = `.eva-s${num}-step-${session.stepCount}.${FILE_EXT[kind]}`;
+      try {
+        await writeFile(join(session.hostDir, file), code, 'utf8');
+      } catch (err) {
+        return this.execError(err, masks);
+      }
+      command = kind === 'python' ? `python ${file}` : `sh ${file}`;
+    }
+
+    try {
+      const res = await shell.run(command, this.mergeTimeouts(timeouts));
+      return this.shellResultToSandbox(res, masks);
+    } catch (err) {
+      this.logger.warn(`shell run failed on ${session.containerName}: ${(err as Error).message.slice(0, 160)}`);
+      return null;
+    }
+  }
+
+  private async getOrCreateShell(session: SandboxSession, num: number): Promise<PersistentShell | null> {
+    const existing = session.shells.get(num);
+    if (existing && !existing.exited) return existing;
+    if (existing) session.shells.delete(num);
+
+    try {
+      const proc = this.createShellProcess(session.containerName);
+      const shell = new PersistentShell(proc);
+      await shell.init();
+      session.shells.set(num, shell);
+      this.logger.debug(`persistent shell ${num} ready on ${session.containerName}`);
+      return shell;
+    } catch (err) {
+      this.logger.warn(`shell spawn failed on ${session.containerName}: ${(err as Error).message.slice(0, 160)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Lanza el shell dentro del contenedor de la tarea. Usa `script` (util-linux)
+   * para asignar un PTY real cuando existe — así los programas ven una terminal
+   * (isatty) y emiten sus prompts interactivos —, y cae a bash/sh pelado si no.
+   * Seam protegido para inyectar un proceso falso en tests.
+   */
+  protected createShellProcess(containerName: string): ShellProcess {
+    const boot =
+      "command -v script >/dev/null 2>&1 && exec script -qfc 'exec bash 2>&1 || exec sh 2>&1' /dev/null " +
+      '|| exec bash 2>&1 || exec sh 2>&1';
+    const child = spawn('docker', ['exec', '-i', containerName, 'sh', '-c', boot], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let exited = false;
+    child.on('exit', () => { exited = true; });
+    child.on('error', () => { exited = true; });
+    const cbs: Array<(c: string) => void> = [];
+    const emit = (chunk: Buffer) => {
+      const s = chunk.toString('utf8');
+      for (const cb of cbs) cb(s);
+    };
+    child.stdout?.on('data', emit);
+    child.stderr?.on('data', emit);
+    return {
+      write: (d) => { try { child.stdin?.write(d); } catch { /* pipe closed */ } },
+      onData: (cb) => { cbs.push(cb); },
+      kill: () => { try { child.kill('SIGKILL'); } catch { /* already gone */ } },
+      get exited() { return exited; },
+      onExit: (cb) => { child.on('exit', () => cb()); },
+    };
+  }
+
+  /** Mapea el resultado del shell a SandboxRunResult, enmascarando secrets. */
+  private shellResultToSandbox(res: { output: string; status: string; exitCode?: number }, masks: SecretMask[]): SandboxRunResult {
+    const output = this.maskText(res.output, masks).slice(0, OUTPUT_LIMIT);
+    if (res.status === 'completed') {
+      const failed = (res.exitCode ?? 0) !== 0;
+      const tail = failed ? `${output ? output + '\n' : ''}[exit code: ${res.exitCode}]` : output;
+      return { ok: true, output: tail || '(sin salida)', status: 'completed', exitCode: res.exitCode };
+    }
+    if (res.status === 'awaiting_input') {
+      return {
+        ok: true,
+        status: 'awaiting_input',
+        output: `${output}\n[SISTEMA: el comando parece esperar input. Responde con terminal_input{"keyboard":"..."}, o reinícialo con terminal_run.]`.trim(),
+      };
+    }
+    if (res.status === 'running') {
+      return {
+        ok: true,
+        status: 'running',
+        output: `${output}\n[SISTEMA: el proceso sigue corriendo. Usa terminal_output para leer más salida, o terminal_input si espera datos.]`.trim(),
+      };
+    }
+    return { ok: false, output: output || 'El shell de la sesión terminó inesperadamente.', error: 'shell_error' };
+  }
+
+  /** terminal background: proceso detached que escribe a un log (lectura con readBackgroundOutput). */
+  private async runDetachedBackground(session: SandboxSession, code: string, masks: SecretMask[]): Promise<SandboxRunResult> {
+    try {
+      await this.runDocker([
+        'exec', '-d', session.containerName,
+        'sh', '-c', `cd /work && { ${code} ; } >> /work/${BG_LOG} 2>&1`,
+      ], { timeout: 10_000, maxBuffer: 1024 * 64 });
+      return { ok: true, output: `Proceso lanzado en background. Usa terminal_output para leer su salida (log: /work/${BG_LOG}).` };
+    } catch (error) {
+      return this.execError(error, masks);
+    }
+  }
+
+  /** Fallback sin estado de shell: un `docker exec` por paso (comportamiento previo). */
+  private async execStateless(
+    session: SandboxSession,
+    kind: SandboxLanguage | 'terminal',
+    code: string,
+    masks: SecretMask[],
+    timeoutMs?: number,
+  ): Promise<SandboxRunResult> {
+    try {
+      if (kind === 'terminal') {
+        const { stdout, stderr } = await this.runDocker([
+          'exec', session.containerName, 'sh', '-c', `cd /work && ${code}`,
+        ], { timeout: timeoutMs ?? 30_000, maxBuffer: 1024 * 512 });
+        return { ok: true, output: this.formatOutput(stdout, stderr, masks) };
+      }
+      const file = `step-${session.stepCount}.${FILE_EXT[kind]}`;
+      await writeFile(join(session.hostDir, file), code, 'utf8');
+      const interp = kind === 'python' ? 'python' : 'sh';
+      const { stdout, stderr } = await this.runDocker([
+        'exec', '-w', '/work', session.containerName, interp, file,
+      ], { timeout: timeoutMs ?? DEFAULT_TIMEOUT_MS, maxBuffer: 1024 * 512 });
+      return { ok: true, output: this.formatOutput(stdout, stderr, masks) };
+    } catch (error) {
+      return this.execError(error, masks);
+    }
+  }
+
+  private resolveShell(taskId: string, num: number, network: boolean): { session: SandboxSession | undefined; num: number } {
+    const key = network ? `${taskId}:net` : taskId;
+    return { session: this.sessions.get(key) ?? this.sessions.get(taskId), num };
+  }
+
+  private mergeTimeouts(overrides?: Partial<ShellTimeouts>): ShellTimeouts {
+    return { ...DEFAULT_SHELL_TIMEOUTS, ...(overrides ?? {}) };
   }
 
   private async enrichedImageAvailable(): Promise<boolean> {

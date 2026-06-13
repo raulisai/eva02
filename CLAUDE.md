@@ -40,8 +40,13 @@ docker/            Postgres init scripts
 ## Sandbox de código (agent-loop)
 El bucle agéntico ejecuta código que el propio modelo escribe (`code_execute`, `terminal_run`, `skill_run`) en un contenedor Docker **por tarea**: `/work` persiste entre pasos, rootfs read-only, sin red, recursos acotados; se destruye al terminar la tarea.
 
+**Shell persistente (PTY vivo, estilo Agent Zero)**: el foreground (terminal/python/bash) corre en un shell de larga vida por sesión (`PersistentShell` en [sandbox-shell.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/sandbox-shell.ts)), así el estado de shell (env, `cd`, venvs, procesos) sobrevive entre pasos — no solo `/work`. Usa `script` (PTY real) en la imagen enriquecida; cae a `sh` pelado si falta.
+- Timeouts multi-fase: el comando devuelve `status: 'completed' | 'running' | 'awaiting_input'` en vez de un timeout binario. `running` → reanuda con `terminal_output`. `awaiting_input` (diálogo detectado: `[y/n]`, password…) → responde con `terminal_input`.
+- Terminales paralelas: `terminal_run{"session": N}` (0-9) multiplexa shells en el mismo contenedor (ej. server en 1, pruebas en 0).
+- `node` corre one-shot sobre el mismo `/work`; `background:true` lanza un proceso detached con log.
+
 ```bash
-docker build -t eva-sandbox docker/sandbox   # imagen python enriquecida (pandas, requests, numpy…)
+docker build -t eva-sandbox docker/sandbox   # imagen python enriquecida (pandas, requests, numpy…, bash+script para el PTY)
 ```
 - Sin la imagen, cae a `python:3.12-alpine` / `node:20-alpine` / `alpine:3.20`.
 - `EVA_SANDBOX_IMAGE` — override de imagen (vacío = forzar fallback alpine).

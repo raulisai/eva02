@@ -1,13 +1,44 @@
 import { SandboxService } from '../sandbox.service';
 import { IntegrationsService } from '../../integrations/integrations.service';
+import { ShellProcess } from '../sandbox-shell';
 
 type DockerCall = { args: string[] };
+
+/**
+ * Deterministic fake of the per-container shell process. Echoes the prompt
+ * marker on boot and, for each command, emits the configured output followed by
+ * the marker + exit code — so the persistent-shell path runs without Docker.
+ */
+class FakeShellProc implements ShellProcess {
+  exited = false;
+  writes: string[] = [];
+  private cbs: Array<(s: string) => void> = [];
+
+  constructor(private readonly outputFor: () => { output: string; exit: number }) {}
+
+  write(d: string): void {
+    this.writes.push(d);
+    const marker = (this.writes.join('').match(/__EVA_END_[0-9a-f]+__/) ?? [''])[0];
+    if (!marker) return;
+    if (d.includes('PS1=')) { setImmediate(() => this.emit(`${marker}:0\n`)); return; }
+    if (d.trim()) {
+      const { output, exit } = this.outputFor();
+      setImmediate(() => this.emit(`${output}\n${marker}:${exit}\n`));
+    }
+  }
+  private emit(s: string): void { for (const cb of this.cbs) cb(s); }
+  onData(cb: (s: string) => void): void { this.cbs.push(cb); }
+  kill(): void { this.exited = true; }
+  onExit(): void { /* unused */ }
+}
 
 describe('SandboxService', () => {
   let service: SandboxService;
   let dockerCalls: DockerCall[];
   let dockerSpy: jest.SpyInstance;
   let integrations: { getSecret: jest.Mock; list: jest.Mock };
+  let shellProcs: FakeShellProc[];
+  let shellOutput: { output: string; exit: number };
 
   beforeEach(() => {
     integrations = {
@@ -16,6 +47,17 @@ describe('SandboxService', () => {
     };
     service = new SandboxService(integrations as unknown as IntegrationsService);
     jest.spyOn(service, 'dockerAvailable').mockResolvedValue(true);
+
+    // Persistent-shell seam → deterministic fake (no real `docker exec`).
+    shellProcs = [];
+    shellOutput = { output: 'salida shell', exit: 0 };
+    jest
+      .spyOn(service as unknown as { createShellProcess: (c: string) => ShellProcess }, 'createShellProcess')
+      .mockImplementation(() => {
+        const p = new FakeShellProc(() => shellOutput);
+        shellProcs.push(p);
+        return p;
+      });
 
     dockerCalls = [];
     dockerSpy = jest
@@ -100,16 +142,18 @@ describe('SandboxService', () => {
 
   // ── sesión persistente ─────────────────────────────────────────────────────
 
-  it('creates the session container once and reuses it across steps', async () => {
-    await service.execInSession('task-1', { kind: 'python', code: 'print(1)' });
-    await service.execInSession('task-1', { kind: 'python', code: 'print(2)' });
+  it('creates the session container once and reuses one live shell across steps', async () => {
+    const r1 = await service.execInSession('task-1', { kind: 'python', code: 'print(1)' });
+    const r2 = await service.execInSession('task-1', { kind: 'python', code: 'print(2)' });
 
     // Solo contamos contenedores de sesión de tarea (no el standby que se replica en background).
     const creates = dockerCalls.filter((c) => c.args[0] === 'run' && c.args.includes('-d') && !c.args.includes('eva-standby'));
-    const execs = dockerCalls.filter((c) => c.args[0] === 'exec');
     expect(creates).toHaveLength(1);
     expect(creates[0].args).toEqual(expect.arrayContaining(['--network', 'none', '--read-only', 'tail']));
-    expect(execs).toHaveLength(2);
+    // Un único shell persistente (no uno por paso) — el estado vive entre pasos.
+    expect(shellProcs).toHaveLength(1);
+    expect(r1.status).toBe('completed');
+    expect(r2.status).toBe('completed');
     expect(service.hasSession('task-1')).toBe(true);
   });
 
@@ -149,11 +193,30 @@ describe('SandboxService', () => {
     expect(oneShot!.args).toEqual(expect.arrayContaining(['alpine:3.20']));
   });
 
-  it('runs terminal commands inside the session workdir', async () => {
-    await service.execInSession('task-1', { kind: 'terminal', code: 'ls -la' });
+  it('runs terminal commands in the live persistent shell', async () => {
+    const result = await service.execInSession('task-1', { kind: 'terminal', code: 'ls -la' });
 
-    const exec = dockerCalls.find((c) => c.args[0] === 'exec');
-    expect(exec!.args.join(' ')).toContain('cd /work && ls -la');
+    expect(result.status).toBe('completed');
+    expect(shellProcs).toHaveLength(1);
+    expect(shellProcs[0].writes.some((w) => w.includes('ls -la'))).toBe(true);
+    // El comando NO va por `docker exec` por paso.
+    expect(dockerCalls.find((c) => c.args[0] === 'exec')).toBeUndefined();
+  });
+
+  it('forwards keystrokes to a waiting command via sendShellInput', async () => {
+    await service.execInSession('task-1', { kind: 'terminal', code: 'rm -i file' });
+    const res = await service.sendShellInput('task-1', { keyboard: 'y' });
+
+    expect(res.ok).toBe(true);
+    expect(shellProcs[0].writes.some((w) => w.trim() === 'y')).toBe(true);
+  });
+
+  it('multiplexes independent shells per session number', async () => {
+    await service.execInSession('task-1', { kind: 'terminal', code: 'echo a', session: 0 });
+    await service.execInSession('task-1', { kind: 'terminal', code: 'echo b', session: 1 });
+
+    // Dos shells distintos en el mismo contenedor (terminales paralelas).
+    expect(shellProcs).toHaveLength(2);
   });
 
   it('launches background processes detached and reads their log', async () => {
@@ -191,22 +254,15 @@ describe('SandboxService', () => {
     await expect(service.release('task-1')).resolves.toBeUndefined();
   });
 
-  it('returns timeout/error details as observations instead of throwing', async () => {
-    dockerSpy.mockImplementation(async (args: string[]) => {
-      dockerCalls.push({ args });
-      if (args[0] === 'image') throw new Error('no such image');
-      if (args[0] === 'run' && args.includes('-d')) return { stdout: 'cid', stderr: '' };
-      const err = new Error('Command failed') as Error & { killed?: boolean; stdout?: string; stderr?: string };
-      err.killed = false;
-      err.stdout = '';
-      err.stderr = 'SyntaxError: invalid syntax';
-      throw err;
-    });
+  it('surfaces a non-zero exit code and the program output from the live shell', async () => {
+    shellOutput = { output: 'Traceback...\nSyntaxError: invalid syntax', exit: 1 };
 
     const result = await service.execInSession('task-1', { kind: 'python', code: 'print(' });
 
-    expect(result.ok).toBe(false);
+    expect(result.status).toBe('completed');
+    expect(result.exitCode).toBe(1);
     expect(result.output).toContain('SyntaxError');
+    expect(result.output).toContain('[exit code: 1]');
   });
 
   // ── warm-up status ─────────────────────────────────────────────────────────

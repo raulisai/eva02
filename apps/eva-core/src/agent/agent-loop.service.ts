@@ -1170,12 +1170,13 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
       },
       {
         name: 'terminal_run',
-        usage: 'terminal_run{"cmd","background"?}: comando de shell en el sandbox de la tarea (cwd /work). background:true para procesos largos; léelos con terminal_output.',
+        usage: 'terminal_run{"cmd","session"?,"background"?}: comando de shell en una terminal VIVA del sandbox (cwd /work, estado persistente: cd, export, venv). "session" (0-9) abre terminales paralelas (ej. server en 1, pruebas en 0). Si el comando pide input verás [SISTEMA: espera input] → responde con terminal_input. Si sigue corriendo, léelo con terminal_output. background:true lo lanza detached.',
         inputSchema: {
           type: 'object',
           properties: {
             cmd: { type: 'string', description: 'Comando de shell a ejecutar en /work.' },
-            background: { type: 'boolean', description: 'true = ejecutar en background (leer con terminal_output).' },
+            session: { type: 'number', description: 'Número de terminal paralela (0 por defecto).' },
+            background: { type: 'boolean', description: 'true = ejecutar detached (leer con terminal_output).' },
           },
           required: ['cmd'],
         },
@@ -1183,17 +1184,43 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
           const cmd = String(args.cmd ?? '').trim();
           if (!cmd) return 'ERROR: terminal_run requiere args.cmd';
           const result = await this.sandbox.execInSession(taskId, {
-            kind: 'terminal', code: cmd, orgId, background: args.background === true,
+            kind: 'terminal', code: cmd, orgId,
+            background: args.background === true,
+            session: typeof args.session === 'number' ? args.session : 0,
+          });
+          return this.formatSandboxResult(result);
+        },
+      },
+      {
+        name: 'terminal_input',
+        usage: 'terminal_input{"keyboard","session"?}: envía texto al stdin de un comando que está esperando input (cuando terminal_run/code_execute reportó [SISTEMA: espera input]). Ej. "y" para confirmar, una contraseña, o una respuesta a un prompt.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            keyboard: { type: 'string', description: 'Texto a enviar (se le añade Enter automáticamente).' },
+            session: { type: 'number', description: 'Número de terminal donde está el comando (0 por defecto).' },
+          },
+          required: ['keyboard'],
+        },
+        execute: async (_orgId, taskId, args) => {
+          const result = await this.sandbox.sendShellInput(taskId, {
+            keyboard: String(args.keyboard ?? ''),
+            session: typeof args.session === 'number' ? args.session : 0,
           });
           return this.formatSandboxResult(result);
         },
       },
       {
         name: 'terminal_output',
-        usage: 'terminal_output{}: lee la salida acumulada del proceso en background del sandbox.',
-        inputSchema: { type: 'object', properties: {} },
-        execute: async (_orgId, taskId) => {
-          const result = await this.sandbox.readBackgroundOutput(taskId);
+        usage: 'terminal_output{"session"?}: reanuda la lectura de un comando que seguía corriendo en una terminal viva (o lee el log de un proceso en background).',
+        inputSchema: {
+          type: 'object',
+          properties: { session: { type: 'number', description: 'Número de terminal (0 por defecto).' } },
+        },
+        execute: async (_orgId, taskId, args) => {
+          const result = await this.sandbox.readShellOutput(taskId, {
+            session: typeof args.session === 'number' ? args.session : 0,
+          });
           return this.formatSandboxResult(result);
         },
       },
@@ -2009,8 +2036,15 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
       terminal_run: z.object({
         cmd: z.string().min(1, 'El comando no puede estar vacío'),
         background: z.boolean().optional(),
+        session: z.number().int().min(0).max(9).optional(),
       }),
-      terminal_output: z.object({}),
+      terminal_output: z.object({
+        session: z.number().int().min(0).max(9).optional(),
+      }),
+      terminal_input: z.object({
+        keyboard: z.string(),
+        session: z.number().int().min(0).max(9).optional(),
+      }),
       skill_run: z.object({ slug: z.string().min(1, 'El slug no puede estar vacío') }),
       skill_save: z.object({
         name: z.string().min(1, 'El nombre no puede estar vacío'),

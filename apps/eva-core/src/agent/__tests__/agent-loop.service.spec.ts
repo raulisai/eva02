@@ -132,6 +132,8 @@ describe('AgentLoopService', () => {
             execInSession: jest.fn().mockResolvedValue({ ok: true, output: 'resultado: 7' }),
             runOneShot: jest.fn().mockResolvedValue({ ok: true, output: 'net ok' }),
             readBackgroundOutput: jest.fn().mockResolvedValue({ ok: true, output: 'bg log' }),
+            readShellOutput: jest.fn().mockResolvedValue({ ok: true, output: 'bg log' }),
+            sendShellInput: jest.fn().mockResolvedValue({ ok: true, output: 'input enviado' }),
             release: jest.fn().mockResolvedValue(undefined),
             dockerAvailable: jest.fn().mockResolvedValue(true),
             getHostDir: jest.fn().mockReturnValue('/tmp'),
@@ -531,9 +533,25 @@ describe('AgentLoopService', () => {
 
     const result = await service.run(ORG, TASK, 'inspecciona el workspace');
 
-    expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, { kind: 'terminal', code: 'ls /work', orgId: ORG, background: false });
-    expect(sandbox.readBackgroundOutput).toHaveBeenCalledWith(TASK);
+    expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, { kind: 'terminal', code: 'ls /work', orgId: ORG, background: false, session: 0 });
+    expect(sandbox.readShellOutput).toHaveBeenCalledWith(TASK, { session: 0 });
     expect(result.steps[1].observation).toBe('bg log');
+  });
+
+  it('answers a waiting interactive prompt via terminal_input', async () => {
+    sandbox.execInSession.mockResolvedValueOnce({
+      ok: true, status: 'awaiting_input',
+      output: 'Overwrite? [y/n]\n[SISTEMA: el comando parece esperar input.]',
+    } as never);
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"corro","tool":"terminal_run","args":{"cmd":"cp -i a b"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"confirmo","tool":"terminal_input","args":{"keyboard":"y"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"hecho"}}'));
+
+    const result = await service.run(ORG, TASK, 'copia con confirmación');
+
+    expect(sandbox.sendShellInput).toHaveBeenCalledWith(TASK, { keyboard: 'y', session: 0 });
+    expect(result.ok).toBe(true);
   });
 
   // ── skills reutilizables ───────────────────────────────────────────────────

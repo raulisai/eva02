@@ -12,9 +12,13 @@
 FROM python:3.12-slim
 
 # ffmpeg: requerido por yt-dlp para muxing de video+audio en YouTube
+# bash + util-linux (script): habilitan el shell persistente con PTY real del
+# SandboxService (estado entre pasos + detección de diálogos interactivos).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    bash \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
