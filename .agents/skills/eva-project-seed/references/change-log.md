@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 17:27Z
+C: agent/loop: enhanced agency by removing obsolete sandbox read-only rules, making write-tool rules generic, and preventing search loops; files=apps/eva-core/src/agent/agent-loop.service.ts,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/agent-loop.service.spec.ts --runInBand && npm run build && npm run docs:check
+P: pending/improve -> evaluate loop performance on real tasks with writing actions and track success rate of the new prompt rules
+
 ### 2026-06-13 13:20Z
 C: agent/pipeline: pipeline retry now reuses `task.metadata.pipeline.definition` plus completed phase outputs and reruns only failed/skipped phases when the same task is reset to pending; files=apps/eva-core/src/agent/pipeline-runner.types.ts,apps/eva-core/src/agent/pipeline-runner.service.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/pipeline-runner.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts,docs/architecture.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/pipeline-runner.service.spec.ts src/agent/__tests__/agent-runner.service.spec.ts --runInBand; cd apps/eva-core && npm run build; npm run docs:check
 P: pending/improve -> add dashboard affordance/text that labels retry as "retry failed phases" when `metadata.pipeline.retryable` is true, so users understand completed phases will be reused.
