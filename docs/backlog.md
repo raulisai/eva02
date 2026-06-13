@@ -1,39 +1,25 @@
 # EVA · Living Backlog & Improvements
 
-This backlog keeps only relevant, actionable improvements. Completed items move out; environment-only smoke checks live in §6. Agents must update this file as they resolve items or discover new tasks.
+This backlog keeps only relevant, actionable improvements. Completed work moves out (it lives in code + CLAUDE.md, not here). Environment-only checks that need live credentials live in §4. Agents must update this file as they resolve items or discover new tasks.
 
 ---
 
 ## 1. Runtime Safety & Observability
-- [ ] **Sandbox Concurrency Stress Test**: Add a focused stress test for concurrent sandbox sessions releasing workspaces and background processes.
-- [ ] **Sandbox Network Compliance Telemetry**: Persist/report when the model requested network execution, whether it passed allowlist checks, and why it was blocked.
+- [ ] **Sandbox Concurrency Stress Test**: focused stress test for concurrent task containers + multiplexed persistent shells (`session` 0-9), background processes, and the idle reaper releasing workspaces without leaking containers or shell PIDs.
+- [ ] **Sandbox Network Compliance Telemetry**: persist/report when the model requested network execution, whether it passed the allowlist, and why it was blocked — so network usage is auditable.
 
 ---
 
-## 1a. Code Execution (Agent Zero parity)
-El sandbox foreground corre en un **shell persistente con PTY** ([sandbox-shell.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/sandbox-shell.ts) + `execInSession` en [sandbox.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/sandbox.service.ts)): estado de shell vivo entre pasos (env/cd/venv/procesos), timeouts multi-fase (`completed/running/awaiting_input`), detección de diálogo + tool `terminal_input`, terminales multiplexadas (`session` 0-9), limpieza ANSI/marker. Espejo de `plugins/_code_execution` de Agent Zero.
+## 2. Procedural Skills (Hermes parity)
+Skills system already shipped (doc-skills + stable index + `skill_view`/`skill_manage` + post-task `BackgroundReviewService`). Remaining work is gated on the migration below.
 
-Hecho (Tier 2-3): **IPython** para python en la imagen enriquecida con fallback a `python` (el shell elige el binario); **DirtyJson** en `parseDecision` ([json-repair.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/json-repair.ts): fences, comas colgantes, prosa, objetos truncados); **smoke real del PTY** extendido ([sandbox-smoke.ts](file:///Users/djoker/code/eva02/apps/eva-core/scripts/sandbox-smoke.ts), validado contra Docker — cazó y fijó un bug de ruta relativa tras `cd`: el código ahora se ejecuta con ruta absoluta `/work/...`).
-
-Pendiente:
-- [ ] **Rebuild de la imagen** para activar ipython: `docker build -t eva-sandbox docker/sandbox` (la imagen actual aún corre sin ipython → cae a python; Python 3.12 ya da tracebacks decentes).
-- [ ] **Time Travel** (Tier 4): snapshots de `/work` con revert en fronteras de fase.
+- [ ] **Apply migration 034 (blocker)**: `034_skill_docs.sql` (adds `content_md/category/is_pinned/kind` to `skills` + `skill_files` table with RLS) must be applied to Supabase cloud. Until then `skill_view`/`skill_manage` return empty and the whole doc-skill loop is inert.
+- [ ] **Surface background-review to the user**: emit a compact summary after the learning loop ("💾 Skill 'deploy-flow' updated"), mirroring Hermes' `summarize_background_review_actions`.
+- [ ] **Usage telemetry for doc-skills**: wire `skill_view`/`skill_manage` of `kind='doc'` skills into `skill_usage_stats` so the index demotion can rank by real usage, not just goal keyword overlap (today only `code` skills record outcomes via SkillLibraryService).
 
 ---
 
-## 1b. Procedural Skills (Hermes parity)
-Sistema de skills como memoria procedimental: `skills.content_md` + tabla `skill_files`, índice estable obligatorio en cada system prompt, `skill_view`/`skill_manage`, y `BackgroundReviewService` (learning loop post-tarea). Detalle en [skill-docs.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/skill-docs.service.ts) y [background-review.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/background-review.service.ts).
-
-Hecho: índice con demotion "solo nombres" para categorías fuera del goal; `viewSkill` surfacea vecinos del grafo (`skill_graph_edges`) + sustituye template vars (`${EVA_SKILL_DIR}`/`${EVA_TASK_ID}`); inline-shell `` !`cmd` `` expandido vía sandbox en el handler `skill_view`; background-review como mini-loop que puede `view` una skill antes de parchearla.
-
-- [ ] **Aplicar migración 034**: `034_skill_docs.sql` (añade `content_md/category/is_pinned/kind` a `skills` + tabla `skill_files` con RLS) requiere aplicarse en Supabase cloud. Hasta entonces `skill_view`/`skill_manage` devuelven vacío.
-- [ ] **Telemetría de uso para doc-skills**: conectar `skill_view`/`skill_manage` de skills `kind='doc'` a `skill_usage_stats` (hoy solo las `code` registran outcomes vía SkillLibraryService).
-- [ ] **Surface del background-review al usuario**: emitir un resumen compacto ("💾 Skill 'deploy-flow' actualizada") tras el learning loop, como hace Hermes (`summarize_background_review_actions`).
-- [ ] **Curator de consolidación**: job de autonomía que archive skills stale y consolide solapadas (el review ya puede señalar overlaps; falta el actor a escala).
-
----
-
-## 2. Profile Hub Roadmap
+## 3. Profile Hub Roadmap
 Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hub_plan.md).
 
 - [ ] **Fase 3 — Interaction**: direct edit/create for notes/todos/goals/events, drag reorder, dialogs, masking/reveal audit UI for private vault.
@@ -41,11 +27,11 @@ Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hu
 
 ---
 
-## 3. External Validation Queue
+## 4. External Validation Queue
 These require live credentials/environment and are not code backlog until available.
 
-- [ ] **RLS Verification**: After applying migrations 027-033 to Supabase, run `RLS_TEST=true npm run test:e2e` and verify `agent_souls.private_context_ciphertext` and `profile_private_items.ciphertext` are unreadable through authenticated Data API.
-- [ ] **Production Docker Check**: Verify Docker socket mount and `eva-sandbox-builder` image pull on the target Linux host.
-- [ ] **Live Telegram Media Smoke**: Test real Telegram webhook media limits, transcription, image analysis, `yt-dlp`, and document send flows with a live bot. Also test inline approval button taps.
-- [ ] **Live PDF-To-Telegram Smoke**: End-to-end task that researches, generates a PDF in `/work`, sends it through Telegram, and confirms `code_execute` + `telegram_send_file` in task log.
-- [ ] **Live Pipeline Smoke**: End-to-end: "Crea un informe de ventas, conviértelo a PDF y envíalo por Telegram" — confirm 3 phase logs, parallel wave detection, PDF artifact in `/work`, Telegram delivery.
+- [ ] **RLS Verification**: after applying migrations to Supabase, run `RLS_TEST=true npm run test:e2e` and verify `agent_souls.private_context_ciphertext` and `profile_private_items.ciphertext` are unreadable through the authenticated Data API.
+- [ ] **Production Docker Check**: on the target Linux host, verify the Docker socket mount and rebuild the enriched sandbox image (`docker build -t eva-sandbox docker/sandbox` — now bundles `bash` + `util-linux` for the PTY and `ipython` for rich tracebacks). Confirm the persistent shell (state across steps, dialog → `terminal_input`) works there.
+- [ ] **Live Telegram Media Smoke**: real Telegram webhook media limits, transcription, image analysis, `yt-dlp`, and document send flows with a live bot. Also test inline approval button taps.
+- [ ] **Live PDF-To-Telegram Smoke**: end-to-end task that researches, generates a PDF in `/work`, sends it through Telegram, and confirms `code_execute` + `telegram_send_file` in the task log.
+- [ ] **Live Pipeline Smoke**: end-to-end "Crea un informe de ventas, conviértelo a PDF y envíalo por Telegram" — confirm 3 phase logs, parallel wave detection, PDF artifact in `/work`, Telegram delivery.
