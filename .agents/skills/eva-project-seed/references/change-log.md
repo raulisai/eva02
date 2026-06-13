@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 18:07Z
+C: agent/tasks: added task horizon decision for background/scheduled/standby/approval routing, long ask_user timeouts, waiting_for_input for forms/setup, root prompt self-improvement policy, and formal task.step events; files=apps/eva-core/src/agent/tier.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/agent-intelligence.service.ts,apps/eva-core/src/events/event-bus.service.ts,apps/eva-core/src/gateway/events-bridge.service.ts,apps/eva-core/src/tasks/dto/transition-task.dto.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-intelligence.service.spec.ts,apps/eva-core/src/tasks/tasks.service.spec.ts,docs/architecture.md,docs/process_flows.md,docs/project_sections.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- --runInBand; cd apps/eva-core && npm run build; npm run docs:check
+P: pending/improve -> surface task.metadata.task_horizon in dashboard task detail and consider per-org configurable standby timeout defaults
+
 ### 2026-06-13 17:55Z
 C: agent/communication: implemented dynamic notification routing by task source and expanded long task step budgets; files=apps/eva-core/src/communication/communication.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/agent-intelligence.service.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-intelligence.service.spec.ts; tests=npm test in apps/eva-core, npm run build
 P: pending/improve -> evaluate the dynamic notification routing on a real WearOS device and check RLS policies
