@@ -1151,13 +1151,14 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
       },
       {
         name: 'code_execute',
-        usage: 'code_execute{"language":"python|node|bash","code","network"?}: ejecuta TU código literal en el sandbox de la tarea. /work persiste entre pasos; imprime resultados por stdout. Sin red por defecto (pasa "network":true si necesitas descargar de internet o llamar APIs externas; en este entorno la red está permitida y no requiere aprobación humana). Python incluye requests/pandas/numpy si la imagen eva-sandbox está instalada.',
+        usage: 'code_execute{"language":"python|node|bash","code","network"?,"session"?}: ejecuta TU código literal en el sandbox de la tarea. /work persiste entre pasos; imprime resultados por stdout. python/bash corren en una terminal VIVA (cwd y env compartidos con terminal_run de la misma "session"); usa "session" (0-9) para correr en paralelo (ej. server en 1, pruebas en 0). Sin red por defecto (pasa "network":true para descargar de internet o llamar APIs externas; en este entorno la red está permitida y no requiere aprobación humana). Python incluye requests/pandas/numpy si la imagen eva-sandbox está instalada.',
         inputSchema: {
           type: 'object',
           properties: {
             language: { type: 'string', enum: ['python', 'node', 'bash'], description: 'Lenguaje del código.' },
             code: { type: 'string', description: 'Código a ejecutar. Usa print()/console.log() para ver resultados.' },
             network: { type: 'boolean', description: 'true = permitir acceso a red (para descargas y llamadas a APIs).' },
+            session: { type: 'number', description: 'Terminal/sesión paralela (0-9, def. 0). El estado de shell (cwd, env) se comparte con terminal_run de la misma sesión.' },
           },
           required: ['language', 'code'],
         },
@@ -2027,6 +2028,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
         language: z.enum(['python', 'node', 'bash']).optional(),
         code: z.string().min(1, 'El código no puede estar vacío'),
         network: z.boolean().optional(),
+        session: z.number().int().min(0).max(9).optional(),
       }),
       terminal_run: z.object({
         cmd: z.string().min(1, 'El comando no puede estar vacío'),
@@ -2133,6 +2135,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
     if (!code) return 'ERROR: code_execute requiere args.code';
     const rawLang = String(args.language ?? 'python');
     const language: SandboxLanguage = rawLang === 'node' || rawLang === 'bash' ? rawLang : 'python';
+    const session = typeof args.session === 'number' ? args.session : 0;
 
     if (args.network === true) {
       if (this.intelligence) {
@@ -2140,7 +2143,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
         if (denied) return `ERROR: ${denied}`;
       }
       if (process.env.EVA_SANDBOX_ALLOW_NETWORK === 'true') {
-        const result = await this.sandbox.execInSession(taskId, { kind: language, code, orgId, network: true });
+        const result = await this.sandbox.execInSession(taskId, { kind: language, code, orgId, network: true, session });
         return this.formatSandboxResult(result);
       }
       if (!this.approvals || !opts.userId) {
@@ -2157,7 +2160,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
       return `PENDIENTE DE APROBACIÓN: la ejecución con red quedó en Approvals (hash ${approval.action_hash.slice(0, 12)}…). Se ejecutará al aprobarse. Continúa sin red o cierra con final_answer explicando que quedó pendiente.`;
     }
 
-    const result = await this.sandbox.execInSession(taskId, { kind: language, code, orgId });
+    const result = await this.sandbox.execInSession(taskId, { kind: language, code, orgId, session });
     return this.formatSandboxResult(result);
   }
 

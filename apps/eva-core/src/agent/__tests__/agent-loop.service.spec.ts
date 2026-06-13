@@ -463,9 +463,19 @@ describe('AgentLoopService', () => {
 
     const result = await service.run(ORG, TASK, 'calcula 3+4 con código');
 
-    expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, { kind: 'python', code: 'print(3+4)', orgId: ORG });
+    expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, { kind: 'python', code: 'print(3+4)', orgId: ORG, session: 0 });
     expect(result.steps[0].observation).toBe('resultado: 7');
     expect(result.text).toBe('Es 7.');
+  });
+
+  it('routes code_execute to a parallel session when the model picks one', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"sesion 1","tool":"code_execute","args":{"language":"python","code":"print(1)","session":1}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"listo"}}'));
+
+    await service.run(ORG, TASK, 'corre en paralelo');
+
+    expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, { kind: 'python', code: 'print(1)', orgId: ORG, session: 1 });
   });
 
   it('feeds sandbox errors back so the model can fix its own code', async () => {
@@ -517,6 +527,7 @@ describe('AgentLoopService', () => {
       code: 'import requests',
       orgId: ORG,
       network: true,
+      session: 0,
     });
     expect(sandbox.runOneShot).not.toHaveBeenCalled();
     expect(result.ok).toBe(true);
