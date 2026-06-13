@@ -9,31 +9,39 @@ import { AgentLoopStep } from './agent-loop.service';
  * Prompt that drives the background skill-review agent.
  * Mirrors Hermes' _SKILL_REVIEW_PROMPT from agent/background_review.py.
  */
-const SKILL_REVIEW_SYSTEM = `Eres un agente de revisión de aprendizaje para EVA. Tu única función es analizar una conversación de agente y decidir si se debe crear o actualizar alguna skill (conocimiento procedimental) en la biblioteca.
+const SKILL_REVIEW_SYSTEM = `Eres un agente de revisión de aprendizaje para EVA. Analizas una conversación de agente y actualizas la biblioteca de skills (conocimiento procedimental).
 
 Las skills son la MEMORIA PROCEDIMENTAL de EVA — encapsulan CÓMO hacer clases de tareas. La memoria declarativa (perfil del usuario) dice QUÉ sabe EVA sobre el usuario; las skills dicen CÓMO actuar.
 
+SÉ ACTIVO. La mayoría de sesiones produce al menos una actualización de skill, aunque sea pequeña. Una pasada que no hace nada es una oportunidad de aprendizaje perdida, no un resultado neutral. "none" es una opción real pero NO el default.
+
+FORMA OBJETIVO de la biblioteca: skills de CLASE (cada una con un SKILL.md rico y un directorio references/ para detalle específico), NO una lista plana de entradas estrechas de una-sesión-una-skill.
+
 SEÑALES que justifican actualizar skills (cualquiera es suficiente):
-  • El usuario corrigió el estilo, tono, formato, verbosidad o enfoque del agente.
-  • El agente descubrió una técnica, fix, workaround o patrón de debugging no trivial.
+  • El usuario corrigió el estilo, tono, formato, verbosidad o enfoque del agente. La frustración ('deja de hacer X', 'esto es muy verboso', 'solo dame la respuesta') es señal de skill de PRIMERA CLASE, no solo de memoria — embebe la lección en la skill que gobierna esa tarea para que la próxima sesión arranque ya corregida.
+  • El usuario corrigió el workflow, enfoque o secuencia de pasos. Codifícalo como pitfall o paso explícito.
+  • Emergió una técnica, fix, workaround o patrón de debugging no trivial.
   • Una skill cargada resultó incorrecta, incompleta o desactualizada — parchearla AHORA.
-  • Emergió un workflow multi-paso reproducible que beneficiaría una sesión futura.
 
 ORDEN DE PREFERENCIA (usa el primero que aplique):
-  1. ACTUALIZAR skill ya usada en la sesión (patch si tuvo pasos incorrectos o faltantes).
-  2. ACTUALIZAR skill umbrella existente (añade subsección o pitfall).
-  3. AÑADIR archivo de soporte (references/tema.md, templates/nombre.ext, scripts/nombre.ext).
-  4. CREAR nueva skill de clase cuando ninguna cubre el área.
+  1. ACTUALIZAR una skill que se cargó en la sesión (patch si tuvo pasos incorrectos o faltantes). Es la que estaba en juego.
+  2. ACTUALIZAR skill umbrella existente (inspecciónala con action="view" antes de parchear; añade subsección o pitfall).
+  3. AÑADIR archivo de soporte: references/tema.md (detalle de sesión, recetas de reproducción, quirks, bancos de conocimiento condensado), templates/nombre.ext (boilerplate copiable), scripts/nombre.ext (acciones re-ejecutables).
+  4. CREAR nueva skill de CLASE cuando ninguna cubre el área. El nombre DEBE ser de clase — NUNCA un número de PR, string de error, codename, o 'fix-X / debug-Y' de la tarea de hoy. Si el nombre solo tiene sentido para la tarea de hoy, está mal: cae a (1), (2) o (3).
 
-NUNCA captures:
-  • Errores transitorios que ya se resolvieron en la sesión.
-  • Afirmaciones negativas sobre tools ('X no funciona', 'no tengo acceso a Y').
-  • Tareas únicas que no son una clase reutilizable de trabajo.
-  • Progreso de sesión, SHAs de commits, números de PR o estado efímero.
+NUNCA captures (se endurecen en restricciones auto-impuestas que te muerden cuando el entorno cambia):
+  • Fallos dependientes del entorno: binarios faltantes, errores de instalación fresca, 'command not found', credenciales sin configurar. El usuario los arregla — no son reglas durables. Si un tool falló por estado de setup, captura el FIX (comando de instalación, paso de config), nunca 'este tool no funciona'.
+  • Afirmaciones negativas sobre tools o features ('los browser tools no funcionan', 'X está roto', 'no tengo acceso a Y'). Se endurecen en negativas que el agente se cita a sí mismo durante meses tras arreglarse el problema real.
+  • Errores transitorios que se resolvieron antes de terminar la sesión. Si el retry funcionó, la lección es el patrón de retry, no el fallo.
+  • Narrativas de tarea única ('resume el mercado de hoy', 'analiza este PR') — no son una clase reutilizable.
+
+Skills PROTEGIDAS (NO las edites): bundled (metadata.generated === false). Las pinned SÍ se pueden mejorar — pin solo bloquea borrado, no actualizaciones de contenido.
+
+PUEDES inspeccionar una skill existente antes de comprometerte. Responde {"action":"view","slug":"..."} para leer su SKILL.md y archivos; te devolveré el contenido y podrás decidir el patch exacto. Úsalo cuando vayas a parchear/editar y no tengas el contenido a la vista.
 
 Responde con JSON:
 {
-  "action": "create" | "patch" | "edit" | "write_file" | "none",
+  "action": "view" | "create" | "patch" | "edit" | "write_file" | "none",
   "slug": "nombre-de-skill",
   "display_name": "Nombre legible",
   "description": "Qué hace esta skill (≤120 caracteres)",
@@ -76,6 +84,21 @@ export interface ReviewInput {
   steps: AgentLoopStep[];
   finalText: string;
   userId?: string;
+}
+
+/** One decision emitted by the skill-review mini-agent. */
+interface SkillReviewDecision {
+  action: string;
+  slug?: string;
+  display_name?: string;
+  description?: string;
+  category?: string;
+  content_md?: string;
+  patch_find?: string;
+  patch_replace?: string;
+  file_path?: string;
+  file_content?: string;
+  reason?: string;
 }
 
 /**
@@ -129,47 +152,63 @@ export class BackgroundReviewService {
     ]);
   }
 
+  /**
+   * Skill review as a bounded mini-agent (Hermes parity — background_review.py
+   * forks a real agent with a memory+skills tool whitelist). Instead of a single
+   * blind JSON call, the reviewer may inspect an existing skill's full SKILL.md
+   * with {"action":"view"} before committing, so its patch_find/patch_replace
+   * target real text rather than guessing. Bounded to MAX_REVIEW_STEPS turns.
+   */
   private async runSkillReview(input: ReviewInput, transcript: string): Promise<void> {
+    const MAX_REVIEW_STEPS = 3;
     try {
       // Get existing skill index so the reviewer knows what already exists
       const existingIndex = await this.skillDocs.getSkillIndex(input.orgId);
       const indexSummary = existingIndex.length > 0
         ? `\nSkills existentes en la biblioteca (${existingIndex.length} total):\n` +
-          existingIndex.slice(0, 30).map((s) => `  - ${s.slug}: ${s.description.slice(0, 80)}`).join('\n')
+          existingIndex.slice(0, 40).map((s) => `  - ${s.slug}: ${s.description.slice(0, 80)}`).join('\n')
         : '\nBiblioteca de skills vacía — si encuentras un workflow valioso, créala.';
 
-      const prompt = `${transcript}\n\n${indexSummary}\n\n---\nRevisa la conversación arriba. Decide si crear, parchear o actualizar alguna skill de clase nivel en la biblioteca.`;
+      let context = `${transcript}\n\n${indexSummary}\n\n---\nRevisa la conversación arriba. Decide si crear, parchear o actualizar alguna skill de clase. Si vas a parchear una skill existente, inspecciónala primero con {"action":"view","slug":"..."}.`;
+      const viewed = new Set<string>();
 
-      const result = await this.modelRouter.generate(prompt, {
-        orgId: input.orgId,
-        taskId: input.taskId,
-        budget: 'cheap',
-        systemPrompt: SKILL_REVIEW_SYSTEM,
-        responseFormat: 'json',
-        temperature: 0,
-        maxTokens: 1200,
-      });
+      for (let step = 0; step < MAX_REVIEW_STEPS; step++) {
+        const result = await this.modelRouter.generate(context, {
+          orgId: input.orgId,
+          taskId: input.taskId,
+          budget: 'cheap',
+          systemPrompt: SKILL_REVIEW_SYSTEM,
+          responseFormat: 'json',
+          temperature: 0,
+          maxTokens: 1500,
+        });
 
-      const parsed = this.parseJson<{
-        action: string;
-        slug?: string;
-        display_name?: string;
-        description?: string;
-        category?: string;
-        content_md?: string;
-        patch_find?: string;
-        patch_replace?: string;
-        file_path?: string;
-        file_content?: string;
-        reason?: string;
-      }>(result.text);
+        const parsed = this.parseJson<SkillReviewDecision>(result.text);
 
-      if (!parsed || parsed.action === 'none') {
-        this.logger.debug(`background-review: no skill action (task ${input.taskId}): ${parsed?.reason ?? 'none'}`);
+        if (!parsed || parsed.action === 'none') {
+          this.logger.debug(`background-review: no skill action (task ${input.taskId}): ${parsed?.reason ?? 'none'}`);
+          return;
+        }
+
+        if (parsed.action === 'view') {
+          const slug = parsed.slug?.trim();
+          // Guard against loops: re-viewing the same skill ends the loop.
+          if (!slug || viewed.has(slug) || step === MAX_REVIEW_STEPS - 1) {
+            this.logger.debug(`background-review: view exhausted/looped (task ${input.taskId}, slug=${slug ?? '∅'})`);
+            return;
+          }
+          viewed.add(slug);
+          const detail = await this.skillDocs.viewSkill(input.orgId, slug);
+          const rendered = detail
+            ? `SKILL.md de '${slug}':\n${(detail.content_md ?? '(vacío)').slice(0, 4000)}\n\nArchivos de soporte: ${detail.files.map((f) => f.path).join(', ') || '(ninguno)'}`
+            : `Skill '${slug}' no encontrada (quizá no existe aún — usa action="create").`;
+          context = `${context}\n\nInspeccionaste '${slug}':\n${rendered}\n\n---\nAhora decide la acción definitiva (patch/edit/write_file/create/none).`;
+          continue;
+        }
+
+        await this.executeSkillAction(input.orgId, input.taskId, parsed);
         return;
       }
-
-      await this.executeSkillAction(input.orgId, input.taskId, parsed);
     } catch (err) {
       this.logger.debug(`skill-review skipped (task ${input.taskId}): ${(err as Error).message}`);
     }
@@ -178,19 +217,7 @@ export class BackgroundReviewService {
   private async executeSkillAction(
     orgId: string,
     taskId: string,
-    parsed: {
-      action: string;
-      slug?: string;
-      display_name?: string;
-      description?: string;
-      category?: string;
-      content_md?: string;
-      patch_find?: string;
-      patch_replace?: string;
-      file_path?: string;
-      file_content?: string;
-      reason?: string;
-    },
+    parsed: SkillReviewDecision,
   ): Promise<void> {
     const slug = parsed.slug?.trim();
     if (!slug) return;

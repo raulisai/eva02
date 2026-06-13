@@ -24,6 +24,8 @@ export interface SkillDocEntry {
 export interface SkillDocDetail extends SkillDocEntry {
   content_md: string | null;
   files: Array<{ subdir: string; filename: string; path: string }>;
+  /** Neighbors from the skill graph (skill_graph_edges) — supports/precedes/etc. */
+  related_skills: Array<{ slug: string; relation: string; weight: number }>;
 }
 
 export interface CreateSkillDocInput {
@@ -57,6 +59,8 @@ export type SkillManageResult =
 const MAX_CONTENT_CHARS = 60_000;
 const MAX_FILE_BYTES = 512_000;
 const SLUG_RE = /^[a-z0-9][a-z0-9._-]*$/;
+/** Below this many skills the index expands every category (no token pressure). */
+const EXPAND_ALL_THRESHOLD = 15;
 
 /**
  * SkillDocsService — procedural memory for EVA agents.
@@ -89,8 +93,15 @@ export class SkillDocsService {
    * Format mirrors Hermes' ## Skills (mandatory) block:
    *   category:
    *     - slug: description
+   *
+   * Token control (Hermes parity — prompt_builder._build_skills_system_prompt):
+   * cuando la biblioteca supera EXPAND_ALL_THRESHOLD skills, las categorías que
+   * NO son relevantes al goal se degradan a "solo nombres" (se omiten las
+   * descripciones para recortar tokens) pero NUNCA se ocultan — todo nombre
+   * sigue visible para que el recall anclado en memoria ("carga <slug>") funcione.
+   * Las skills pinned siempre se expanden.
    */
-  async getSkillIndexBlock(orgId: string): Promise<string> {
+  async getSkillIndexBlock(orgId: string, opts?: { goal?: string }): Promise<string> {
     const skills = await this.getSkillIndex(orgId);
     if (skills.length === 0) return '';
 
@@ -101,15 +112,45 @@ export class SkillDocsService {
       byCategory.get(cat)!.push(skill);
     }
 
+    // Decide which categories stay expanded. Below the threshold, expand all.
+    // Above it, expand only categories relevant to the goal (keyword overlap)
+    // plus any category that holds a pinned skill.
+    const goalTokens = this.tokenize(opts?.goal ?? '');
+    const expandAll = skills.length <= EXPAND_ALL_THRESHOLD || goalTokens.size === 0;
+    const expanded = new Set<string>();
+    if (!expandAll) {
+      for (const [cat, entries] of byCategory) {
+        const hasPinned = entries.some((e) => e.is_pinned);
+        const catTokens = this.tokenize(
+          `${cat} ${entries.map((e) => `${e.slug} ${e.description}`).join(' ')}`,
+        );
+        let overlap = 0;
+        for (const t of goalTokens) if (catTokens.has(t)) overlap++;
+        if (hasPinned || overlap > 0) expanded.add(cat);
+      }
+    }
+
     const lines: string[] = [];
+    let demotedCount = 0;
     for (const [category, entries] of [...byCategory.entries()].sort()) {
+      const sorted = entries.sort((a, b) => a.slug.localeCompare(b.slug));
+      if (!expandAll && !expanded.has(category)) {
+        // Names-only demotion: keep slugs, drop descriptions.
+        demotedCount += sorted.length;
+        lines.push(`  ${category} [solo nombres]: ${sorted.map((s) => s.slug).join(', ')}`);
+        continue;
+      }
       lines.push(`  ${category}:`);
-      for (const s of entries.sort((a, b) => a.slug.localeCompare(b.slug))) {
+      for (const s of sorted) {
         const pin = s.is_pinned ? ' [pinned]' : '';
         const src = s.source === 'bundled' ? ' [bundled]' : '';
         lines.push(`    - ${s.slug}${pin}${src}: ${s.description.slice(0, 120)}`);
       }
     }
+
+    const demotedNote = demotedCount > 0
+      ? '\n(Las categorías marcadas [solo nombres] están fuera del contexto actual, así que se omiten sus descripciones — las skills funcionan igual y se cargan con skill_view(slug) como siempre.)'
+      : '';
 
     return (
       '## Skills (memoria procedimental — obligatorio)\n' +
@@ -123,8 +164,62 @@ export class SkillDocsService {
       '<available_skills>\n' +
       lines.join('\n') + '\n' +
       '</available_skills>\n\n' +
-      'Solo procede sin cargar una skill si genuinamente ninguna es relevante.'
+      'Solo procede sin cargar una skill si genuinamente ninguna es relevante.' +
+      demotedNote
     );
+  }
+
+  /** Lowercase word tokens ≥3 chars — used for goal↔category relevance scoring. */
+  private tokenize(text: string): Set<string> {
+    return new Set(
+      (text.toLowerCase().match(/[a-záéíóúñ0-9]+/g) ?? []).filter((t) => t.length >= 3),
+    );
+  }
+
+  /**
+   * Top skill-graph neighbors of *slug*, ordered by edge weight.
+   * Reads skill_graph_edges (populated by SkillLibraryService outcome logging),
+   * so viewing a skill can point the agent at related ones.
+   */
+  private async fetchRelatedSkills(
+    orgId: string,
+    slug: string,
+    limit = 5,
+  ): Promise<Array<{ slug: string; relation: string; weight: number }>> {
+    try {
+      const { data } = await this.db.admin
+        .from('skill_graph_edges')
+        .select('to_skill_slug, relation, weight')
+        .eq('org_id', orgId)
+        .eq('from_skill_slug', slug)
+        .order('weight', { ascending: false })
+        .limit(limit);
+
+      return ((data ?? []) as Array<{ to_skill_slug: string; relation: string; weight: number }>)
+        .filter((e) => e.to_skill_slug && e.to_skill_slug !== slug && (e.weight ?? 0) > 0)
+        .map((e) => ({ slug: e.to_skill_slug, relation: e.relation, weight: Number(e.weight) || 0 }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Substitute ${EVA_SKILL_DIR} / ${EVA_TASK_ID} tokens in skill content.
+   * Mirrors Hermes' skill_preprocessing.substitute_template_vars — only tokens
+   * with a concrete value are replaced; unresolved ones are left as-is so the
+   * author can spot them. Inline-shell (`!\`cmd\``) is expanded separately by the
+   * agent-loop through the sandbox, since that requires execution context.
+   */
+  substituteTemplateVars(
+    content: string | null,
+    vars: { skillDir?: string; taskId?: string },
+  ): string | null {
+    if (!content) return content;
+    return content.replace(/\$\{(EVA_SKILL_DIR|EVA_TASK_ID)\}/g, (match, token) => {
+      if (token === 'EVA_SKILL_DIR' && vars.skillDir) return vars.skillDir;
+      if (token === 'EVA_TASK_ID' && vars.taskId) return vars.taskId;
+      return match;
+    });
   }
 
   async getSkillIndex(orgId: string): Promise<SkillDocEntry[]> {
@@ -165,11 +260,11 @@ export class SkillDocsService {
    * Returns full SKILL.md content + list of support files.
    * Progressive disclosure tier 2 — called when agent decides a skill is relevant.
    */
-  async viewSkill(orgId: string, slug: string): Promise<SkillDocDetail | null> {
+  async viewSkill(orgId: string, slug: string, opts?: { taskId?: string }): Promise<SkillDocDetail | null> {
     try {
       const { data: skill, error } = await this.db.admin
         .from('skills')
-        .select('slug, display_name, description, category, kind, is_pinned, content_md, metadata, latest_version')
+        .select('id, slug, display_name, description, category, kind, is_pinned, content_md, metadata, latest_version')
         .eq('org_id', orgId)
         .eq('slug', slug)
         .in('status', ['active', 'provisional'])
@@ -215,6 +310,17 @@ export class SkillDocsService {
         path: `${f.subdir}/${f.filename}`,
       }));
 
+      // Skill-graph neighbors: surface related skills so loading one suggests
+      // the others that historically co-occur or support it (Hermes parity:
+      // skills_tool related_skills, backed here by skill_graph_edges).
+      const related = await this.fetchRelatedSkills(orgId, row.slug);
+
+      // Template-var substitution (Hermes skill_preprocessing.substitute_template_vars).
+      const renderedContent = this.substituteTemplateVars(contentMd ?? null, {
+        skillDir: `skill://${row.slug}`,
+        taskId: opts?.taskId,
+      });
+
       return {
         slug: row.slug,
         display_name: row.display_name,
@@ -223,8 +329,9 @@ export class SkillDocsService {
         kind: (row.kind ?? 'code') as 'code' | 'doc',
         is_pinned: row.is_pinned ?? false,
         source: (row.metadata?.generated === false ? 'bundled' : 'generated') as 'bundled' | 'generated',
-        content_md: contentMd ?? null,
+        content_md: renderedContent,
         files: fileList,
+        related_skills: related,
       };
     } catch (err) {
       this.logger.warn(`viewSkill(${slug}) failed: ${(err as Error).message}`);

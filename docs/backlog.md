@@ -10,6 +10,18 @@ This backlog keeps only relevant, actionable improvements. Completed items move 
 
 ---
 
+## 1b. Procedural Skills (Hermes parity)
+Sistema de skills como memoria procedimental: `skills.content_md` + tabla `skill_files`, índice estable obligatorio en cada system prompt, `skill_view`/`skill_manage`, y `BackgroundReviewService` (learning loop post-tarea). Detalle en [skill-docs.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/skill-docs.service.ts) y [background-review.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/background-review.service.ts).
+
+Hecho: índice con demotion "solo nombres" para categorías fuera del goal; `viewSkill` surfacea vecinos del grafo (`skill_graph_edges`) + sustituye template vars (`${EVA_SKILL_DIR}`/`${EVA_TASK_ID}`); inline-shell `` !`cmd` `` expandido vía sandbox en el handler `skill_view`; background-review como mini-loop que puede `view` una skill antes de parchearla.
+
+- [ ] **Aplicar migración 034**: `034_skill_docs.sql` (añade `content_md/category/is_pinned/kind` a `skills` + tabla `skill_files` con RLS) requiere aplicarse en Supabase cloud. Hasta entonces `skill_view`/`skill_manage` devuelven vacío.
+- [ ] **Telemetría de uso para doc-skills**: conectar `skill_view`/`skill_manage` de skills `kind='doc'` a `skill_usage_stats` (hoy solo las `code` registran outcomes vía SkillLibraryService).
+- [ ] **Surface del background-review al usuario**: emitir un resumen compacto ("💾 Skill 'deploy-flow' actualizada") tras el learning loop, como hace Hermes (`summarize_background_review_actions`).
+- [ ] **Curator de consolidación**: job de autonomía que archive skills stale y consolide solapadas (el review ya puede señalar overlaps; falta el actor a escala).
+
+---
+
 ## 2. Profile Hub Roadmap
 Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hub_plan.md).
 

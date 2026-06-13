@@ -1257,25 +1257,33 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
           },
           required: ['slug'],
         },
-        execute: async (orgId, _taskId, args) => {
+        execute: async (orgId, taskId, args) => {
           const slug = String(args.slug ?? '').trim();
           if (!slug) return 'ERROR: skill_view requiere args.slug';
           const filePath = args.file_path ? String(args.file_path).trim() : undefined;
 
           if (filePath) {
-            const content = await this.skillDocs.viewSkillFile(orgId, slug, filePath);
+            let content = await this.skillDocs.viewSkillFile(orgId, slug, filePath);
             if (!content) return `ERROR: Archivo '${filePath}' no encontrado en skill '${slug}'.`;
+            content = this.skillDocs.substituteTemplateVars(content, { skillDir: `skill://${slug}`, taskId }) ?? content;
+            content = await this.expandSkillInlineShell(content, orgId, taskId);
             return `[${slug}/${filePath}]\n\n${content}`;
           }
 
-          const skill = await this.skillDocs.viewSkill(orgId, slug);
+          const skill = await this.skillDocs.viewSkill(orgId, slug, { taskId });
           if (!skill) return `ERROR: Skill '${slug}' no encontrada. Usa skill_manage(action="list") o revisa el índice de skills.`;
+
+          const body = await this.expandSkillInlineShell(
+            skill.content_md ?? '(sin contenido — usa skill_manage para añadir instrucciones)',
+            orgId,
+            taskId,
+          );
 
           const parts: string[] = [
             `[Skill: ${skill.display_name} (${slug})]`,
             skill.description,
             '',
-            skill.content_md ?? '(sin contenido — usa skill_manage para añadir instrucciones)',
+            body,
           ];
 
           if (skill.files.length > 0) {
@@ -1284,6 +1292,13 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
               parts.push(`  - ${f.path}  →  skill_view{"slug":"${slug}","file_path":"${f.path}"}`);
             }
             parts.push('Carga cualquiera con skill_view(slug, file_path="...").');
+          }
+
+          if (skill.related_skills.length > 0) {
+            parts.push('', '[Skills relacionadas (grafo de uso):]');
+            for (const r of skill.related_skills) {
+              parts.push(`  - ${r.slug} (${r.relation})  →  skill_view{"slug":"${r.slug}"}`);
+            }
           }
 
           return parts.join('\n');
@@ -2197,7 +2212,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
     const [skills, secretAliases, skillsIndexBlock] = await Promise.all([
       this.skillLibrary.findRelevant(orgId, goal).catch(() => []),
       this.listSecretAliases(orgId),
-      this.skillDocs.getSkillIndexBlock(orgId).catch(() => ''),
+      this.skillDocs.getSkillIndexBlock(orgId, { goal }).catch(() => ''),
     ]);
     return {
       skills: skills.map((s) => ({
@@ -2216,6 +2231,41 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
       secretAliases,
       skillsIndexBlock,
     };
+  }
+
+  /**
+   * Expand inline-shell snippets (`!\`cmd\``) inside a SKILL.md by running each
+   * through the per-task sandbox (Hermes skill_preprocessing.expand_inline_shell,
+   * adapted to EVA's container). Execution is gated by the sandbox — rootfs
+   * read-only, no network, per-task — so a skill can embed dynamic context
+   * (`!\`date\``, `!\`ls /work\``) without arbitrary host access. Bounded to
+   * MAX_INLINE_SHELL snippets and MAX_INLINE_SHELL_OUTPUT chars each.
+   */
+  private async expandSkillInlineShell(content: string, orgId: string, taskId: string): Promise<string> {
+    if (!content || !content.includes('!`')) return content;
+    const MAX_INLINE_SHELL = 8;
+    const MAX_INLINE_SHELL_OUTPUT = 4000;
+    const re = /!`([^`\n]+)`/g;
+    const matches = [...content.matchAll(re)].slice(0, MAX_INLINE_SHELL);
+    if (matches.length === 0) return content;
+
+    let out = content;
+    for (const m of matches) {
+      const cmd = m[1].trim();
+      if (!cmd) { out = out.replace(m[0], ''); continue; }
+      let rendered: string;
+      try {
+        const res = await this.sandbox.execInSession(taskId, { kind: 'terminal', code: cmd, orgId, background: false });
+        rendered = res.ok ? (res.output ?? '') : `[inline-shell error: ${(res.output ?? 'falló').slice(0, 200)}]`;
+      } catch (err) {
+        rendered = `[inline-shell error: ${(err as Error).message.slice(0, 200)}]`;
+      }
+      if (rendered.length > MAX_INLINE_SHELL_OUTPUT) {
+        rendered = rendered.slice(0, MAX_INLINE_SHELL_OUTPUT) + '...[truncado]';
+      }
+      out = out.replace(m[0], rendered.trimEnd());
+    }
+    return out;
   }
 
   private recordSkillOutcome(
