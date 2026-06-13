@@ -77,7 +77,7 @@ const DAYS_ES: Record<RecurrenceDays, string> = {
 };
 
 // Haversine distance in meters
-function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+export function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6_371_000;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLng = ((lng2 - lng1) * Math.PI) / 180;
@@ -86,6 +86,7 @@ function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number)
     Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
+
 
 // ── Service ──────────────────────────────────────────────────────────────────
 
@@ -231,6 +232,24 @@ export class ScheduleService {
       .maybeSingle();
     return data as KnownPlace | null;
   }
+
+  async getLatestLocation(orgId: string): Promise<LocationReport | null> {
+    const { data, error } = await this.db.admin
+      .from('location_visits')
+      .select('lat, lng, accuracy_m, recorded_at')
+      .eq('org_id', orgId)
+      .order('recorded_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error || !data) return null;
+    return {
+      lat: data.lat,
+      lng: data.lng,
+      accuracy_m: data.accuracy_m ?? undefined,
+      recorded_at: data.recorded_at,
+    };
+  }
+
 
   /**
    * Records a GPS location report from the watch.

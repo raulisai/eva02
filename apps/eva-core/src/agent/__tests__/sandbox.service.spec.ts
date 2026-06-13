@@ -396,4 +396,57 @@ describe('SandboxService', () => {
     expect(run!.args).toEqual(expect.arrayContaining(['--network', 'bridge']));
     delete process.env.EVA_SANDBOX_ALLOW_NETWORK;
   });
+
+  it('downloads task inbound media to hostDir when creating a session', async () => {
+    const mockTasksSelect = jest.fn().mockReturnValue({
+      eq: jest.fn().mockReturnThis(),
+      maybeSingle: jest.fn().mockResolvedValue({
+        data: {
+          metadata: {
+            inbound_media: [
+              {
+                kind: 'image',
+                fileName: 'photo.jpg',
+                url: 'https://example.com/photo.jpg',
+              },
+            ],
+          },
+        },
+      }),
+    });
+
+    const mockDb = {
+      admin: {
+        from: jest.fn().mockReturnValue({
+          select: mockTasksSelect,
+        }),
+      },
+    };
+
+    const originalFetch = global.fetch;
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: jest.fn().mockResolvedValue(new ArrayBuffer(10)),
+    });
+    global.fetch = fetchMock;
+
+    const serviceWithDb = new SandboxService(
+      integrations as unknown as IntegrationsService,
+      mockDb as any,
+    );
+    jest.spyOn(serviceWithDb, 'dockerAvailable').mockResolvedValue(true);
+
+    const r = await serviceWithDb.execInSession('task-media', {
+      kind: 'python',
+      code: 'print(1)',
+      orgId: 'org-123',
+    });
+
+    expect(r.ok).toBe(true);
+    expect(mockDb.admin.from).toHaveBeenCalledWith('tasks');
+    expect(mockTasksSelect).toHaveBeenCalledWith('metadata');
+    expect(fetchMock).toHaveBeenCalledWith('https://example.com/photo.jpg');
+
+    global.fetch = originalFetch;
+  });
 });

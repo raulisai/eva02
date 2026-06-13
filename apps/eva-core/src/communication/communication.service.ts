@@ -608,6 +608,7 @@ export class CommunicationService implements OnApplicationBootstrap {
         if (attachment.url) {
           parts.push(
             `Imagen recibida por Telegram: ${attachment.url}\n`
+            + `Guardada en el sandbox como: /work/${attachment.fileName}\n`
             + 'Analiza la imagen con image_analyze antes de responder; describe lo que ves y usa el texto del usuario como contexto.',
           );
         } else {
@@ -617,10 +618,14 @@ export class CommunicationService implements OnApplicationBootstrap {
 
       if (attachment.kind === 'audio') {
         if (attachment.transcript) {
-          parts.push(`Transcripcion del audio recibido por Telegram:\n${attachment.transcript}`);
+          parts.push(
+            `Transcripcion del audio recibido por Telegram:\n${attachment.transcript}\n\n`
+            + `El archivo de audio original está guardado en el sandbox como: /work/${attachment.fileName}`,
+          );
         } else if (attachment.url) {
           parts.push(
             `Audio recibido por Telegram: ${attachment.url}\n`
+            + `Guardado en el sandbox como: /work/${attachment.fileName}\n`
             + `No se pudo transcribir automaticamente: ${attachment.error ?? 'no hay transcriptor configurado'}. `
             + 'Pide una version en texto si necesitas el contenido exacto.',
           );
@@ -720,14 +725,29 @@ export class CommunicationService implements OnApplicationBootstrap {
     }
 
     const document = message.document;
-    if (document?.file_id && this.isSupportedImageContentType(document.mime_type)) {
-      candidates.push({
-        kind: 'image',
-        fileId: document.file_id,
-        fileName: document.file_name ?? `telegram-image-${message.message_id}.${this.extensionForContentType(document.mime_type ?? 'image/jpeg')}`,
-        contentType: document.mime_type ?? 'image/jpeg',
-        fileSize: document.file_size,
-      });
+    if (document?.file_id) {
+      const docMime = document.mime_type ?? '';
+      const docExt = document.file_name?.split('.').pop()?.toLowerCase() ?? '';
+      const isImg = this.isSupportedImageContentType(docMime) || ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(docExt);
+      const isAud = this.isSupportedAudioContentType(docMime) || ['mp3', 'wav', 'ogg', 'm4a', 'aac'].includes(docExt);
+
+      if (isImg) {
+        candidates.push({
+          kind: 'image',
+          fileId: document.file_id,
+          fileName: document.file_name ?? `telegram-image-${message.message_id}.${this.extensionForContentType(docMime || 'image/jpeg')}`,
+          contentType: docMime || 'image/jpeg',
+          fileSize: document.file_size,
+        });
+      } else if (isAud) {
+        candidates.push({
+          kind: 'audio',
+          fileId: document.file_id,
+          fileName: document.file_name ?? `telegram-audio-${message.message_id}.${this.extensionForContentType(docMime || 'audio/mpeg')}`,
+          contentType: docMime || 'audio/mpeg',
+          fileSize: document.file_size,
+        });
+      }
     }
 
     const voice = message.voice;
@@ -833,6 +853,10 @@ export class CommunicationService implements OnApplicationBootstrap {
 
   private isSupportedImageContentType(contentType?: string): boolean {
     return /^image\/(png|jpe?g|webp|gif)$/i.test(contentType ?? '');
+  }
+
+  private isSupportedAudioContentType(contentType?: string): boolean {
+    return /^audio\/(mpeg|mp3|ogg|wav|mp4|m4a|x-wav|aac)$/i.test(contentType ?? '');
   }
 
   private contentTypeFromPath(path?: string): string {

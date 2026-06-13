@@ -154,9 +154,12 @@ export class TelegramAdapter {
     const botToken = token ?? this.envToken;
     if (!botToken) return { ok: true, skipped: true, externalMessageId: null };
 
-    // Elegir método: sendVideo para formatos nativos (mejor UX en Telegram), sendDocument para el resto.
+    // Elegir método adecuado según la extensión del archivo para mejor UX en Telegram.
     const ext = filename.split('.').pop()?.toLowerCase() ?? '';
     const isNativeVideo = ['mp4', 'webm', 'mov'].includes(ext);
+    const isImage = ['jpg', 'jpeg', 'png', 'webp'].includes(ext);
+    const isVoice = ['ogg'].includes(ext);
+    const isAudio = ['mp3', 'wav', 'm4a'].includes(ext);
 
     let uploadBuffer = buffer;
     let uploadFilename = filename;
@@ -190,12 +193,28 @@ export class TelegramAdapter {
     }
 
     const uploadExt = uploadFilename.split('.').pop()?.toLowerCase() ?? ext;
-    const method = isNativeVideo ? 'sendVideo' : 'sendDocument';
-    const fieldName = isNativeVideo ? 'video' : 'document';
+    
+    let method = 'sendDocument';
+    let fieldName = 'document';
+
+    if (isNativeVideo) {
+      method = 'sendVideo';
+      fieldName = 'video';
+    } else if (isImage) {
+      method = 'sendPhoto';
+      fieldName = 'photo';
+    } else if (isVoice) {
+      method = 'sendVoice';
+      fieldName = 'voice';
+    } else if (isAudio) {
+      method = 'sendAudio';
+      fieldName = 'audio';
+    }
 
     const mimeMap: Record<string, string> = {
       mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
-      mp3: 'audio/mpeg', ogg: 'audio/ogg', m4a: 'audio/mp4',
+      mp3: 'audio/mpeg', ogg: 'audio/ogg', m4a: 'audio/mp4', wav: 'audio/wav',
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
       pdf: 'application/pdf', zip: 'application/zip',
     };
     const mimeType = mimeMap[uploadExt] ?? 'application/octet-stream';

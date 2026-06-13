@@ -2465,6 +2465,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
         userId,
         maxSteps,
         capabilityModel,
+        tier: classifyTier(input).tier,
         log: (message, scope) => this.log(orgId, taskId, message, scope),
       });
       if (!outcome.ok || !outcome.text) return false;

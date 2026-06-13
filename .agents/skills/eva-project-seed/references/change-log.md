@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 21:06Z
+C: agent/communication: improved inbound/outbound Telegram media handling with native format routing and automatic sandbox media downloading; files=apps/eva-core/src/communication/telegram.adapter.ts,apps/eva-core/src/communication/communication.service.ts,apps/eva-core/src/agent/sandbox.service.ts,apps/eva-core/src/communication/__tests__/telegram.adapter.spec.ts,apps/eva-core/src/agent/__tests__/sandbox.service.spec.ts,apps/eva-core/src/communication/__tests__/communication.service.spec.ts; tests=cd apps/eva-core && npm test
+P: pending/improve -> verify that the downloaded files are correctly accessible to Python and bash tools in a live sandbox environment
+
 ### 2026-06-13 19:01Z
 C: dashboard/skills: moved skill delete button to the left side next to status badge; files=apps/eva-dashboard/components/skills/skill-list.tsx; tests=npm run build
 P: pending/improve -> surface delete confirmation inline to avoid browser native confirm alert

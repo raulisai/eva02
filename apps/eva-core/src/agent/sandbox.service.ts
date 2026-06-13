@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { IntegrationsService } from '../integrations/integrations.service';
+import { DatabaseService } from '../database/database.service';
 import {
   PersistentShell,
   ShellProcess,
@@ -154,7 +155,10 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly STANDBY_NAME = 'eva-standby';
   standbyReady = false;
 
-  constructor(@Optional() private readonly integrations?: IntegrationsService) {
+  constructor(
+    @Optional() private readonly integrations?: IntegrationsService,
+    @Optional() private readonly db?: DatabaseService,
+  ) {
     this.reaper = setInterval(() => void this.reapIdleSessions(), 60_000);
     this.reaper.unref();
   }
@@ -347,7 +351,7 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
     const resolved = await this.resolveSecrets(opts.code, opts.orgId);
     if (resolved.error) return { ok: false, output: '', error: resolved.error };
 
-    const session = await this.getOrCreateSession(taskId, networkRequested);
+    const session = await this.getOrCreateSession(taskId, networkRequested, opts.orgId);
     if (!session) {
       // Resiliencia: sin sesión persistente, el paso aún puede correr one-shot
       // (se pierde /work entre pasos, pero la tarea no se queda sin computadora).
@@ -496,7 +500,7 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
 
   // ── private ───────────────────────────────────────────────────────────────
 
-  private async getOrCreateSession(taskId: string, networkEnabled = false): Promise<SandboxSession | null> {
+  private async getOrCreateSession(taskId: string, networkEnabled = false, orgId?: string): Promise<SandboxSession | null> {
     // Clave de sesión: red y no-red son contenedores separados en la misma tarea.
     const sessionKey = networkEnabled ? `${taskId}:net` : taskId;
     const existing = this.sessions.get(sessionKey);
@@ -510,6 +514,10 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
     const otherKey = networkEnabled ? taskId : `${taskId}:net`;
     const otherSession = this.sessions.get(otherKey);
     const hostDir = otherSession ? otherSession.hostDir : await mkdtemp(join(tmpdir(), 'eva-sbx-ws-'));
+
+    if (!otherSession && orgId) {
+      await this.downloadTaskInboundMedia(taskId, orgId, hostDir);
+    }
 
     // Si el standby está listo y no necesitamos red, liberamos el standby ahora
     // para que el nombre 'eva-standby' quede libre antes de recrearlo.
@@ -556,6 +564,52 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
     }
 
     return session;
+  }
+
+  private async downloadTaskInboundMedia(taskId: string, orgId: string, hostDir: string): Promise<void> {
+    if (!this.db) return;
+    try {
+      const { data: task, error } = await this.db.admin
+        .from('tasks')
+        .select('metadata')
+        .eq('id', taskId)
+        .eq('org_id', orgId)
+        .maybeSingle();
+
+      if (error || !task) {
+        this.logger.warn(`Could not fetch task ${taskId} for downloading inbound media: ${error?.message}`);
+        return;
+      }
+
+      const metadata = task.metadata as Record<string, any> | null;
+      const inboundMedia = metadata?.inbound_media as Array<{
+        kind: string;
+        fileName: string;
+        url?: string;
+      }> | null;
+
+      if (!inboundMedia || !Array.isArray(inboundMedia)) return;
+
+      for (const media of inboundMedia) {
+        if (media.url && media.fileName) {
+          try {
+            const res = await fetch(media.url);
+            if (!res.ok) {
+              this.logger.warn(`Failed to download task inbound media from ${media.url}: HTTP ${res.status}`);
+              continue;
+            }
+            const buffer = Buffer.from(await res.arrayBuffer());
+            const targetPath = join(hostDir, media.fileName);
+            await writeFile(targetPath, buffer);
+            this.logger.log(`Downloaded inbound media file ${media.fileName} to sandbox: ${targetPath}`);
+          } catch (err) {
+            this.logger.warn(`Failed to download or write inbound media ${media.fileName}: ${(err as Error).message}`);
+          }
+        }
+      }
+    } catch (e) {
+      this.logger.warn(`Error during downloadTaskInboundMedia: ${(e as Error).message}`);
+    }
   }
 
   private async runNodeOnSharedWorkspace(

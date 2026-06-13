@@ -5,7 +5,7 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { MemoryAgentService } from '../memory/memory-agent.service';
 import { ModelRouterService } from '../model-router/model-router.service';
-import { GenerateResult, ModelBudget, ToolDefinition } from '../model-router/model-router.types';
+import { GenerateResult, ToolDefinition } from '../model-router/model-router.types';
 import { GmailService } from './gmail.service';
 import { GoogleCalendarService } from './google-calendar.service';
 import { GoogleDriveService } from './google-drive.service';
@@ -29,6 +29,15 @@ import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
 import { SkillDocsService } from './skill-docs.service';
 import { BackgroundReviewService } from './background-review.service';
 import { tryParseDirty } from './json-repair';
+import {
+  BudgetState,
+  applyPhaseFloor,
+  deescalateOnSuccess,
+  escalateOnEvent,
+  inferPhase,
+  initialBudget,
+} from './budget-policy';
+import { Tier } from './tier';
 import { z } from 'zod';
 
 
@@ -72,6 +81,8 @@ export interface AgentLoopOptions {
   capabilityModel?: string;
   /** R4.2: Current ladder level for gap registration (3=collab, 4=manual, 5=deferred). */
   ladderLevel?: 3 | 4 | 5;
+  /** Task tier from the runner triage — drives the initial model budget. */
+  tier?: Tier;
 }
 
 type ToolExecutor = (orgId: string, taskId: string, args: Record<string, unknown>) => Promise<string>;
@@ -217,8 +228,11 @@ export class AgentLoopService {
     let formatHint: string | undefined;
     let dodRejections = 0;
     let stallCount = 0;
-    let currentBudget: ModelBudget = 'cheap';
-    let budgetReason = 'initial';
+    // Budget policy: complex tasks (long/medium or with mandatory deliverables)
+    // open at `balanced` so the trajectory-setting first decisions are sound.
+    let budgetState: BudgetState = depth === 0
+      ? initialBudget(opts.tier, deliveryRequirements.length > 0)
+      : { budget: 'cheap', reason: 'sub-agent', hardEvents: 0, cleanSuccesses: 0 };
     const modelBudgetPerStep: ModelBudgetStep[] = [];
     let plan: AgentPlanItem[] = [];
     const replayContext = depth === 0 && this.intelligence ? await this.intelligence.replayExample(orgId, goal).catch(() => null) : null;
@@ -334,6 +348,14 @@ export class AgentLoopService {
       // Per-step adaptive tool loading: only send tools relevant to current phase.
       const stepTools = this.selectToolsForPhase(available, steps, maxSteps, goalSignals, depth);
       const toolDefinitions = this.buildToolDefinitions(stepTools);
+      // Phase-aware floor: planning/synthesis steps deserve ≥ balanced reasoning,
+      // even if the ladder/de-escalation left us at cheap.
+      const lastTool = steps.length > 0 ? steps[steps.length - 1].tool : undefined;
+      const phase = depth === 0
+        ? inferPhase(i, maxSteps, lastTool, this.missingDeliveryRequirements(steps, deliveryRequirements).length > 0)
+        : 'research';
+      const { budget: stepBudget, floored } = applyPhaseFloor(budgetState.budget, phase);
+      const stepReason = floored ? `${budgetState.reason}+floor:${phase}` : budgetState.reason;
       try {
         res = await this.modelRouter.generate(
           this.buildUserPrompt(goal, dynamicContext, steps, maxSteps - i, formatHint, plan, opts.blackboard, deliveryRequirements),
@@ -341,7 +363,7 @@ export class AgentLoopService {
             orgId,
             taskId,
             requestType: 'reasoning',
-            budget: currentBudget,
+            budget: stepBudget,
             responseFormat: 'json',
             temperature: 0,
             maxTokens: DECIDE_MAX_TOKENS,
@@ -352,7 +374,7 @@ export class AgentLoopService {
           },
         );
         tokensUsed += res.usage.totalTokens;
-        modelBudgetPerStep.push({ step: i + 1, budget: currentBudget, reason: budgetReason });
+        modelBudgetPerStep.push({ step: i + 1, budget: stepBudget, reason: stepReason });
 
         // A — Tool-use nativo: leer toolCalls primero, fallback a JSON parsing.
         if (res.toolCalls && res.toolCalls.length > 0) {
@@ -377,7 +399,7 @@ export class AgentLoopService {
 
       if (!decision) {
         parseFailures += 1;
-        ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'parse_failure'));
+        budgetState = escalateOnEvent(budgetState, 'parse_failure');
         const rawResText = res?.text ? ` (Respuesta del modelo: ${this.truncate(res.text, 200)})` : '';
         await log(`agent-loop: fallo de parseo JSON ${parseFailures}/${MAX_PARSE_FAILURES}${rawResText}`, 'loop');
         if (parseFailures >= MAX_PARSE_FAILURES) {
@@ -406,7 +428,7 @@ export class AgentLoopService {
 
         if (dodViolation) {
           dodRejections += 1;
-          ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'dod_rejection'));
+          budgetState = escalateOnEvent(budgetState, 'dod_rejection');
           await log(`agent-loop: DoD rechazó final_answer (${dodRejections}/${MAX_DOD_REJECTIONS}): ${dodViolation.slice(0, 80)}`, 'loop');
           steps.push({
             tool: decision.tool, args: decision.args, thought: decision.thought,
@@ -426,7 +448,7 @@ export class AgentLoopService {
               thought: decision.thought,
               observation: `VERIFICACIÓN DE SEGURIDAD FALLIDA: ${review.text}`,
             });
-            ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'security_review'));
+            budgetState = escalateOnEvent(budgetState, 'security_review');
             this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
             continue;
           }
@@ -473,7 +495,7 @@ export class AgentLoopService {
           tool: decision.tool, args: decision.args, thought: decision.thought,
           observation: `ERROR: herramienta desconocida "${decision.tool}". Usa una de: ${available.map((t) => t.name).join(', ')}, final_answer.`,
         });
-        ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'unknown_tool'));
+        budgetState = escalateOnEvent(budgetState, 'unknown_tool');
         this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         continue;
       }
@@ -485,7 +507,7 @@ export class AgentLoopService {
           tool: spec.name, args: decision.args, thought: decision.thought,
           observation: 'ERROR: acción repetida idéntica al paso anterior. Cambia de herramienta/args o entrega final_answer con lo que ya tienes.',
         });
-        ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'repeated_action'));
+        budgetState = escalateOnEvent(budgetState, 'repeated_action');
         this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         continue;
       }
@@ -498,7 +520,7 @@ export class AgentLoopService {
           tool: spec.name, args: decision.args, thought: decision.thought,
           observation: `ERROR: ${stallMsg}`,
         });
-        ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, stallCount >= 2 ? 'persistent_stall' : 'stall'));
+        budgetState = escalateOnEvent(budgetState, stallCount >= 2 ? 'persistent_stall' : 'stall');
         if (stallCount >= 2 && depth === 0 && this.intelligence) {
           plan = await this.intelligence.replan(orgId, taskId, goal, steps);
         }
@@ -557,7 +579,7 @@ export class AgentLoopService {
             }
           }
           if (results.some((r) => r.observation.startsWith('ERROR:'))) {
-            ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'tool_error'));
+            budgetState = escalateOnEvent(budgetState, 'tool_error');
           }
           this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
           continue;
@@ -606,9 +628,14 @@ export class AgentLoopService {
         observation: this.truncate(observation, OBSERVATION_LIMIT),
       });
       if (observation.startsWith('ERROR:')) {
-        ({ currentBudget, budgetReason } = this.escalateBudget(currentBudget, 'tool_error'));
-      } else if (depth === 0 && this.intelligence) {
-        plan = this.intelligence.updatePlanFromObservation(plan, observation);
+        budgetState = escalateOnEvent(budgetState, 'tool_error');
+      } else {
+        // Clean step — de-escalate so the easy tail of the run stops paying for
+        // the strong model. Mechanical/delivery steps count double.
+        budgetState = deescalateOnSuccess(budgetState, { phase });
+        if (depth === 0 && this.intelligence) {
+          plan = this.intelligence.updatePlanFromObservation(plan, observation);
+        }
       }
       this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
     }
@@ -3075,12 +3102,6 @@ Genera la respuesta final corregida y pulida en español. No incluyas ninguna ex
       ? this.trajectories.checkpoint(snapshot)
       : this.trajectories.complete(snapshot);
     void op.catch((err) => this.logger.debug(`trajectory record skipped: ${(err as Error).message}`));
-  }
-
-  private escalateBudget(current: ModelBudget, reason: string): { currentBudget: ModelBudget; budgetReason: string } {
-    if (current === 'cheap') return { currentBudget: 'balanced', budgetReason: reason };
-    if (reason === 'persistent_stall' && current === 'balanced') return { currentBudget: 'powerful', budgetReason: reason };
-    return { currentBudget: current, budgetReason: reason };
   }
 
   private truncate(text: string, limit: number): string {

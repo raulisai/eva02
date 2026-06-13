@@ -347,7 +347,7 @@ describe('AgentLoopService', () => {
     expect(modelRouter.generate.mock.calls[1][1]!.budget).toBe('balanced');
     expect(trajectories.complete).toHaveBeenCalledWith(expect.objectContaining({
       modelBudgetPerStep: [
-        expect.objectContaining({ budget: 'cheap', reason: 'initial' }),
+        expect.objectContaining({ budget: 'cheap', reason: 'initial-cheap' }),
         expect.objectContaining({ budget: 'balanced', reason: 'tool_error' }),
       ],
     }));

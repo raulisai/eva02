@@ -8,6 +8,7 @@ This backlog keeps only relevant, actionable improvements. Completed work moves 
 Sandbox concurrency stress test and network-compliance telemetry shipped (see [sandbox.service.spec.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/__tests__/sandbox.service.spec.ts) and `recordNetworkExec` in [agent-loop.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/agent-loop.service.ts) → `task_events` event_type `sandbox.network_exec`).
 
 - [ ] **Task Horizon UI**: surface `task.metadata.task_horizon` in the dashboard task detail so operators can see why EVA chose immediate/background/scheduled/standby/approval handling.
+- [x] **Budget policy (model range per case)**: centralized in [budget-policy.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/budget-policy.ts) (pure, unit-tested). Long/medium/deliverable tasks open at `balanced` (`initialBudget`), failures climb the full ladder cheap→balanced→powerful (`escalateOnEvent`; hard reasons DoD/security/persistent-stall jump to powerful), clean tails de-escalate (`deescalateOnSuccess`, mechanical/delivery count double), and synthesis steps are floored at `balanced` (`applyPhaseFloor`). Tier flows from `runAgentLoop` → `AgentLoopOptions.tier`. Follow-up: surface `modelBudgetPerStep` trail in the task detail UI; consider proactive (cheap, embedding-gated) memory injection for long tasks beyond the explicit `recuerda` trigger in [memory-recall.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/memory-recall.service.ts).
 
 ---
 

@@ -307,6 +307,72 @@ describe('CommunicationService', () => {
     }), USER, ORG);
   });
 
+  it('creates a task from a Telegram document (image) and stores it in candidates', async () => {
+    integrations.getChannelSettings.mockResolvedValue({
+      status: 'active',
+      config: {},
+      secret: 'bot-token',
+      webhookSecret: 'hook-secret',
+    });
+    telegram.downloadFile.mockResolvedValue({
+      ok: true,
+      data: Buffer.from('telegram-file'),
+      filePath: 'photos/file_1.png',
+      contentType: 'image/png',
+    });
+
+    const result = await service.handleTelegramWebhook(ORG, 'hook-secret', {
+      update_id: 3,
+      message: {
+        message_id: 12,
+        document: { file_id: 'img-doc-id', file_name: 'test.png', mime_type: 'image/png', file_size: 500 },
+        chat: { id: 100, type: 'private' },
+        from: { id: 42 },
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(telegram.downloadFile).toHaveBeenCalledWith('img-doc-id', 'bot-token');
+    expect(tasks.createTask).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({
+        inbound_media: [expect.objectContaining({ kind: 'image', fileId: 'img-doc-id' })],
+      }),
+    }), USER, ORG);
+  });
+
+  it('creates a task from a Telegram document (audio) and stores it in candidates', async () => {
+    integrations.getChannelSettings.mockResolvedValue({
+      status: 'active',
+      config: {},
+      secret: 'bot-token',
+      webhookSecret: 'hook-secret',
+    });
+    telegram.downloadFile.mockResolvedValue({
+      ok: true,
+      data: Buffer.from('telegram-file'),
+      filePath: 'audio/song.mp3',
+      contentType: 'audio/mpeg',
+    });
+
+    const result = await service.handleTelegramWebhook(ORG, 'hook-secret', {
+      update_id: 3,
+      message: {
+        message_id: 12,
+        document: { file_id: 'aud-doc-id', file_name: 'song.mp3', mime_type: 'audio/mpeg', file_size: 1000 },
+        chat: { id: 100, type: 'private' },
+        from: { id: 42 },
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(telegram.downloadFile).toHaveBeenCalledWith('aud-doc-id', 'bot-token');
+    expect(tasks.createTask).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({
+        inbound_media: [expect.objectContaining({ kind: 'audio', fileId: 'aud-doc-id' })],
+      }),
+    }), USER, ORG);
+  });
+
   it('transcribes Telegram voice notes before creating the agent task', async () => {
     integrations.getChannelSettings.mockResolvedValue({
       status: 'active',

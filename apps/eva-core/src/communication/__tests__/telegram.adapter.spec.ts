@@ -166,6 +166,50 @@ describe('TelegramAdapter', () => {
       expect(url).toContain('/sendDocument');
     });
 
+    it('sends png files using sendPhoto endpoint', async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue({ result: { message_id: 102 } }),
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const adapter = new TelegramAdapter();
+      const buffer = Buffer.from('fake-image-data');
+      const result = await adapter.sendDocument(
+        { chat_id: '200' },
+        buffer,
+        'screenshot.png',
+        undefined,
+        'bot-token',
+      );
+
+      expect(result).toEqual({ ok: true, externalMessageId: '102' });
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toContain('/sendPhoto');
+    });
+
+    it('sends mp3 files using sendAudio endpoint', async () => {
+      const fetchMock = jest.fn().mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue({ result: { message_id: 103 } }),
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      const adapter = new TelegramAdapter();
+      const buffer = Buffer.from('fake-audio-data');
+      const result = await adapter.sendDocument(
+        { chat_id: '200' },
+        buffer,
+        'podcast.mp3',
+        undefined,
+        'bot-token',
+      );
+
+      expect(result).toEqual({ ok: true, externalMessageId: '103' });
+      const [url] = fetchMock.mock.calls[0];
+      expect(url).toContain('/sendAudio');
+    });
+
     it('compresses oversized native videos with ffmpeg before sending to Telegram', async () => {
       const fetchMock = jest.fn().mockResolvedValue({
         ok: true,
