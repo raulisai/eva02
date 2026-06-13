@@ -54,7 +54,7 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
     chat: Number(process.env.EVA_AGENT_CHAT_MAX_STEPS ?? 2) || 2,
     quick: Number(process.env.EVA_AGENT_QUICK_MAX_STEPS ?? 4) || 4,
     medium: Number(process.env.EVA_AGENT_MEDIUM_MAX_STEPS ?? 4) || 4,
-    long: Number(process.env.EVA_AGENT_LONG_MAX_STEPS ?? 8) || 8,
+    long: Number(process.env.EVA_AGENT_LONG_MAX_STEPS ?? 12) || 12,
   },
 };
 
@@ -191,7 +191,7 @@ export class AgentIntelligenceService implements OnApplicationBootstrap {
       chat: this.clampSteps(input.chat, DEFAULT_SETTINGS.maxStepsByTier.chat, 1, 4),
       quick: this.clampSteps(input.quick, DEFAULT_SETTINGS.maxStepsByTier.quick, 1, 6),
       medium: this.clampSteps(input.medium, DEFAULT_SETTINGS.maxStepsByTier.medium, 2, 8),
-      long: this.clampSteps(input.long, DEFAULT_SETTINGS.maxStepsByTier.long, 3, 10),
+      long: this.clampSteps(input.long, DEFAULT_SETTINGS.maxStepsByTier.long, 3, 20),
     };
   }
 

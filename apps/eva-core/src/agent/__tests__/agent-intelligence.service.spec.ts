@@ -104,7 +104,7 @@ describe('AgentIntelligenceService', () => {
           chat: 99,
           quick: 0,
           medium: 7,
-          long: 12,
+          long: 99,
         },
       },
       error: null,
@@ -115,7 +115,7 @@ describe('AgentIntelligenceService', () => {
         chat: 4,
         quick: 1,
         medium: 7,
-        long: 10,
+        long: 20,
       },
     });
   });

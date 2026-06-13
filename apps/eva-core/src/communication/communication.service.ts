@@ -45,7 +45,7 @@ export class CommunicationService implements OnApplicationBootstrap {
   onApplicationBootstrap() {
     if (typeof this.events.on !== 'function') return;
 
-    // Forward completed task results back to the originating channel (Telegram) and to any
+    // Forward completed task results back to the originating channel (Telegram, WearOS, Playground) and to any
     // explicitly requested cross-channel target (e.g. user asked from Playground: "mándalo por telegram").
     this.events.on('task.result', async (event: EvaEvent) => {
       const { orgId, taskId, payload } = event;
@@ -55,8 +55,8 @@ export class CommunicationService implements OnApplicationBootstrap {
       if (p['model'] === 'media:image') return;
       const text = String(p['text'] ?? '');
 
-      // 1. Same-channel reply (task originated from Telegram).
-      await this.deliverToTelegram(orgId, taskId, text, true);
+      // 1. Same-channel reply (task originated from Telegram / WearOS / Playground).
+      await this.deliverToOriginatingChannel(orgId, taskId, text, true);
 
       // 2. Cross-channel delivery requested from Playground / wearOS.
       const crossTarget = p['cross_channel_target'] as string | undefined;
@@ -78,14 +78,12 @@ export class CommunicationService implements OnApplicationBootstrap {
     });
 
     // Forward progress acks ("lo estoy ejecutando en segundo plano…") to the
-    // originating channel, so Telegram users hear EVA immediately instead of
-    // waiting in silence until the final result. The dashboard/wearOS already
-    // receive task.say through the WebSocket events bridge.
+    // originating channel (Telegram / WearOS / Playground) so the user hears EVA immediately.
     this.events.on('task.say', async (event: EvaEvent) => {
       const { orgId, taskId, payload } = event;
       if (!taskId) return;
       const text = String((payload as Record<string, unknown>)['text'] ?? '');
-      await this.deliverToTelegram(orgId, taskId, text, false);
+      await this.deliverToOriginatingChannel(orgId, taskId, text, false);
     });
 
     this.logger.log('CommunicationService subscribed to task.result, task.media and task.say');
@@ -401,6 +399,62 @@ export class CommunicationService implements OnApplicationBootstrap {
     } catch (err) {
       this.logger.warn(`deliverCrossChannel(${channel}) failed: ${(err as Error).message}`);
       return { ok: false, reason: (err as Error).message };
+    }
+  }
+
+  private async deliverToOriginatingChannel(
+    orgId: string,
+    taskId: string,
+    text: string,
+    isResult: boolean,
+  ): Promise<void> {
+    if (!text) return;
+    try {
+      const task = await this.tasks.getTask(taskId, orgId);
+      if (!task) return;
+      const meta = (task.metadata ?? {}) as Record<string, unknown>;
+      const source = meta['source'] as string | undefined;
+
+      if (source === 'telegram') {
+        await this.deliverToTelegram(orgId, taskId, text, isResult);
+      } else if (source === 'wear_fast_path') {
+        const deviceId = meta['device_id'] as string | undefined;
+        if (deviceId) {
+          const { error } = await this.db.admin
+            .from('wear_directives')
+            .insert({
+              org_id: orgId,
+              device_id: deviceId,
+              task_id: taskId,
+              action: 'wear.notify',
+              payload: {
+                title: isResult ? 'Tarea completada' : 'Tarea en curso',
+                body: text,
+              },
+              delivered: false,
+            });
+          if (error) {
+            this.logger.warn(`Failed to insert wear_directive for task ${taskId}: ${error.message}`);
+          } else {
+            this.logger.log(`Pushed wear.notify directive to device ${deviceId} for task ${taskId}`);
+          }
+        }
+      } else if (source === 'playground' || source === 'dashboard') {
+        await this.repo.createNotification({
+          orgId,
+          userId: task.created_by,
+          channel: 'dashboard',
+          notificationType: isResult ? 'task.completed' : 'task.progress',
+          title: isResult ? 'Tarea completada' : 'Tarea en curso',
+          body: text,
+          target: { task_id: taskId },
+          payload: { source_event: isResult ? 'task.result' : 'task.say' },
+          status: 'pending',
+        });
+        this.logger.log(`Created dashboard notification for task ${taskId} (isResult: ${isResult})`);
+      }
+    } catch (err) {
+      this.logger.warn(`deliverToOriginatingChannel failed for task ${taskId}: ${(err as Error).message}`);
     }
   }
 

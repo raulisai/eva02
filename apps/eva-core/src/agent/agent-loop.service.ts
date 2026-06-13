@@ -195,8 +195,8 @@ export class AgentLoopService {
     const profile = depth > 0 ? resolveAgentProfile(opts.role) : null;
     const defaultSteps = depth === 0 ? DEFAULT_ROOT_STEPS : profile?.maxSteps ?? DEFAULT_SUB_STEPS;
     const requestedMaxSteps = opts.maxSteps ?? defaultSteps;
-    const minDeliverySteps = deliveryRequirements.length > 0 ? 10 : 1;
-    const maxSteps = Math.min(Math.max(requestedMaxSteps, minDeliverySteps), 10);
+    const minDeliverySteps = deliveryRequirements.length > 0 ? 12 : 1;
+    const maxSteps = Math.min(Math.max(requestedMaxSteps, minDeliverySteps), 20);
     const log = opts.log ?? (async () => undefined);
     const available = this.tools.filter((t) => {
       if (t.rootOnly && depth > 0) return false;
@@ -721,7 +721,7 @@ export class AgentLoopService {
       '- Tras una tarea compleja (≥5 pasos de herramientas) o un fix difícil, guarda el enfoque como skill con skill_manage{"action":"create",...}. Si una skill que cargaste estaba desactualizada, corrígela con skill_manage{"action":"patch",...}.',
       '- Para código: aunque se sugiere dividir en pasos lógicos (inspeccionar→preparar→ejecutar→verificar), sé eficiente para no agotar tus pasos límite. Puedes escribir scripts completos que realicen múltiples acciones (como buscar, crear directorios y descargar) en una sola ejecución de code_execute. Los archivos en /work persisten entre pasos de esta tarea.',
       ...(has('code_execute') && has('telegram_send_file')
-        ? ['- Para descargar medios/videos (YouTube, Platzi, etc.): el sandbox tiene preinstalado y listo para usar yt-dlp y ffmpeg. Escribe código de Python o Bash que use yt-dlp directamente para descargar el video/audio a /work. IMPORTANTE: Para que yt-dlp funcione y tenga acceso a internet, debes pasar el argumento "network": true al llamar a code_execute. Luego usa telegram_send_file para enviarlo. Evita clonar repositorios externos o instalar paquetes pesados.']
+        ? ['- Para descargar medios/videos (YouTube, etc.): el sandbox tiene listo yt-dlp y ffmpeg. Escribe un script en code_execute (con "network": true) que use yt-dlp directamente. IMPORTANTE: yt-dlp puede buscar videos por ti sin que busques el enlace antes (ej: usar `yt-dlp --max-downloads 1 --format mp4 "ytsearch1:one piece quinto emperador"` busca y descarga el primer video de esa búsqueda). No malgastes pasos en web_search intentando encontrar enlaces exactos; ¡usa la búsqueda integrada de yt-dlp! Una vez descargado el archivo en /work, usa telegram_send_file para enviarlo de inmediato.']
         : []),
       ...(has('code_execute') && has('telegram_send_file')
         ? ['- Para reportes/archivos solicitados por el usuario: usa code_execute para crear el archivo en /work, verifica que exista con sandbox_ls si hace falta, y después usa telegram_send_file si el usuario pidió enviarlo por Telegram.']
@@ -735,7 +735,7 @@ export class AgentLoopService {
       '- Las herramientas de escritura y envío (como las de enviar archivos, enviar mensajes de WhatsApp, escribir emails, programar tareas recurrentes o agendar calendario) están diseñadas para ejecutar acciones reales. Si el usuario te pide enviar o modificar algo y tienes la herramienta disponible, utilízala directamente sin asumir que tienes prohibido actuar o que debes pedir aprobación manualmente.',
       '- Tienes acceso legítimo y autorizado por el usuario para interactuar con sus cuentas y aplicaciones locales/externas (WhatsApp, Gmail, Calendar, Drive, Uber, Rappi) a través de tus herramientas. NUNCA respondas diciendo que no tienes acceso a información personal, privada o externa. Si tienes la herramienta, úsala y reporta el resultado de forma directa.',
       '- Sé resolutivo y ten iniciativa (alta agencia): si el usuario te pide una tarea (descargar videos, crear carpetas, automatizar flujos, enviar archivos, etc.), ejecútala tú mismo usando code_execute o terminal_run en el sandbox o las herramientas disponibles. Está PROHIBIDO responder dándole instrucciones al usuario para que lo haga manualmente si tienes la capacidad de programar o ejecutar la solución en el sandbox.',
-      '- Evita ciclos infinitos de búsqueda (web_search loops): si necesitas obtener datos en masa o enlaces (como videos de YouTube o contenidos de webs), no realices múltiples web_search manuales secuenciales. En su lugar, usa code_execute para ejecutar un script de Python o Bash que busque y procese la información automáticamente de forma directa en un solo paso (ej. usando yt-dlp con "ytsearch5:..." para buscar y descargar directamente).',
+      '- Evita ciclos infinitos de búsqueda (web_search loops): no realices múltiples búsquedas web (web_search) manuales y consecutivas para recopilar información de diferentes entidades o temas. Si el objetivo requiere investigar varios elementos, datos detallados de bolsa, proyectos de múltiples empresas, o cualquier dato en lote, realiza como máximo 2 búsquedas de internet y luego usa code_execute para programar un script de Python que consulte las APIs necesarias o use scraping, o consolide y procese los datos de forma automatizada en un solo paso. Optimiza tus pasos resolviendo mediante scripts.',
       '- PROHIBIDO cerrar con "no se pudo" a secas: si algo queda fuera de tu alcance, tu final_answer DEBE traer lo que SÍ conseguiste + 2-3 opciones concretas numeradas con verbos de acción (ej. "1. Conecta X en Integraciones. 2. Dime los datos Y. 3. Reintenta con Z."). Una lista de opciones o una pregunta directa son obligatorias.',
       'Responde SOLO con JSON: {"thought":"breve","tool":"<nombre>","args":{...}}',
     );

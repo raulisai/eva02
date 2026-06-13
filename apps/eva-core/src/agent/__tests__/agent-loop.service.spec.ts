@@ -1118,7 +1118,7 @@ describe('AgentLoopService', () => {
       );
 
       const firstPrompt = modelRouter.generate.mock.calls[0][0] as string;
-      expect(firstPrompt).toContain('Te quedan 10 acciones');
+      expect(firstPrompt).toContain('Te quedan 12 acciones');
       const systemPrompt = modelRouter.generate.mock.calls[0][1]!.systemPrompt as string;
       expect(systemPrompt).toContain('ENTREGABLES OBLIGATORIOS DETECTADOS');
       expect(systemPrompt).toContain('crear archivo PDF');

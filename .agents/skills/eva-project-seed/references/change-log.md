@@ -2,6 +2,14 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 17:55Z
+C: agent/communication: implemented dynamic notification routing by task source and expanded long task step budgets; files=apps/eva-core/src/communication/communication.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/agent-intelligence.service.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-intelligence.service.spec.ts; tests=npm test in apps/eva-core, npm run build
+P: pending/improve -> evaluate the dynamic notification routing on a real WearOS device and check RLS policies
+
+### 2026-06-13 17:32Z
+C: agent/loop: revised yt-dlp instruction to encourage search query capability and bypass web_search link lookup loops; files=apps/eva-core/src/agent/agent-loop.service.ts; tests=cd apps/eva-core && npm test -- src/agent/__tests__/agent-loop.service.spec.ts --runInBand && npm run build && npm run docs:check
+P: pending/improve -> monitor agent loop execution success rate for YouTube media requests to ensure direct downloading works
+
 ### 2026-06-13 17:27Z
 C: agent/loop: enhanced agency by removing obsolete sandbox read-only rules, making write-tool rules generic, and preventing search loops; files=apps/eva-core/src/agent/agent-loop.service.ts,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/agent-loop.service.spec.ts --runInBand && npm run build && npm run docs:check
 P: pending/improve -> evaluate loop performance on real tasks with writing actions and track success rate of the new prompt rules

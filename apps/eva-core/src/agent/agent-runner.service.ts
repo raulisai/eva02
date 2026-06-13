@@ -2455,7 +2455,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
 
   private async maxStepsForTier(orgId: string, tier: 'chat' | 'quick' | 'medium' | 'long'): Promise<number> {
     return this.intelligence.maxStepsForTier(orgId, tier).catch(() => (
-      tier === 'long' ? 8 : tier === 'medium' ? 4 : tier === 'quick' ? 4 : 2
+      tier === 'long' ? 12 : tier === 'medium' ? 6 : tier === 'quick' ? 4 : 2
     ));
   }
 
