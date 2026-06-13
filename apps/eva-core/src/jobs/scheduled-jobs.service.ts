@@ -12,6 +12,9 @@ export const MANERO_TASK_INPUT =
 
 export const DEFAULT_TIMEZONE = 'America/Mexico_City';
 export const DEFAULT_MANERO_HOUR = 7;
+export const AGENT_AUTONOMY_JOB_KEY = 'agent_intelligence_autonomy';
+export const AGENT_AUTONOMY_TASK_INPUT =
+  'Ejecuta mantenimiento interno de EVA: expirar input requests, consolidar memorias, generar digest de mejoras y heartbeat si aplica.';
 
 @Injectable()
 export class ScheduledJobsService {
@@ -78,6 +81,38 @@ export class ScheduledJobsService {
     }, orgId, userId);
 
     this.logger.log(`Default mañanero job seeded for org ${orgId}`);
+  }
+
+  /**
+   * Seeds the internal Agent Intelligence autonomy job for each org. The row is
+   * visible in the Jobs dashboard, so operators can pause/resume/audit wakeups.
+   */
+  async ensureAgentAutonomyJobs(
+    owners: Array<{ orgId: string; userId: string }>,
+    intervalMinutes: number,
+  ): Promise<void> {
+    const safeInterval = Math.max(1, Math.round(intervalMinutes));
+    await Promise.allSettled(owners.map(async ({ orgId, userId }) => {
+      const jobs = await this.repo.findAll(orgId);
+      const existing = jobs.find((job) => job.payload?.system_job === AGENT_AUTONOMY_JOB_KEY && job.status !== 'completed');
+      if (existing) return;
+
+      await this.create({
+        name: 'Autonomía de EVA',
+        description: 'Mantenimiento interno: inputs vencidos, consolidación de memoria, self-improvement y heartbeat.',
+        job_type: 'custom',
+        schedule_type: 'interval',
+        interval_minutes: safeInterval,
+        timezone: DEFAULT_TIMEZONE,
+        task_input: AGENT_AUTONOMY_TASK_INPUT,
+        payload: {
+          system_job: AGENT_AUTONOMY_JOB_KEY,
+          visible_control_plane: true,
+        },
+      }, orgId, userId);
+
+      this.logger.log(`Agent autonomy job seeded for org ${orgId}`);
+    }));
   }
 
   // ── NL → job creation ─────────────────────────────────────────────────────

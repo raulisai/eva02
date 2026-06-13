@@ -13,6 +13,7 @@ import { TasksModule } from '../tasks/tasks.module';
 import { ToolRouterModule } from '../tool-router/tool-router.module';
 import { AgentLoopService } from './agent-loop.service';
 import { PipelineRunnerService } from './pipeline-runner.service';
+import { ProfileContextBuilderService } from './profile-context-builder.service';
 import { AgentFeedbackController } from './agent-feedback.controller';
 import { AgentIntelligenceService } from './agent-intelligence.service';
 import { AgentMetricsController } from './agent-metrics.controller';
@@ -46,6 +47,7 @@ import { CommunicationModule } from '../communication/communication.module';
   providers: [
     AgentLoopService,
     PipelineRunnerService,
+    ProfileContextBuilderService,
     AgentRunnerService,
     AgentTrajectoryService,
     AgentIntelligenceService,
@@ -77,6 +79,7 @@ import { CommunicationModule } from '../communication/communication.module';
     ScheduleService,
     BehaviorPatternService,
     ProfileFactsService,
+    ProfileContextBuilderService,
   ],
 })
 export class AgentModule {}

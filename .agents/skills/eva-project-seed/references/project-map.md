@@ -59,11 +59,11 @@ Key Documentation References:
 - `CommunicationModule`: accounts/conversations/messages/notifications/Telegram webhook; records Telegram final outbound messages with `task_id` and infers short praise/correction as agent feedback for the latest outbound task in that conversation.
 - `IntegrationsModule`: org integrations, MCP connections, credential/model/channel tests.
 - `AgentModule`: agent loop/runner, skill library, sandbox, media, research, Gmail/Calendar/Drive, soul, schedule, behavior patterns.
-- Agent intelligence telemetry/flywheels: `AgentTrajectoryService` persists `agent_trajectories` checkpoints/finals; `AgentIntelligenceService` handles plan state helpers, replay examples, ask_user persistence/timeouts, token/tool/network safety limits, security review, memory consolidation, self-improvement digest, heartbeat task creation, and skill embeddings; `GET /agent/metrics` reads org-scoped metrics views.
+- Agent intelligence telemetry/flywheels: `AgentTrajectoryService` persists `agent_trajectories` checkpoints/finals; `AgentIntelligenceService` handles plan state helpers, replay examples, ask_user persistence/timeouts, token/tool/network safety limits, security review, memory consolidation, self-improvement digest, heartbeat task creation, and skill embeddings. Periodic autonomy is seeded as visible `scheduled_jobs` rows with `payload.system_job='agent_intelligence_autonomy'`; the runner executes those tasks internally without a model call. `ProfileContextBuilderService` builds compact/full prompt context from structured Profile Hub data with legacy `cowork_context` fallback; `GET /agent/metrics` reads org-scoped metrics views.
 - Agent loop delivery guard: root loop derives explicit user-requested deliverables like generated PDFs and Telegram file sends, raises the step budget to 10 for those tasks, rejects premature `final_answer`, and reports pending deliverables if exhausted.
 - `ApprovalsModule`: approval request/resolve/validate.
 - `WearFastPathModule`: ephemeral watch tokens, request path, policy.
-- `JobsModule`: scheduled jobs + scheduler.
+- `JobsModule`: scheduled jobs + scheduler; scheduled job payload is copied into task metadata so system jobs can be audited and routed safely.
 
 ## Auth/Tenancy
 
@@ -110,7 +110,7 @@ Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_
 - Dev manager: `projects`, `dev_tasks`, `claude_code_sessions`, `build_runs`, `test_runs`, `code_reviews`, `roadmap_items`.
 - Wear/devices: `wear_sessions`, `wear_tokens`, `wear_fast_path_logs`, `fast_path_policies`, `wear_capabilities`, `wear_directives`, `wear_form_responses`, `wear_sensor_consents`, `nodes`, `node_capabilities`, `devices`.
 - Communication/integrations: `communication_channels`, `communication_accounts`, `conversations`, `messages`, `notifications`, `org_integrations`, `mcp_connections`. Telegram outbound file sends compress oversized native videos with `ffmpeg` before applying the 50 MB Bot API limit. MCP HTTP/SSE tests detect OAuth-required 401/403 responses and keep tools hidden until auth is connected.
-- Artifacts/schedule/behavior/billing: `artifacts`, `schedule_events`, `known_places`, `location_visits`, `behavior_patterns`, `scheduled_jobs`, `token_logs`; RPC `get_billing_stats`.
+- Artifacts/schedule/behavior/billing: `artifacts`, `schedule_events`, `known_places`, `location_visits`, `behavior_patterns`, `scheduled_jobs`, `token_logs`; RPC `get_billing_stats`. Internal autonomy wakeups use `scheduled_jobs.payload.system_job='agent_intelligence_autonomy'` and remain operator-visible/pausable in the Jobs dashboard.
 
 ## Dashboard Map
 
@@ -126,5 +126,4 @@ Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_
 - AGENTS says RLS policies live exclusively in `014_rls_policies.sql`, but later migrations include policy creation; decide convention before adding more tables.
 - `014_rls_policies.sql` references `task_steps`; current migration scan did not find `CREATE TABLE task_steps`.
 - `TasksRepository.findStuck` lacks an `org_id` argument/filter; may be intended system-wide but violates the written non-negotiable unless bounded elsewhere.
-- Agent autonomy tick is in-process (`AgentIntelligenceService` interval, disabled in tests) rather than persisted as explicit rows in `scheduled_jobs`; acceptable for now but DB-scheduled orchestration would be easier to inspect.
 - Many existing files are modified in the worktree; do not revert user changes.

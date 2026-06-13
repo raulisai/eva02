@@ -27,10 +27,11 @@ import { GoogleWebLoginService } from '../../integrations/google-web-login.servi
 import { WhatsAppWebService } from '../../integrations/whatsapp-web.service';
 import { classifyTier } from '../tier';
 import { Task } from '../../tasks/task.types';
-import { ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
+import { AGENT_AUTONOMY_JOB_KEY, ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
 import { CommunicationService } from '../../communication/communication.service';
 import { AgentIntelligenceService } from '../agent-intelligence.service';
 import { PipelineRunnerService } from '../pipeline-runner.service';
+import { ProfileContextBuilderService } from '../profile-context-builder.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -127,6 +128,7 @@ describe('AgentRunnerService', () => {
     module = await Test.createTestingModule({
       providers: [
         AgentRunnerService,
+        ProfileContextBuilderService,
         {
           provide: DatabaseService,
           useValue: {
@@ -501,6 +503,7 @@ describe('AgentRunnerService', () => {
             registerCapabilityGap: jest.fn().mockResolvedValue(undefined),
             getCapabilityGapsDigest: jest.fn().mockResolvedValue(null),
             maxStepsForTier: jest.fn().mockResolvedValue(4),
+            runAutonomyForOrg: jest.fn().mockResolvedValue(undefined),
           },
         },
         {
@@ -651,6 +654,30 @@ describe('AgentRunnerService', () => {
     expect(research.answer).toHaveBeenCalledWith('Busca el clima de hoy en CDMX', ORG);
     expect(modelRouter.generate).not.toHaveBeenCalled();
     expect(publishedTypes()).toContain('task.result');
+  });
+
+  it('executes scheduled autonomy jobs internally without model calls', async () => {
+    const intelligence = module.get(AgentIntelligenceService) as jest.Mocked<AgentIntelligenceService>;
+    tasks.getTask.mockResolvedValue(makeTask({
+      title: '[⏰ Job] Autonomía de EVA',
+      description: 'Ejecuta mantenimiento interno de EVA',
+      metadata: {
+        scheduled_job_id: 'job-1',
+        scheduled_job_payload: { system_job: AGENT_AUTONOMY_JOB_KEY },
+      },
+    }));
+
+    await service.run(ORG, TASK);
+
+    expect(intelligence.runAutonomyForOrg).toHaveBeenCalledWith(ORG, 'user-1');
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(agentLoop.run).not.toHaveBeenCalled();
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', {
+      result: expect.objectContaining({
+        text: 'Autonomía interna completada.',
+        model: 'agent-intelligence',
+      }),
+    });
   });
 
   it('routes multi-day weather to the agent loop with restricted maxSteps', async () => {

@@ -1,19 +1,20 @@
 # EVA · Profile Hub Plan (Mi Perfil visual + privado unificado)
 
-> Estado: **Fase 1 + split inicial implementados**. Plan detallado acordado el 2026-06-12;
+> Estado: **Fases 1, 2 y 5 implementadas**. Plan detallado acordado el 2026-06-12;
 > primera implementación agregada el 2026-06-12.
 > Objetivo: sacar "Mi perfil" de `/soul` a una sección propia `/profile`, unificarla con el
 > contexto privado (auto-ocultado), volverla visual (calendario, pendientes, metas, horarios,
 > notas movibles) y que el sistema/agentes la llenen y lean vía estructuras de datos.
 
 ## Estado actual relevante
-- `agent_souls`: persona agente + `persona_context` (personal_profile, cowork_context free-text,
+- `agent_souls`: persona agente + `persona_context` (personal_profile, cowork_context legacy,
   relationship_map) + `goals` JSONB + `private_context_ciphertext/hint` (AES-256-GCM write-only).
 - `soul-editor.tsx`: ahora queda enfocado en identidad del agente; `/profile` carga el hub del usuario.
 - Ya existen SIN UI: `schedule_events`, `known_places`, `behavior_patterns` (021) +
   `ScheduleService`/`BehaviorPatternService` (solo alimentan prompts).
 - `ConversationDigesterService.maybeUpdateSoulProfile`: auto-fill por regex (occupation/location).
-- `agent-runner.formatEnrichedSoulContext`: arma bloque soul+schedule+patterns+privado (5000 chars).
+- `ProfileContextBuilderService`: arma contexto compacto/full para prompts desde perfil estructurado,
+  agenda, patrones, memoria y privado; `cowork_context` queda solo como fallback legacy mientras se migra.
 
 ## Decisiones
 | # | Decisión | Razón |
@@ -51,7 +52,8 @@ suggestion inbox visual, masking global "modo privado". No se agregaron deps nue
 2. **Split UI**: hecho para `/profile`, `/soul` podado y sidebar.
 3. **Interacción**: pendiente drag notes/todos, dialogs eventos, pintor horarios, masking global.
 4. **Auto-llenado**: pendiente digester v2, tools del loop, suggestion inbox, realtime, migrate-legacy.
-5. **Prompt**: pendiente `ProfileContextBuilder` compartido, deprecación cowork_context, docs/evals.
+5. **Prompt**: hecho: `ProfileContextBuilderService` compartido para chat/full prompts; `AgentRunnerService`
+   delega el armado del contexto y mantiene lectura de `cowork_context` como fallback legacy hasta migración.
 
 ## Riesgos
 - Falsos positivos del clasificador → siempre reversible des-marcando (re-publica valor).

@@ -1,5 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { ScheduledJobsService, MANERO_TASK_INPUT } from '../scheduled-jobs.service';
+import {
+  AGENT_AUTONOMY_JOB_KEY,
+  AGENT_AUTONOMY_TASK_INPUT,
+  MANERO_TASK_INPUT,
+  ScheduledJobsService,
+} from '../scheduled-jobs.service';
 import { ScheduledJobsRepository } from '../scheduled-jobs.repository';
 import { ScheduledJob } from '../scheduled-job.types';
 
@@ -75,6 +80,48 @@ describe('ScheduledJobsService', () => {
       repo.countByOrg.mockResolvedValue(2);
 
       await service.ensureDefaultJobs('org-1', 'user-1');
+
+      expect(repo.create).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── ensureAgentAutonomyJobs ─────────────────────────────────────────────
+
+  describe('ensureAgentAutonomyJobs', () => {
+    it('creates the internal autonomy job when missing', async () => {
+      repo.findAll.mockResolvedValue([]);
+      repo.create.mockResolvedValue(mockJob({
+        name: 'Autonomía de EVA',
+        job_type: 'custom',
+        schedule_type: 'interval',
+        interval_minutes: 360,
+        task_input: AGENT_AUTONOMY_TASK_INPUT,
+        payload: { system_job: AGENT_AUTONOMY_JOB_KEY, visible_control_plane: true },
+      }));
+
+      await service.ensureAgentAutonomyJobs([{ orgId: 'org-1', userId: 'user-1' }], 360);
+
+      expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({
+        org_id: 'org-1',
+        created_by: 'user-1',
+        job_type: 'custom',
+        schedule_type: 'interval',
+        interval_minutes: 360,
+        task_input: AGENT_AUTONOMY_TASK_INPUT,
+        payload: expect.objectContaining({
+          system_job: AGENT_AUTONOMY_JOB_KEY,
+          visible_control_plane: true,
+        }),
+      }));
+    });
+
+    it('skips creation when an autonomy row already exists', async () => {
+      repo.findAll.mockResolvedValue([mockJob({
+        job_type: 'custom',
+        payload: { system_job: AGENT_AUTONOMY_JOB_KEY },
+      })]);
+
+      await service.ensureAgentAutonomyJobs([{ orgId: 'org-1', userId: 'user-1' }], 360);
 
       expect(repo.create).not.toHaveBeenCalled();
     });

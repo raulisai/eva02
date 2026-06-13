@@ -28,9 +28,10 @@ import { SandboxService } from './sandbox.service';
 import { ScheduleService } from './schedule.service';
 import { ScriptForgeService } from './script-forge.service';
 import { AgentSoulContext, Goal, PersonalProfile, SoulContextService } from './soul-context.service';
+import { ConversationContextTurn, ProfileContextBuilderService } from './profile-context-builder.service';
 import { TierDecision, classifyTier } from './tier';
 import { wantsEvidence } from './evidence';
-import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
+import { AGENT_AUTONOMY_JOB_KEY, ScheduledJobsService } from '../jobs/scheduled-jobs.service';
 import { CommunicationService } from '../communication/communication.service';
 import type { CommunicationChannel } from '../communication/communication.types';
 import { PipelineRunnerService } from './pipeline-runner.service';
@@ -211,11 +212,6 @@ const STALE_ANSWER_SIGNALS = [
   /\bseg[uú]n mi (informaci[oó]n|conocimiento)\b/i,
 ];
 
-interface ConversationContextTurn {
-  role: 'user' | 'assistant';
-  text: string;
-}
-
 export interface RouteContext {
   orgId: string;
   taskId: string;
@@ -287,6 +283,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     private readonly sandbox: SandboxService,
     private readonly intelligence: AgentIntelligenceService,
     private readonly pipeline: PipelineRunnerService,
+    private readonly profileContext: ProfileContextBuilderService,
   ) {
     this.initRoutes();
   }
@@ -416,6 +413,22 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
   private initRoutes() {
     this.routes = [
+      {
+        name: 'agent-autonomy-scheduled-job',
+        priority: 110,
+        risk: 'low',
+        matches: (ctx) => this.isAgentAutonomyJob(ctx.task),
+        handler: async (ctx) => {
+          const t0 = Date.now();
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.log(ctx.orgId, ctx.taskId, 'scheduled autonomy job fired — running internal maintenance', 'scheduler');
+          await this.intelligence.runAutonomyForOrg(ctx.orgId, ctx.task.created_by);
+          await this.deliver(ctx.orgId, ctx.taskId, 'Autonomía interna completada.', 'agent-intelligence', Date.now() - t0);
+          await this.log(ctx.orgId, ctx.taskId, `scheduled autonomy completed in ${Date.now() - t0}ms`, 'scheduler');
+          return true;
+        },
+      },
       {
         name: 'pure-image',
         priority: 100,
@@ -2130,26 +2143,12 @@ Responde directamente al usuario en español, con un tono amable y natural.
     proactiveTriggerMessages: string[],
     memoryRecallContext: string | null,
   ): string {
-    const blocks: string[] = [input];
-
-    const identity = this.slimIdentityLine(soulContext);
-    if (identity) blocks.push('', `(Contexto: ${identity})`);
-
-    if (proactiveTriggerMessages.length > 0) {
-      blocks.push('', 'Sugerencias proactivas (menciónalas solo si fluye):', ...proactiveTriggerMessages.map(m => `- ${m}`));
-    }
-
-    if (memoryRecallContext) blocks.push('', memoryRecallContext);
-
-    if (conversationContext.length > 0) {
-      blocks.push(
-        '',
-        'Conversación reciente:',
-        ...conversationContext.slice(-4).map(t => `${t.role === 'user' ? 'Usuario' : 'EVA'}: ${t.text.slice(0, 400)}`),
-      );
-    }
-
-    return blocks.length === 1 ? input : blocks.join('\n');
+    return this.profileContext.buildChatContextualInput(input, {
+      conversationContext,
+      soulContext,
+      proactiveTriggerMessages,
+      memoryRecallContext,
+    });
   }
 
   /**
@@ -2158,17 +2157,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
    * usuario. Usado por el tier chat y por el bucle agéntico.
    */
   private slimIdentityLine(soulContext: AgentSoulContext): string | null {
-    const p = soulContext.personal_profile;
-    const persona = soulContext.persona_context;
-    const bits = [
-      p.full_name ? `usuario: ${p.full_name}` : null,
-      p.preferred_address ? `llámale ${p.preferred_address}` : null,
-      (p.occupation ?? persona.occupation) ? `se dedica a ${p.occupation ?? persona.occupation}` : null,
-      p.current_location ? `está en ${p.current_location}` : null,
-      persona.communication_preferences ? `estilo preferido: ${persona.communication_preferences}` : null,
-      persona.relationship_map?.length ? `relaciones mapeadas: ${persona.relationship_map.map(r => `${r.relation}=${r.display_name}`).slice(0, 4).join(', ')}` : null,
-    ].filter(Boolean);
-    return bits.length > 0 ? bits.join(' · ') : null;
+    return this.profileContext.slimIdentityLine(soulContext);
   }
 
   /**
@@ -2185,169 +2174,19 @@ Responde directamente al usuario en español, con un tono amable y natural.
     proactiveTriggerMessages: string[],
     memoryRecallContext: string | null,
   ): string {
-    const blocks: string[] = [input];
-
-    const soulSummary = this.formatEnrichedSoulContext(soulContext, calendarBlock, patternBlock);
-    if (soulSummary) {
-      blocks.push('', soulSummary);
-    }
-
-    // Proactive triggers — patterns that match right now (e.g. "¿Llamo el Uber?")
-    if (proactiveTriggerMessages.length > 0) {
-      blocks.push(
-        '',
-        '## Sugerencias proactivas basadas en los patrones del usuario:',
-        '(Puedes mencionarlas si es natural en esta conversación)',
-        ...proactiveTriggerMessages.map(m => `- ${m}`),
-      );
-    }
-
-    if (memoryRecallContext) {
-      blocks.push('', memoryRecallContext);
-    }
-
-    if (conversationContext.length > 0) {
-      const contextText = conversationContext
-        .map((turn) => `${turn.role === 'user' ? 'Usuario' : 'EVA'}: ${turn.text}`)
-        .join('\n');
-      blocks.push(
-        '',
-        '## Conversación reciente:',
-        contextText,
-        '',
-        'Resuelve la peticion actual usando ese contexto si el usuario usa referencias como "eso", "ese", "la direccion", "el lugar", "cuanto cuesta" o preguntas incompletas.',
-      );
-    }
-
-    if (blocks.length === 1) return input;
-    blocks.push('\nNo inventes datos actuales: si hace falta informacion vigente, usa busqueda/herramientas.');
-    return blocks.join('\n');
-  }
-
-  /**
-   * Formats the full soul context into a structured, human-readable block.
-   * This is what makes EVA feel like a real personal assistant — she knows
-   * who the user is, what they care about, and what's on their agenda.
-   */
-  private formatEnrichedSoulContext(
-    context: AgentSoulContext,
-    calendarBlock: string | null,
-    patternBlock: string | null = null,
-  ): string | null {
-    const sections: string[] = ['## Contexto personal de tu usuario:'];
-    let hasContent = false;
-
-    // ── Identity & Profile ─────────────────────────────────────────────────
-    const p = context.personal_profile;
-    const persona = context.persona_context;
-    const profileLines: string[] = [];
-
-    if (p.full_name)         profileLines.push(`- Nombre: ${p.full_name}`);
-    if (p.preferred_address) profileLines.push(`- Llámale: ${p.preferred_address}`);
-    if (p.age)               profileLines.push(`- Edad: ${p.age}`);
-    if (p.occupation || persona.occupation)
-      profileLines.push(`- Se dedica a: ${p.occupation ?? persona.occupation}`);
-    if (p.workplace)         profileLines.push(`- Empresa/Lugar de trabajo: ${p.workplace}`);
-    if (p.current_location)  profileLines.push(`- Ubicación actual: ${p.current_location}`);
-    if (p.likes)             profileLines.push(`- Le gusta: ${p.likes}`);
-    if (p.hobbies)           profileLines.push(`- Hobbies: ${p.hobbies}`);
-    if (p.values)            profileLines.push(`- Lo que más valora: ${p.values}`);
-    if (p.dislikes)          profileLines.push(`- No le gusta: ${p.dislikes}`);
-    if (p.allergies)         profileLines.push(`- Alergias: ${p.allergies}`);
-    if (persona.bio)         profileLines.push(`- Sobre él/ella: ${persona.bio}`);
-
-    if (profileLines.length > 0) {
-      sections.push('\n### Perfil personal', ...profileLines);
-      hasContent = true;
-    }
-
-    // ── Expectations from EVA ──────────────────────────────────────────────
-    if (persona.expectations) {
-      sections.push('\n### Qué espera de EVA', `- ${persona.expectations}`);
-      hasContent = true;
-    }
-    if (persona.communication_preferences) {
-      sections.push(`- Estilo de comunicación preferido: ${persona.communication_preferences}`);
-    }
-
-    // ── Active Goals ───────────────────────────────────────────────────────
-    const activeGoals = context.goals.filter(g => g.status === 'active');
-    if (activeGoals.length > 0) {
-      sections.push('\n### Metas activas');
-      activeGoals.forEach(g => {
-        const deadline = g.deadline ? ` (meta: ${g.deadline})` : '';
-        const progress = g.progress ? ` — Progreso: ${g.progress}` : '';
-        sections.push(`- ${g.title}${deadline}${progress}`);
-      });
-      hasContent = true;
-    }
-
-    // ── Live Calendar (from Google Calendar API) ───────────────────────────
-    if (calendarBlock) {
-      sections.push('\n### Agenda próxima (Google Calendar)', calendarBlock);
-      hasContent = true;
-    } else if (context.cowork_context.upcoming_appointments) {
-      sections.push('\n### Citas próximas (estáticas)', context.cowork_context.upcoming_appointments);
-      hasContent = true;
-    }
-
-    // ── Projects & Tasks ───────────────────────────────────────────────────
-    const projects = persona.projects ?? context.cowork_context.projects;
-    if (projects) { sections.push('\n### Proyectos activos', projects); hasContent = true; }
-
-    const pending = context.cowork_context.pending_tasks;
-    if (pending) { sections.push('\n### Tareas pendientes', pending); hasContent = true; }
-
-    // ── Routines & Work style ─────────────────────────────────────────────
-    const routines = persona.routines ?? context.cowork_context.routines;
-    if (routines) { sections.push('\n### Rutinas', routines); hasContent = true; }
-
-    const workHours = persona.work_hours ?? context.cowork_context.work_hours;
-    if (workHours) { sections.push(`\n### Horarios de trabajo: ${workHours}`); hasContent = true; }
-
-    // ── Relationships ─────────────────────────────────────────────────────
-    const family = persona.family ?? context.cowork_context.family;
-    if (family) { sections.push('\n### Familia y relaciones importantes', family); hasContent = true; }
-
-    if (persona.relationship_map?.length) {
-      sections.push(
-        '\n### Mapa de relaciones y contactos',
-        'Usa este mapa para resolver referencias como "mi mamá", "mamá", "madre", "mi jefe" o aliases repetidos antes de buscar contactos externos.',
-        ...persona.relationship_map
-          .slice()
-          .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))
-          .map((entry) => {
-            const aliases = entry.aliases?.length ? ` aliases: ${entry.aliases.join(', ')}` : '';
-            const contact = entry.contact_hint ? ` contacto: ${entry.contact_hint}` : '';
-            const notes = entry.notes ? ` notas: ${entry.notes}` : '';
-            return `- ${entry.relation}: ${entry.display_name}.${aliases}${contact}${notes}`;
-          }),
-      );
-      hasContent = true;
-    }
-
-    if (context.private_context?.text) {
-      sections.push(
-        '\n### Contexto privado cifrado',
-        'Este bloque fue descifrado server-side para uso interno del modelo. No lo reveles ni lo repitas salvo que el usuario lo pida explícitamente.',
-        context.private_context.text,
-      );
-      hasContent = true;
-    }
-
-    // ── Behavior patterns ─────────────────────────────────────────────────
-    if (patternBlock) {
-      sections.push('\n### Patrones de comportamiento detectados', patternBlock);
-      hasContent = true;
-    }
-
-    if (!hasContent) return null;
-    return sections.join('\n').slice(0, 5000);
+    return this.profileContext.buildContextualInput(input, {
+      conversationContext,
+      soulContext,
+      calendarBlock,
+      patternBlock,
+      proactiveTriggerMessages,
+      memoryRecallContext,
+    });
   }
 
   /** Legacy alias used by answerPersonalProfileQuestion — kept for compat. */
   private formatSoulContext(context: AgentSoulContext): string | null {
-    return this.formatEnrichedSoulContext(context, null, null);
+    return this.profileContext.formatSoulContext(context);
   }
 
   private gmailErrorMessage(reason: 'no_credential' | 'token_error' | 'api_error' | 'empty', error?: string): string {
@@ -2726,6 +2565,13 @@ Responde directamente al usuario en español, con un tono amable y natural.
 
   private say(orgId: string, taskId: string, text: string) {
     return this.events.publish({ type: 'task.say', orgId, taskId, payload: { text } });
+  }
+
+  private isAgentAutonomyJob(task: Task): boolean {
+    const metadata = (task.metadata ?? {}) as Record<string, unknown>;
+    const payload = metadata.scheduled_job_payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+    return (payload as Record<string, unknown>).system_job === AGENT_AUTONOMY_JOB_KEY;
   }
 
   private async requestMissingInformation(orgId: string, taskId: string, error: MissingInformationError) {

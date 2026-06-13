@@ -4,38 +4,32 @@ This backlog keeps only relevant, actionable improvements. Completed items move 
 
 ---
 
-## 1. Agent Intelligence & Control Plane
-- [ ] **Scheduled Autonomy Rows**: Move `AgentIntelligenceService` periodic autonomy tick into explicit `scheduled_jobs` rows so wakeups are visible, pausable, and auditable in the dashboard.
-
----
-
-## 2. Runtime Safety & Observability
+## 1. Runtime Safety & Observability
 - [ ] **Sandbox Concurrency Stress Test**: Add a focused stress test for concurrent sandbox sessions releasing workspaces and background processes.
 - [ ] **Sandbox Network Compliance Telemetry**: Persist/report when the model requested network execution, whether it passed allowlist checks, and why it was blocked.
 
 ---
 
-## 3. Integrations With Real Product Impact
+## 2. Integrations With Real Product Impact
 - [ ] **MCP Stdio Secret Injection**: Wire dashboard MCP presets to runner-side env/secret injection for stdio tools that need API tokens or database URLs.
 
 ---
 
-## 4. Profile Hub Roadmap
+## 3. Profile Hub Roadmap
 Tracked in [profile_hub_plan.md](file:///Users/djoker/code/eva02/docs/profile_hub_plan.md).
 
 - [ ] **Fase 3 — Interaction**: direct edit/create for notes/todos/goals/events, drag reorder, dialogs, masking/reveal audit UI for private vault.
 - [ ] **Fase 4 — Auto-fill**: structured digester v2, profile/todo/goal/note tools, suggestion inbox UI, realtime updates.
-- [ ] **Fase 5 — Prompt**: shared `ProfileContextBuilder` and deprecate free-text `cowork_context`.
 
 ---
 
-## 5. Multi-Phase Pipeline
+## 4. Multi-Phase Pipeline
 
 - [ ] **Phase Retry**: allow individual phase retry without rerunning the full pipeline (resume from last failed phase).
 
 ---
 
-## 6. External Validation Queue
+## 5. External Validation Queue
 These require live credentials/environment and are not code backlog until available.
 
 - [ ] **RLS Verification**: After applying migrations 027-033 to Supabase, run `RLS_TEST=true npm run test:e2e` and verify `agent_souls.private_context_ciphertext` and `profile_private_items.ciphertext` are unreadable through authenticated Data API.

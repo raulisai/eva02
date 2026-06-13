@@ -67,7 +67,12 @@ export class JobSchedulerService implements OnApplicationBootstrap, OnApplicatio
       const dto: CreateTaskDto = {
         title: `[⏰ Job] ${job.name}`,
         description: job.task_input,
-        metadata: { scheduled_job_id: job.id, job_type: job.job_type, job_name: job.name },
+        metadata: {
+          scheduled_job_id: job.id,
+          job_type: job.job_type,
+          job_name: job.name,
+          scheduled_job_payload: job.payload ?? {},
+        },
       };
       const task = await this.tasks.createTask(dto, job.created_by, job.org_id);
 

@@ -4,6 +4,7 @@ import { ModelRouterService } from '../../model-router/model-router.service';
 import { TasksService } from '../../tasks/tasks.service';
 import { SkillLibraryService } from '../skill-library.service';
 import { EventBusService } from '../../events/event-bus.service';
+import { ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -38,6 +39,7 @@ describe('AgentIntelligenceService', () => {
   let model: jest.Mocked<ModelRouterService>;
   let tasks: jest.Mocked<TasksService>;
   let events: jest.Mocked<EventBusService>;
+  let scheduledJobs: jest.Mocked<ScheduledJobsService>;
 
   beforeEach(() => {
     const mock = dbMock();
@@ -54,12 +56,14 @@ describe('AgentIntelligenceService', () => {
     } as any;
     tasks = { createTask: jest.fn().mockResolvedValue({ id: TASK }) } as any;
     events = { publish: jest.fn().mockResolvedValue('1-0') } as any;
+    scheduledJobs = { ensureAgentAutonomyJobs: jest.fn().mockResolvedValue(undefined) } as any;
     service = new AgentIntelligenceService(
       mock.db,
       model,
       tasks,
       {} as SkillLibraryService,
       events,
+      scheduledJobs,
     );
   });
 
@@ -146,6 +150,29 @@ describe('AgentIntelligenceService', () => {
       taskId: TASK,
       payload: expect.objectContaining({ resumed_from_input_timeout: true }),
     }));
+  });
+
+  it('runs autonomy maintenance once per org owner', async () => {
+    builder.limit.mockResolvedValueOnce({
+      data: [
+        { id: 'user-1', org_id: ORG },
+        { id: 'user-2', org_id: ORG },
+        { id: 'user-3', org_id: 'org-2' },
+      ],
+      error: null,
+    });
+    jest.spyOn(service, 'expireTimedOutInputs').mockResolvedValue(undefined);
+    jest.spyOn(service, 'consolidateMemories').mockResolvedValue(undefined);
+    jest.spyOn(service, 'selfImprovementBatch').mockResolvedValue(undefined);
+    jest.spyOn(service, 'heartbeat').mockResolvedValue(null);
+
+    await service.tickAutonomy();
+
+    expect(service.expireTimedOutInputs).toHaveBeenCalledTimes(2);
+    expect(service.expireTimedOutInputs).toHaveBeenCalledWith(ORG);
+    expect(service.expireTimedOutInputs).toHaveBeenCalledWith('org-2');
+    expect(service.heartbeat).toHaveBeenCalledWith(ORG, 'user-1');
+    expect(service.heartbeat).toHaveBeenCalledWith('org-2', 'user-3');
   });
 
   it('retrieves a compact replay example from successful trajectories', async () => {

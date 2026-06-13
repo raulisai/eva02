@@ -1,9 +1,10 @@
-import { Injectable, Logger, OnApplicationBootstrap, OnApplicationShutdown, Optional } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { DatabaseService } from '../database/database.service';
 import { EventBusService } from '../events/event-bus.service';
 import { ModelRouterService } from '../model-router/model-router.service';
 import { TasksService } from '../tasks/tasks.service';
+import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
 import { SkillLibraryService } from './skill-library.service';
 import type { AgentLoopStep } from './agent-loop.service';
 
@@ -58,10 +59,9 @@ const DEFAULT_SETTINGS: RuntimeSettings = {
 };
 
 @Injectable()
-export class AgentIntelligenceService implements OnApplicationBootstrap, OnApplicationShutdown {
+export class AgentIntelligenceService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AgentIntelligenceService.name);
   private readonly toolRateWindow = new Map<string, number[]>();
-  private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly db: DatabaseService,
@@ -69,18 +69,14 @@ export class AgentIntelligenceService implements OnApplicationBootstrap, OnAppli
     private readonly tasks: TasksService,
     private readonly skillLibrary: SkillLibraryService,
     @Optional() private readonly events?: EventBusService,
+    @Optional() private readonly scheduledJobs?: ScheduledJobsService,
   ) {}
 
   onApplicationBootstrap() {
     const interval = Number(process.env.EVA_AGENT_INTELLIGENCE_TICK_MS ?? 6 * 60 * 60 * 1000);
     if (process.env.NODE_ENV === 'test' || interval <= 0) return;
-    this.timer = setInterval(() => {
-      this.tickAutonomy().catch((err) => this.logger.warn(`agent intelligence tick failed: ${(err as Error).message}`));
-    }, interval);
-  }
-
-  onApplicationShutdown() {
-    if (this.timer) clearInterval(this.timer);
+    this.ensureAutonomyRows(interval)
+      .catch((err) => this.logger.warn(`agent autonomy job seed failed: ${(err as Error).message}`));
   }
 
   async tickAutonomy(): Promise<void> {
@@ -93,11 +89,32 @@ export class AgentIntelligenceService implements OnApplicationBootstrap, OnAppli
       if (!owners.has(row.org_id)) owners.set(row.org_id, row.id);
     }
     await Promise.allSettled([...owners.entries()].map(async ([orgId, userId]) => {
-      await this.expireTimedOutInputs(orgId);
-      await this.consolidateMemories(orgId);
-      await this.selfImprovementBatch(orgId);
-      await this.heartbeat(orgId, userId);
+      await this.runAutonomyForOrg(orgId, userId);
     }));
+  }
+
+  async runAutonomyForOrg(orgId: string, userId: string): Promise<void> {
+    await this.expireTimedOutInputs(orgId);
+    await this.consolidateMemories(orgId);
+    await this.selfImprovementBatch(orgId);
+    await this.heartbeat(orgId, userId);
+  }
+
+  private async ensureAutonomyRows(intervalMs: number): Promise<void> {
+    if (!this.scheduledJobs) return;
+    const { data } = await this.db.admin
+      .from('users')
+      .select('id, org_id')
+      .limit(200);
+    const owners = new Map<string, string>();
+    for (const row of (data ?? []) as Array<{ id: string; org_id: string }>) {
+      if (!owners.has(row.org_id)) owners.set(row.org_id, row.id);
+    }
+    const intervalMinutes = Math.max(1, Math.round(intervalMs / 60_000));
+    await this.scheduledJobs.ensureAgentAutonomyJobs(
+      [...owners.entries()].map(([orgId, userId]) => ({ orgId, userId })),
+      intervalMinutes,
+    );
   }
 
   async settings(orgId: string): Promise<RuntimeSettings> {

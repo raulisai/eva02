@@ -47,6 +47,15 @@ describe('JobSchedulerService', () => {
 
     await service.tick();
 
+    expect(tasks.createTask).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({
+        scheduled_job_id: dueJob.id,
+        job_type: dueJob.job_type,
+        job_name: dueJob.name,
+        scheduled_job_payload: dueJob.payload,
+      }),
+    }), USER, ORG);
+
     expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({
       type: 'task.log',
       orgId: ORG,
