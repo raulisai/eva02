@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-13 18:16Z
+C: agent-loop: fixed explicit deliverable exhaustion so PDF/Telegram tasks enter final delivery mode, avoid dependency installs for PDFs, and return ok=false when required delivery is still pending instead of completing the task; files=apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- src/agent/__tests__/agent-loop.service.spec.ts --runInBand; cd apps/eva-core && npm run build; npm run docs:check
+P: pending/improve -> run the live PDF-to-Telegram smoke with real Telegram credentials and verify pending delivery remains non-completed in the dashboard/task log
+
 ### 2026-06-13 18:07Z
 C: agent/tasks: added task horizon decision for background/scheduled/standby/approval routing, long ask_user timeouts, waiting_for_input for forms/setup, root prompt self-improvement policy, and formal task.step events; files=apps/eva-core/src/agent/tier.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/agent-intelligence.service.ts,apps/eva-core/src/events/event-bus.service.ts,apps/eva-core/src/gateway/events-bridge.service.ts,apps/eva-core/src/tasks/dto/transition-task.dto.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-intelligence.service.spec.ts,apps/eva-core/src/tasks/tasks.service.spec.ts,docs/architecture.md,docs/process_flows.md,docs/project_sections.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- --runInBand; cd apps/eva-core && npm run build; npm run docs:check
 P: pending/improve -> surface task.metadata.task_horizon in dashboard task detail and consider per-org configurable standby timeout defaults

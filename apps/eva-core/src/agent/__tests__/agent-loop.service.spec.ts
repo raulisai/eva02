@@ -1142,6 +1142,39 @@ describe('AgentLoopService', () => {
       await fs.rm(pdfPath, { force: true }).catch(() => undefined);
     });
 
+    it('returns a non-ok outcome when required Telegram file delivery remains pending after step exhaustion', async () => {
+      sandbox.execInSession.mockResolvedValueOnce({ ok: true, output: 'PDF creado en /work/report.pdf' });
+
+      modelRouter.generate
+        .mockResolvedValueOnce(modelReply('{"thought":"busco datos","tool":"web_search","args":{"query":"top tech stocks investment data"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"creo pdf","tool":"code_execute","args":{"language":"python","code":"open(\\"report.pdf\\",\\"w\\").write(\\"%PDF-1.4\\\\nmock\\")"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"verifico","tool":"sandbox_ls","args":{}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"busco mas","tool":"web_search","args":{"query":"Microsoft Nvidia Apple ASML Amazon investment data"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"busco valuacion","tool":"web_search","args":{"query":"top public tech companies market cap PE ratio 2026"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"busco proyectos","tool":"web_search","args":{"query":"AI cloud semiconductor tech stock projects 2026"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"busco riesgos","tool":"web_search","args":{"query":"technology stocks investment risks 2026"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"busco ingresos","tool":"web_search","args":{"query":"mega cap tech revenue growth 2026"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"busco chips","tool":"web_search","args":{"query":"semiconductor stocks AI capex 2026"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"busco cloud","tool":"web_search","args":{"query":"cloud AI stocks public companies investment 2026"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"busco final","tool":"web_search","args":{"query":"best tech stocks 2026 executive summary"}}'))
+        .mockResolvedValueOnce(modelReply('{"thought":"se me acabaron pasos","tool":"web_search","args":{"query":"public tech stocks summary"}}'));
+
+      const result = await service.run(
+        ORG,
+        TASK,
+        'haz una investigacion breve sobre las 5 mejores empresas tech, genera un archivo pdf y envia el archivo a mi telegram',
+        { maxSteps: 2 },
+      );
+
+      const prompts = modelRouter.generate.mock.calls.map((call) => call[0] as string);
+      expect(prompts.some((prompt) => prompt.includes('ENTREGABLES PENDIENTES'))).toBe(true);
+      expect(prompts.some((prompt) => prompt.includes('MODO ENTREGA FINAL'))).toBe(true);
+      expect(result.ok).toBe(false);
+      expect(result.degraded).toBe(true);
+      expect(result.text).toContain('No puedo marcar esta tarea como terminada todavía');
+      expect(result.text).toContain('enviar archivo por Telegram');
+    });
+
     it('sends file using communication_accounts fallback when task metadata lacks chat_id', async () => {
       const fs = require('fs/promises');
       const path = require('path');

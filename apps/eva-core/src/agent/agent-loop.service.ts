@@ -291,7 +291,7 @@ export class AgentLoopService {
       let res: GenerateResult | undefined = undefined;
       try {
         res = await this.modelRouter.generate(
-          this.buildUserPrompt(goal, dynamicContext, steps, maxSteps - i, formatHint, plan, opts.blackboard),
+          this.buildUserPrompt(goal, dynamicContext, steps, maxSteps - i, formatHint, plan, opts.blackboard, deliveryRequirements),
           {
             orgId,
             taskId,
@@ -571,7 +571,7 @@ export class AgentLoopService {
       await log(`agent-loop: pasos agotados con entregables pendientes: ${missingRequirements.map((r) => r.label).join(', ')}`, 'loop');
       this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, false, pendingText);
       this.recordTrajectory(orgId, taskId, goal, steps, 'degraded', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
-      return { ok: true, degraded: true, text: pendingText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
+      return { ok: false, degraded: true, text: pendingText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     }
     if (gathered.length === 0) {
       if (depth === 0 && steps.length >= 2) {
@@ -754,7 +754,7 @@ export class AgentLoopService {
         ? ['- Para descargar medios/videos (YouTube, etc.): el sandbox tiene listo yt-dlp y ffmpeg. Escribe un script en code_execute (con "network": true) que use yt-dlp directamente. IMPORTANTE: yt-dlp puede buscar videos por ti sin que busques el enlace antes (ej: usar `yt-dlp --max-downloads 1 --format mp4 "ytsearch1:one piece quinto emperador"` busca y descarga el primer video de esa búsqueda). No malgastes pasos en web_search intentando encontrar enlaces exactos; ¡usa la búsqueda integrada de yt-dlp! Una vez descargado el archivo en /work, usa telegram_send_file para enviarlo de inmediato.']
         : []),
       ...(has('code_execute') && has('telegram_send_file')
-        ? ['- Para reportes/archivos solicitados por el usuario: usa code_execute para crear el archivo en /work, verifica que exista con sandbox_ls si hace falta, y después usa telegram_send_file si el usuario pidió enviarlo por Telegram.']
+        ? ['- Para reportes/archivos solicitados por el usuario: usa code_execute para crear el archivo en /work, verifica que exista con sandbox_ls si hace falta, y después usa telegram_send_file si el usuario pidió enviarlo por Telegram. Para PDF, NO dependas de pip/npm install: primero intenta librerias ya disponibles y, si fallan, genera un PDF minimo sin dependencias externas con escritura binaria/texto PDF valido.']
         : []),
       '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
@@ -780,6 +780,7 @@ export class AgentLoopService {
     formatHint?: string,
     plan: AgentPlanItem[] = [],
     blackboard?: Record<string, string>,
+    deliveryRequirements: DeliveryRequirement[] = [],
   ): string {
     const blocks: string[] = [`OBJETIVO: ${goal}`];
     if (context) blocks.push('', `CONTEXTO:\n${context}`);
@@ -792,6 +793,19 @@ export class AgentLoopService {
     if (plan.length > 0) blocks.push('', `PLAN:\n${this.renderPlan(plan)}`);
     if (steps.length > 0) {
       blocks.push('', 'PASOS PREVIOS:', ...this.renderHistory(steps));
+    }
+    const missingRequirements = this.missingDeliveryRequirements(steps, deliveryRequirements);
+    if (missingRequirements.length > 0) {
+      blocks.push(
+        '',
+        'ENTREGABLES PENDIENTES:',
+        ...missingRequirements.map((req, idx) => `${idx + 1}. ${req.label} — usa ${req.tool}.`),
+      );
+      if (stepsLeft <= Math.max(3, missingRequirements.length + 1)) {
+        blocks.push(
+          'MODO ENTREGA FINAL: deja de investigar. Usa los hallazgos disponibles, crea los archivos faltantes y envialos. Si el PDF falla por librerias externas, genera un PDF minimo sin dependencias externas o usa herramientas del sistema ya instaladas; NO intentes pip/npm install.',
+        );
+      }
     }
     if (formatHint) blocks.push('', `ATENCIÓN: ${formatHint}`);
     blocks.push('', `Te quedan ${stepsLeft} acciones. Elige la siguiente acción y responde SOLO con el JSON.`);

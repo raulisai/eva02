@@ -39,6 +39,7 @@ const EVA_EVENTS = [
   'task.waiting_approval',
   'task.say',
   'task.log',
+  'task.step',
   'task.result',
   'task.media',
   'task.form_request',
