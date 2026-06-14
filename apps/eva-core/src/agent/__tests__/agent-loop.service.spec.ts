@@ -1156,7 +1156,7 @@ describe('AgentLoopService', () => {
 
       modelRouter.generate.mockResolvedValueOnce(modelReply('Texto extraido de la imagen mock'));
 
-      const tools = (service as any).buildToolCatalog();
+      const tools = (service as any).tools as any[];
       const imageAnalyzeTool = tools.find((t: any) => t.name === 'image_analyze');
 
       expect(imageAnalyzeTool).toBeDefined();
