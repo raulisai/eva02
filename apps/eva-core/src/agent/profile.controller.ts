@@ -6,6 +6,7 @@ import {
   CreatePlaceDto,
   CreatePrivateProfileItemDto,
   RevealPrivateProfileItemDto,
+  UpdatePlaceDto,
   UpdatePersonaFieldDto,
 } from './dto/profile.dto';
 import { ProfileFactsService } from './profile-facts.service';
@@ -75,6 +76,16 @@ export class ProfileController {
   @HttpCode(HttpStatus.CREATED)
   addPlace(@Body() dto: CreatePlaceDto, @Req() req: AuthenticatedRequest) {
     return this.facts.addPlace(req.user.orgId, req.user.userId, dto);
+  }
+
+  @Patch('places/:id')
+  @HttpCode(HttpStatus.OK)
+  updatePlace(
+    @Param('id') id: string,
+    @Body() dto: UpdatePlaceDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.facts.updatePlace(req.user.orgId, id, dto);
   }
 
   @Delete('places/:id')

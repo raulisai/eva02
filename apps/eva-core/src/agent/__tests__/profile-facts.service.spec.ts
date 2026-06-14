@@ -120,4 +120,41 @@ describe('ProfileFactsService', () => {
       reason: 'manual check',
     });
   });
+
+  it('updates known places only within the current org scope', async () => {
+    const { db, rows, updates } = dbMock();
+    rows.known_places = {
+      id: 'place-1',
+      label: 'oficina',
+      address: 'Reforma 123',
+      lat: null,
+      lng: null,
+      radius_m: 150,
+      visit_count: 0,
+      last_visit: null,
+      typical_days: null,
+    };
+    const service = new ProfileFactsService(
+      db,
+      new SensitivityClassifierService(),
+      {} as SoulContextService,
+    );
+
+    await expect(service.updatePlace(ORG, 'place-1', {
+      label: 'oficina',
+      address: 'Reforma 123',
+    })).resolves.toMatchObject({
+      id: 'place-1',
+      label: 'oficina',
+      address: 'Reforma 123',
+    });
+
+    expect(updates.known_places[0]).toMatchObject({
+      label: 'oficina',
+      address: 'Reforma 123',
+    });
+    const query = (db.admin.from as jest.Mock).mock.results[0].value;
+    expect(query.eq).toHaveBeenCalledWith('org_id', ORG);
+    expect(query.eq).toHaveBeenCalledWith('id', 'place-1');
+  });
 });

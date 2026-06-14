@@ -3,7 +3,7 @@
 import { useCallback, useRef, useState } from 'react';
 import {
   BriefcaseBusiness, CalendarDays, CheckCircle2, Flag, Heart,
-  KeyRound, Loader2, LockKeyhole, MapPin, Plus, Shield,
+  KeyRound, Loader2, LockKeyhole, MapPin, Pencil, Plus, Shield,
   StickyNote, Trash2, UserRound, Users, X, XCircle,
 } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -327,6 +327,8 @@ export function ProfileHubClient({
 
   const [showPlaceForm, setShowPlaceForm] = useState(false);
   const [placeDraft, setPlaceDraft] = useState({ label: '', address: '' });
+  const [editingPlaceId, setEditingPlaceId] = useState<string | null>(null);
+  const [placeEditDraft, setPlaceEditDraft] = useState({ label: '', address: '' });
 
   async function addPlace() {
     if (!placeDraft.label.trim()) return;
@@ -349,6 +351,32 @@ export function ProfileHubClient({
     try {
       await coreFetch(`/agent/profile/places/${id}`, { method: 'DELETE' });
       setPlaces(p => p.filter(x => x.id !== id));
+    } catch (e) { showToast(false, (e as Error).message); }
+    finally { setBusyId(null); }
+  }
+
+  function startEditPlace(place: KnownPlace) {
+    setEditingPlaceId(place.id);
+    setPlaceEditDraft({ label: place.label, address: place.address ?? '' });
+  }
+
+  function cancelEditPlace() {
+    setEditingPlaceId(null);
+    setPlaceEditDraft({ label: '', address: '' });
+  }
+
+  async function updatePlace(id: string) {
+    if (!placeEditDraft.label.trim()) return;
+    const bid = `edit-place-${id}`;
+    setBusyId(bid);
+    try {
+      const updated = await coreFetch(`/agent/profile/places/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(placeEditDraft),
+      }) as KnownPlace;
+      setPlaces(p => p.map(place => place.id === id ? { ...place, ...updated } : place));
+      cancelEditPlace();
+      showToast(true, 'Lugar actualizado');
     } catch (e) { showToast(false, (e as Error).message); }
     finally { setBusyId(null); }
   }
@@ -581,21 +609,80 @@ export function ProfileHubClient({
               )}
               {places.length === 0 && !showPlaceForm && <Empty text="EVA detecta tus lugares automáticamente, o agrégalos aquí." />}
               <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3">
-                {places.map(place => (
-                  <div key={place.id} className="anim-slide-up group relative border border-zinc-800 bg-zinc-950/60 p-3 transition-colors hover:border-zinc-700">
-                    <div className="flex items-start gap-2">
-                      <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-sm border border-sky-500/20 bg-sky-500/10">
-                        <MapPin className="h-3.5 w-3.5 text-sky-400" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs font-semibold capitalize text-zinc-100">{place.label}</p>
-                        {place.address && <p className="mt-0.5 truncate text-[11px] text-zinc-500">{place.address}</p>}
-                        {place.visit_count > 0 && <p className="mt-1 font-mono text-[10px] text-zinc-700">{place.visit_count} visitas</p>}
-                      </div>
+                {places.map(place => {
+                  const isEditing = editingPlaceId === place.id;
+                  const editBusy = busyId === `edit-place-${place.id}`;
+                  return (
+                    <div key={place.id} className="anim-slide-up group relative border border-zinc-800 bg-zinc-950/60 p-3 transition-colors hover:border-zinc-700">
+                      {isEditing ? (
+                        <div className="space-y-2">
+                          <label className="block font-mono text-[10px] uppercase tracking-wider text-zinc-600">
+                            Etiqueta
+                            <input
+                              value={placeEditDraft.label}
+                              onChange={e => setPlaceEditDraft(p => ({ ...p, label: e.target.value }))}
+                              onKeyDown={e => { if (e.key === 'Enter') updatePlace(place.id); if (e.key === 'Escape') cancelEditPlace(); }}
+                              className="input-field mt-1"
+                              autoFocus
+                            />
+                          </label>
+                          <label className="block font-mono text-[10px] uppercase tracking-wider text-zinc-600">
+                            Dirección
+                            <input
+                              value={placeEditDraft.address}
+                              onChange={e => setPlaceEditDraft(p => ({ ...p, address: e.target.value }))}
+                              onKeyDown={e => { if (e.key === 'Enter') updatePlace(place.id); if (e.key === 'Escape') cancelEditPlace(); }}
+                              className="input-field mt-1"
+                            />
+                          </label>
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => updatePlace(place.id)}
+                              disabled={editBusy || !placeEditDraft.label.trim()}
+                              className="flex h-8 items-center gap-1.5 rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-3 text-xs font-medium text-emerald-300 transition-all hover:bg-emerald-500/20 disabled:opacity-50"
+                            >
+                              {editBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                              Guardar
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelEditPlace}
+                              className="flex h-8 w-8 items-center justify-center rounded-sm border border-zinc-700 text-zinc-500 hover:text-zinc-300"
+                              aria-label="Cancelar edición"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-start gap-2 pr-14">
+                            <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-sm border border-sky-500/20 bg-sky-500/10">
+                              <MapPin className="h-3.5 w-3.5 text-sky-400" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs font-semibold capitalize text-zinc-100">{place.label}</p>
+                              {place.address && <p className="mt-0.5 truncate text-[11px] text-zinc-500">{place.address}</p>}
+                              {place.visit_count > 0 && <p className="mt-1 font-mono text-[10px] text-zinc-700">{place.visit_count} visitas</p>}
+                            </div>
+                          </div>
+                          <div className="absolute right-2 top-2 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                            <button
+                              type="button"
+                              onClick={() => startEditPlace(place)}
+                              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border border-zinc-700 text-zinc-600 transition-all hover:border-sky-500/30 hover:bg-sky-500/10 hover:text-sky-300"
+                              aria-label={`Editar ${place.label}`}
+                            >
+                              <Pencil className="h-3 w-3" />
+                            </button>
+                            <BtnDel id={place.id} busy={busyId} onDelete={deletePlace} />
+                          </div>
+                        </>
+                      )}
                     </div>
-                    <BtnDel id={place.id} busy={busyId} onDelete={deletePlace} className="absolute right-2 top-2 opacity-0 group-hover:opacity-100" />
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </Card>
 

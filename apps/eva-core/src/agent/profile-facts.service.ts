@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { SecretCipher } from '../common/secret-cipher';
 import { DatabaseService } from '../database/database.service';
 import { SensitivityClassifierService } from './sensitivity-classifier.service';
@@ -231,6 +231,33 @@ export class ProfileFactsService {
       .select('id,label,address,lat,lng,radius_m,visit_count,last_visit')
       .single();
     if (error) throw error;
+    return data;
+  }
+
+  async updatePlace(orgId: string, id: string, input: { label?: string; address?: string; lat?: number; lng?: number; radius_m?: number }) {
+    const patch: Record<string, unknown> = {};
+
+    if (input.label !== undefined) {
+      const label = input.label.trim();
+      if (!label) throw new BadRequestException('Place label is required');
+      patch.label = label;
+    }
+    if (input.address !== undefined) patch.address = input.address.trim() || null;
+    if (input.lat !== undefined) patch.lat = input.lat;
+    if (input.lng !== undefined) patch.lng = input.lng;
+    if (input.radius_m !== undefined) patch.radius_m = input.radius_m;
+
+    if (Object.keys(patch).length === 0) return { skipped: true, reason: 'empty_update' };
+
+    const { data, error } = await this.db.admin
+      .from('known_places')
+      .update(patch)
+      .eq('org_id', orgId)
+      .eq('id', id)
+      .select('id,label,address,lat,lng,radius_m,visit_count,last_visit,typical_days')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) throw new NotFoundException('Known place not found');
     return data;
   }
 

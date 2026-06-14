@@ -197,6 +197,12 @@ export class UberWebService {
       signals = await this.inspectAfterRouteEntry(opened.id, orgId);
     }
     const screenshot = await this.browser.screenshot(opened.id, orgId);
+    // Prices sometimes finish rendering just as the retry loop ends — do one final read
+    // after taking the screenshot so the visual and the extracted data are in sync.
+    if (signals.quoteCandidates.length === 0 && signals.state !== 'login_required') {
+      const finalCheck = await this.inspectPage(opened.id, orgId);
+      if (finalCheck.quoteCandidates.length > 0) signals = finalCheck;
+    }
     await this.persistSessionCheck(opened.id, orgId, signals, screenshot, {
       origin: originNormalized,
       destination: destinationNormalized,
@@ -706,13 +712,17 @@ export class UberWebService {
   }
 
   // After filling the route form and clicking "See prices", wait patiently for prices to appear.
-  // Retries up to ~12 seconds — the page navigation + rendering takes 2-5s on Uber.
+  // Retries up to ~24 seconds — anonymous/ungeocodable origins can be slow on Uber.
   private async inspectAfterRouteEntry(sessionId: string, orgId: string): Promise<UberPageSignals> {
-    const maxAttempts = 5;
+    const maxAttempts = 8;
     let signals = await this.inspectPage(sessionId, orgId);
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      if (signals.quoteCandidates.length > 0 || signals.state === 'login_required') break;
-      await this.browser.wait(sessionId, orgId, 2500);
+      if (signals.quoteCandidates.length > 0) break;
+      // Only bail on login_required when NOT on the product page (avoids false positive
+      // from Google Maps attribution while skeleton prices are still loading)
+      const onProductPage = /\/looking|\/product-selection/i.test(signals.currentUrl ?? '');
+      if (signals.state === 'login_required' && !onProductPage) break;
+      await this.browser.wait(sessionId, orgId, 3000);
       signals = await this.inspectPage(sessionId, orgId);
     }
     return signals;
@@ -1062,10 +1072,18 @@ export class UberWebService {
           .filter(Boolean);
         const uniqueLines = lines.filter((line, index, all) => all.indexOf(line) === index);
 
-        const googleLoginAvailable = /continuar con google|continue with google|sign in with google|iniciar sesi[oó]n con google|google/i.test(text);
-        const loginRequired = /log in|sign in|iniciar sesi[oó]n|inicia sesi[oó]n|continue|continuar|login/i.test(text)
+        // On the product-selection page (/looking) the Google Maps attribution fires false
+        // "google" matches and the skeleton UI has generic words like "continue" — skip
+        // login detection entirely when we're already on the quotes page.
+        const onProductPage = /\/looking|\/product-selection/i.test(currentUrl)
+          || /choose a ride|elige un viaje/i.test(lower);
+
+        const googleLoginAvailable = !onProductPage
+          && /continuar con google|continue with google|sign in with google|iniciar sesi[oó]n con google/i.test(text);
+        const loginRequired = !onProductPage
+          && /log in|sign in|iniciar sesi[oó]n|inicia sesi[oó]n|continue|continuar|login/i.test(text)
           && !/\b(uberx|comfort|black|xl|moto|taxi|elige|choose|precio|price)\b/i.test(text);
-        const loading = /loading|cargando|espera|please wait/i.test(text);
+        const loading = onProductPage || /loading|cargando|espera|please wait/i.test(text);
 
         const pricePattern = /\b(?:(?:MX\$|M\$|\$)\s?\d[\d,.]*|(?:USD|MXN)\s?\d[\d,.]*|\d[\d,.]*\s?(?:MXN|USD))(?:\s?[-–]\s?(?:(?:MX\$|M\$|\$)?\s?\d[\d,.]*|\d[\d,.]*\s?(?:MXN|USD)))?\b/i;
         const productPattern = /\b(uberx|comfort|black|xl|moto|flash|taxi|priority|planet|green|share|reserve|uber)\b/i;

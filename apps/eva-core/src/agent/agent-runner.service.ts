@@ -1937,7 +1937,11 @@ Responde directamente al usuario en español, con un tono amable y natural.
       }
     }
 
-    const isCurrentLocation = /\b(mi ubicaci[oó]n|ubicaci[oó]n actual|aqu[ií]|aqui|donde estoy)\b/i.test(cleaned) || !cleaned;
+    // When "mi casa"/"home" has no saved address, resolve from device GPS / latest visit
+    // (same chain as "mi ubicación") so we get a real address instead of the city fallback.
+    const isCurrentLocation = placeLabel === 'home'
+      || /\b(mi ubicaci[oó]n|ubicaci[oó]n actual|aqu[ií]|aqui|donde estoy)\b/i.test(cleaned)
+      || !cleaned;
 
     if (isCurrentLocation) {
       // 1. Try task metadata

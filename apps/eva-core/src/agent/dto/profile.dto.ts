@@ -79,6 +79,32 @@ export class CreatePlaceDto {
   radius_m?: number;
 }
 
+export class UpdatePlaceDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  label?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  address?: string;
+
+  @IsOptional()
+  @IsNumber()
+  lat?: number;
+
+  @IsOptional()
+  @IsNumber()
+  lng?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(10)
+  radius_m?: number;
+}
+
 export class AddRelationshipDto {
   @IsString()
   @MinLength(1)
