@@ -790,26 +790,50 @@ export class UberWebService {
     await this.browser.wait(sessionId, orgId, 1000);
     // Dismiss cookie banner again in case it appeared after form interaction
     await this.dismissConsentBanner(sessionId, orgId);
-    // Put <button> selectors first — www.uber.com uses <button>, m.uber.com uses <a>
-    await this.clickFirst(sessionId, orgId, [
-      'button:has-text("See prices")',
-      'button:has-text("Ver precios")',
-      'a[aria-label="See prices"]',
-      'a:has-text("See prices")',
-      'a[data-baseweb="button"][href*="/looking"]',
-      'xpath=//*[@id="main"]/div[3]/div/section/div/div/div/div/div/div/div[2]/a',
-      'button:has-text("Buscar")',
-      'button:has-text("Search")',
-      'button:has-text("Done")',
-      'button:has-text("Listo")',
-      'button:has-text("Next")',
-      'button:has-text("Siguiente")',
-      'button:has-text("Confirm pickup")',
-      'button:has-text("Confirmar recogida")',
-      'button:has-text("Set pickup")',
-      'button:has-text("Establecer recogida")',
-    ], 800);
-    // Wait for page navigation after clicking "See prices" (Uber takes 2-5s to load results)
+    // JS click is the primary method — more reliable than Playwright's synthetic click on React SPAs.
+    // Use innerText (layout-aware, skips hidden SVG titles) + loose substring match to handle icon buttons.
+    const jsClicked = await this.browser.evaluate<boolean>(sessionId, orgId, () => {
+      const isVisible = (el: HTMLElement) => {
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'
+          && el.offsetWidth > 0 && el.offsetHeight > 0;
+      };
+      const fireClick = (el: HTMLElement) => {
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      };
+      // 1. aria-label exact matches (most reliable)
+      for (const sel of ['[aria-label="See prices"]', '[aria-label="Ver precios"]']) {
+        const el = document.querySelector<HTMLElement>(sel);
+        if (el && isVisible(el)) { fireClick(el); return true; }
+      }
+      // 2. innerText substring — avoids false negatives from hidden SVG title text
+      const SE_PRICES_RE = /\b(see prices|ver precios)\b/i;
+      const ACTION_RE = /\b(buscar|search|done|listo|next|siguiente|confirm pickup|confirmar recogida|set pickup)\b/i;
+      const candidates = [
+        ...Array.from(document.querySelectorAll<HTMLButtonElement>('button')),
+        ...Array.from(document.querySelectorAll<HTMLAnchorElement>('a')),
+      ];
+      const btn = candidates.find((el) => {
+        if (!isVisible(el as HTMLElement)) return false;
+        // innerText is layout-aware; falls back to textContent on headless engines
+        const text = ((el as HTMLElement).innerText ?? el.textContent ?? '').trim();
+        return SE_PRICES_RE.test(text) || (text.length < 40 && ACTION_RE.test(text));
+      });
+      if (btn) { fireClick(btn as HTMLElement); return true; }
+      return false;
+    }).catch(() => false);
+
+    if (!jsClicked) {
+      // Playwright fallback — only reached if JS evaluate fails entirely
+      await this.clickFirst(sessionId, orgId, [
+        'button:has-text("See prices")',
+        'button:has-text("Ver precios")',
+        'a[aria-label="See prices"]',
+        'a:has-text("See prices")',
+        'a[data-baseweb="button"][href*="/looking"]',
+      ], 800);
+    }
+    // Wait for page navigation / AJAX results after clicking "See prices"
     await this.browser.wait(sessionId, orgId, 3000);
 
     return true;

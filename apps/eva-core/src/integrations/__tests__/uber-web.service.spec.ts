@@ -164,6 +164,7 @@ describe('UberWebService', () => {
       .mockResolvedValueOnce(false)        // clickFirstMatchingPlaceSuggestion (origin)
       .mockResolvedValueOnce(false)        // clickFirstMatchingPlaceSuggestion (destination)
       .mockResolvedValueOnce(undefined)    // dismissConsentBanner (before "See prices")
+      .mockResolvedValueOnce(true)         // JS click on "See prices" button
       .mockResolvedValueOnce(noQuotes)     // inspectAfterRouteEntry attempt 1 (still loading)
       .mockResolvedValueOnce(withQuotes);  // inspectAfterRouteEntry attempt 2 (prices ready)
 
@@ -174,13 +175,14 @@ describe('UberWebService', () => {
     });
 
     expect(result.ok).toBe(true);
-    // Fields are now clicked (to focus) then typed char-by-char for proper autocomplete
+    // Fields are clicked to focus then typed char-by-char for proper React autocomplete
     expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, '#rv-pudo-select-pickup', { timeout: 1200 });
     expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, '#rv-pudo-select-drop0', { timeout: 1200 });
+    expect(browser.pressKey).toHaveBeenCalledWith(SESSION, ORG, 'Control+a');
     expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, 'Calle 1 31, Agrícola Pantitlán', 50);
     expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, 'El Zócalo, Ciudad de México', 50);
-    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, 'button:has-text("See prices")', { timeout: 800 });
-    expect(browser.pressKey).toHaveBeenCalledWith(SESSION, ORG, 'Control+a');
+    // "See prices" is triggered via JS evaluate (primary) — clickNow only used as fallback
+    expect(browser.evaluate).toHaveBeenCalledWith(SESSION, ORG, expect.any(Function));
     expect(browser.updateSessionMetadata).toHaveBeenCalledWith(SESSION, ORG, expect.objectContaining({
       route_entry: 'dom_route_form',
     }));
