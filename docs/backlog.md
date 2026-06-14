@@ -4,6 +4,15 @@ This backlog keeps only relevant, actionable improvements. Completed work moves 
 
 ---
 
+## 0. Reasoning & Agency (shipped 2026-06-14)
+- [x] **P1 Semantic trajectory replay**: migration 037, `goal_embedding vector(1536)`, `match_trajectories` RPC, embed on task complete, cosine fallback.
+- [x] **P2 Tool alternatives on first ERROR**: `tool-alternatives.ts` inverse-capability map, injected into error observation at step time (parallel + sequential paths).
+- [x] **P3 Declarative delivery guard**: `delivery-requirements.ts` replaces regex-per-kind with a `DELIVERY_RULES` table — PDF, Telegram, Email, WhatsApp, Excel, Calendar.
+- [x] **P4 Gated deliberation for medium tasks**: `deliberateMediumTask()` in intelligence service, 1 `balanced` call pre-execution, injects strategy brief like `prepareExecution` does for long tasks.
+- [x] **P5 Fail-open signals**: `selectToolsForPhase` returns all tools when no domain signals match complex tasks.
+
+---
+
 ## 1. Runtime Safety & Observability
 Sandbox concurrency stress test and network-compliance telemetry shipped (see [sandbox.service.spec.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/__tests__/sandbox.service.spec.ts) and `recordNetworkExec` in [agent-loop.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/agent/agent-loop.service.ts) → `task_events` event_type `sandbox.network_exec`).
 

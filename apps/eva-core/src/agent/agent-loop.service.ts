@@ -40,6 +40,12 @@ import {
 } from './budget-policy';
 import { Tier } from './tier';
 import { z } from 'zod';
+import { buildAlternativesHint } from './tool-alternatives';
+import {
+  DeliveryRequirement,
+  deriveDeliveryRequirements,
+  missingDeliveryRequirements,
+} from './delivery-requirements';
 
 
 /** One executed cycle of the loop: what the model decided + what the tool observed. */
@@ -93,14 +99,7 @@ type AgentDecision = { thought: string; tool: string; args: Record<string, unkno
 type FinalEvaluation =
   | { accept: true; text: string }
   | { accept: false; event: 'dod_rejection' | 'security_review'; observation: string; logDetail?: string };
-type DeliveryRequirementKind = 'pdf_file' | 'telegram_file';
-
-interface DeliveryRequirement {
-  kind: DeliveryRequirementKind;
-  label: string;
-  tool: string;
-  guidance: string;
-}
+// DeliveryRequirement is now defined in ./delivery-requirements (P3 refactor).
 
 interface ToolSpec {
   name: string;
@@ -296,6 +295,21 @@ export class AgentLoopService {
     } else if (depth === 0 && maxSteps >= DEFAULT_ROOT_STEPS && this.intelligence) {
       // R2.2: probe-before-promise — plan is built with capability model so it only uses available tools
       plan = await this.intelligence.createInitialPlan(orgId, taskId, goal, opts.capabilityModel);
+
+      // P4: gated deliberation for medium tasks.
+      // Long tasks already went through prepareExecution (powerful model + phased plan).
+      // Medium tasks now get a lightweight 2-3 approach comparison so the opening
+      // decision is well-grounded. One `balanced` call; skipped on quick/chat tiers.
+      if (opts.tier === 'medium' && !isLongTask) {
+        const availableToolNamesForDeliberation = available.map((t) => t.name);
+        const strategyBrief = await this.intelligence.deliberateMediumTask(
+          orgId, taskId, goal, availableToolNamesForDeliberation,
+        ).catch(() => null);
+        if (strategyBrief) {
+          executionBrief = strategyBrief;
+          await log('agent-loop: estrategia elegida de deliberación medium', 'loop');
+        }
+      }
     }
 
     // System prompt built after planning so executionBrief can be injected
@@ -573,12 +587,19 @@ export class AgentLoopService {
               return { tool, decision: d, observation: `ERROR: ${(error as Error).message.slice(0, 300)}` };
             }
           }));
+          const availableToolNamesParallel = new Set(stepTools.map((t) => t.name));
           for (const result of results) {
+            // P2: append alternatives hint on parallel errors too.
+            let obs = result.observation;
+            if (obs.startsWith('ERROR:')) {
+              const altHint = buildAlternativesHint(result.tool.name, availableToolNamesParallel);
+              if (altHint) obs = this.truncate(obs, 400) + altHint;
+            }
             steps.push({
               tool: result.tool.name,
               args: result.decision.args,
               thought: result.decision.thought,
-              observation: this.truncate(result.observation, OBSERVATION_LIMIT),
+              observation: this.truncate(obs, OBSERVATION_LIMIT),
             });
             if (depth === 0 && this.intelligence) {
               plan = this.intelligence.updatePlanFromObservation(plan, result.observation);
@@ -619,6 +640,14 @@ export class AgentLoopService {
       } catch (error) {
         if (error instanceof MissingInformationError) throw error;
         observation = `ERROR: ${(error as Error).message.slice(0, 300)}`;
+      }
+
+      // P2: on ERROR, append concrete alternative routes so the model pivots
+      // immediately instead of retrying the same tool.
+      if (observation.startsWith('ERROR:')) {
+        const availableToolNames = new Set(stepTools.map((t) => t.name));
+        const altHint = buildAlternativesHint(spec.name, availableToolNames);
+        if (altHint) observation = this.truncate(observation, 400) + altHint;
       }
 
       steps.push({
@@ -1058,53 +1087,15 @@ export class AgentLoopService {
     return /\?/.test(text);
   }
 
+  // deriveDeliveryRequirements and missingDeliveryRequirements are thin wrappers
+  // so call-sites in this file don't need to change — they delegate to the pure
+  // helpers in ./delivery-requirements (P3 refactor).
   private deriveDeliveryRequirements(goal: string): DeliveryRequirement[] {
-    const normalized = goal.toLowerCase();
-    const requirements: DeliveryRequirement[] = [];
-
-    if (/\bpdf\b/.test(normalized) && /\b(genera|generar|crea|crear|haz|hacer|arma|armar|archivo|reporte|documento)\b/.test(normalized)) {
-      requirements.push({
-        kind: 'pdf_file',
-        label: 'crear archivo PDF',
-        tool: 'code_execute',
-        guidance: 'crea el PDF en /work con code_execute y deja evidencia de la ruta/nombre .pdf en la observación.',
-      });
-    }
-
-    if (/\btelegram\b/.test(normalized) && /\b(env[ií]a|enviar|mand[aá]|mandar|m[aá]ndalo|m[aá]ndame|comparte|compartir)\b/.test(normalized)) {
-      requirements.push({
-        kind: 'telegram_file',
-        label: 'enviar archivo por Telegram',
-        tool: 'telegram_send_file',
-        guidance: 'usa telegram_send_file con el archivo generado y espera una observación de envío exitoso.',
-      });
-    }
-
-    return requirements;
+    return deriveDeliveryRequirements(goal);
   }
 
   private missingDeliveryRequirements(steps: AgentLoopStep[], requirements: DeliveryRequirement[]): DeliveryRequirement[] {
-    return requirements.filter((req) => {
-      if (req.kind === 'pdf_file') {
-        return !steps.some((step) => {
-          const argsText = JSON.stringify(step.args).toLowerCase();
-          const observation = step.observation.toLowerCase();
-          return !step.observation.startsWith('ERROR:')
-            && (step.tool === 'code_execute' || step.tool === 'sandbox_ls' || step.tool === 'script_forge')
-            && (argsText.includes('.pdf') || observation.includes('.pdf') || observation.includes('pdf'));
-        });
-      }
-
-      if (req.kind === 'telegram_file') {
-        return !steps.some((step) =>
-          step.tool === 'telegram_send_file'
-          && !step.observation.startsWith('ERROR:')
-          && /enviado a telegram|message_id|archivo ".+" .*telegram/i.test(step.observation)
-        );
-      }
-
-      return false;
-    });
+    return missingDeliveryRequirements(steps, requirements);
   }
 
   private deliveryBlockedText(goal: string, steps: AgentLoopStep[], missing: DeliveryRequirement[]): string {
@@ -1314,6 +1305,13 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
   ): ToolSpec[] {
     // Sub-agents and shallow loops: no filtering, they already have minimal tool sets.
     if (depth > 0 || maxSteps <= 4) return allTools;
+
+    // P5: fail-open — when no domain signals matched AND the task is complex,
+    // expose all tools so a missing keyword never silently caps capability.
+    // The cost is a slightly larger tool list in the first steps; the benefit is
+    // the model never reaches for a tool that isn't there.
+    const NO_DOMAIN_SIGNALS = goalSignals.size === 0;
+    if (NO_DOMAIN_SIGNALS && maxSteps >= DEFAULT_ROOT_STEPS) return allTools;
 
     const ratio = steps.length / maxSteps;
     const inResearchPhase = ratio < 0.55;
@@ -3332,10 +3330,34 @@ Genera la respuesta final corregida y pulida en español. No incluyas ninguna ex
       dodRejections,
       modelBudgetPerStep: modelBudgetPerStep.map((s) => ({ ...s })),
     };
+    const isTerminal = outcome === 'ok' || outcome === 'failed' || outcome === 'degraded';
     const op = outcome === 'running'
       ? this.trajectories.checkpoint(snapshot)
       : this.trajectories.complete(snapshot);
-    void op.catch((err) => this.logger.debug(`trajectory record skipped: ${(err as Error).message}`));
+    void op
+      .then(() => {
+        // P1: embed the goal text after the trajectory row is committed so future
+        // runs can retrieve similar successes/failures via cosine search.
+        // Fire-and-forget — never blocks the response path.
+        if (isTerminal) this.embedTrajectoryGoal(orgId, taskId, goal);
+      })
+      .catch((err) => this.logger.debug(`trajectory record skipped: ${(err as Error).message}`));
+  }
+
+  /**
+   * P1 — Writes goal_embedding for semantic replay.
+   * Fire-and-forget; silently skipped if migration 037 is not yet applied.
+   */
+  private embedTrajectoryGoal(orgId: string, taskId: string, goal: string): void {
+    void this.modelRouter.embed(goal)
+      .then(({ embedding }) =>
+        this.db.admin
+          .from('agent_trajectories')
+          .update({ goal_embedding: `[${embedding.join(',')}]` })
+          .eq('org_id', orgId)
+          .eq('task_id', taskId),
+      )
+      .catch((err) => this.logger.debug(`trajectory embed skipped: ${(err as Error).message}`));
   }
 
   private truncate(text: string, limit: number): string {

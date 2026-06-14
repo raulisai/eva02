@@ -412,7 +412,39 @@ Responde ÚNICAMENTE con este JSON (sin markdown, sin texto extra):
     ];
   }
 
+  /**
+   * P1 — Semantic trajectory replay.
+   *
+   * Embeds the goal once (same cost as proactiveContext) and searches
+   * agent_trajectories by cosine distance via pgvector.  Falls back to the
+   * lexical scan when the embedding column is absent or the RPC fails, so
+   * existing orgs without migration 037 keep working unchanged.
+   */
   async replayExample(orgId: string, goal: string): Promise<string | null> {
+    try {
+      const { embedding } = await this.modelRouter.embed(goal);
+      const { data: vecData, error: vecError } = await this.db.admin.rpc('match_trajectories', {
+        p_org_id: orgId,
+        p_embedding: `[${embedding.join(',')}]`,
+        p_outcome: 'ok',
+        p_limit: 5,
+        p_threshold: 0.72,
+      });
+      if (!vecError && Array.isArray(vecData) && vecData.length > 0) {
+        const best = vecData[0] as { goal: string; steps: AgentLoopStep[]; tools_used?: string[] };
+        const compact = (best.steps ?? [])
+          .filter((s) => !s.observation.startsWith('ERROR:'))
+          .slice(0, 5)
+          .map((s) => `${s.tool}: ${s.observation.slice(0, 180)}`)
+          .join('\n');
+        if (!compact) return null;
+        return `EJEMPLO DE RESOLUCIÓN PREVIA para objetivo similar "${best.goal}":\n${compact}`;
+      }
+    } catch {
+      // fall through to lexical
+    }
+
+    // Lexical fallback (works without migration 037)
     const { data } = await this.db.admin
       .from('agent_trajectories')
       .select('goal, steps, tools_used')
@@ -431,7 +463,7 @@ Responde ÚNICAMENTE con este JSON (sin markdown, sin texto extra):
       .slice(0, 5)
       .map((s) => `${s.tool}: ${s.observation.slice(0, 180)}`)
       .join('\n');
-    return `EJEMPLO DE RESOLUCIÓN PREVIA para objetivo similar "${best.goal}":\n${compact}`;
+    return compact ? `EJEMPLO DE RESOLUCIÓN PREVIA para objetivo similar "${best.goal}":\n${compact}` : null;
   }
 
   async askUser(
@@ -893,7 +925,37 @@ Responde ÚNICAMENTE con este JSON (sin markdown, sin texto extra):
 
   // ── R4.5: failure anti-patterns ───────────────────────────────────────────
 
+  /**
+   * P1 — Semantic failure anti-pattern replay.
+   * Same embedding strategy as replayExample; lexical fallback on error.
+   */
   async replayFailureExample(orgId: string, goal: string): Promise<string | null> {
+    try {
+      const { embedding } = await this.modelRouter.embed(goal);
+      for (const outcome of ['failed', 'degraded']) {
+        const { data: vecData, error: vecError } = await this.db.admin.rpc('match_trajectories', {
+          p_org_id: orgId,
+          p_embedding: `[${embedding.join(',')}]`,
+          p_outcome: outcome,
+          p_limit: 3,
+          p_threshold: 0.70,
+        });
+        if (!vecError && Array.isArray(vecData) && vecData.length > 0) {
+          const best = vecData[0] as { goal: string; steps: AgentLoopStep[] };
+          const errorSteps = (best.steps ?? [])
+            .filter((s) => s.observation.startsWith('ERROR:'))
+            .slice(0, 3)
+            .map((s) => `${s.tool}: ${s.observation.slice(7, 160)}`)
+            .join('\n');
+          if (!errorSteps) continue;
+          return `ANTI-PATRÓN PREVIO para objetivo similar "${best.goal.slice(0, 80)}":\nEstas rutas fallaron antes — evítalas:\n${errorSteps}`;
+        }
+      }
+    } catch {
+      // fall through to lexical
+    }
+
+    // Lexical fallback
     const { data } = await this.db.admin
       .from('agent_trajectories')
       .select('goal, steps, tools_used')
@@ -916,5 +978,75 @@ Responde ÚNICAMENTE con este JSON (sin markdown, sin texto extra):
       .join('\n');
     if (!errorSteps) return null;
     return `ANTI-PATRÓN PREVIO para objetivo similar "${best.goal.slice(0, 80)}":\nEstas rutas fallaron antes — evítalas:\n${errorSteps}`;
+  }
+
+  /**
+   * P4 — Gated deliberation for medium tasks.
+   *
+   * Generates 2-3 candidate approaches and picks the best one based on
+   * tool availability and expected cost. Called ONLY for medium-tier tasks
+   * (not long — those already use prepareExecution with `powerful` model).
+   * Uses `balanced` so it's one extra call but NOT `powerful`-tier cost.
+   *
+   * Returns a compact "chosen strategy" string to inject into the system
+   * prompt, or null on any error (loop proceeds with default plan).
+   */
+  async deliberateMediumTask(
+    orgId: string,
+    taskId: string,
+    goal: string,
+    availableToolNames: string[],
+  ): Promise<string | null> {
+    const toolList = availableToolNames.slice(0, 20).join(', ');
+    try {
+      const res = await this.modelRouter.generate(
+        `Eres un planificador conciso. Para el objetivo dado, genera 2-3 enfoques alternativos y elige el mejor según las herramientas disponibles.
+
+OBJETIVO: ${goal}
+HERRAMIENTAS DISPONIBLES: ${toolList}
+
+Responde SOLO con este JSON:
+{
+  "approaches": [
+    {"id": "A", "name": "<nombre corto>", "steps": ["paso 1", "paso 2"], "cost": "low|medium|high", "risk": "low|medium|high"},
+    {"id": "B", "name": "<nombre corto>", "steps": ["paso 1", "paso 2"], "cost": "low|medium|high", "risk": "low|medium|high"}
+  ],
+  "chosen": "A",
+  "rationale": "<por qué este enfoque es mejor: menor costo, herramientas disponibles, menos pasos>"
+}`,
+        {
+          orgId,
+          taskId,
+          budget: 'balanced',
+          requestType: 'reasoning',
+          responseFormat: 'json',
+          maxTokens: 500,
+          temperature: 0,
+        },
+      );
+
+      const parsed = JSON.parse(res.text.trim()) as {
+        approaches?: Array<{ id: string; name: string; steps: string[] }>;
+        chosen?: string;
+        rationale?: string;
+      };
+
+      if (!parsed.approaches || !parsed.chosen || !parsed.rationale) return null;
+
+      const chosen = parsed.approaches.find((a) => a.id === parsed.chosen);
+      if (!chosen) return null;
+
+      const steps = (chosen.steps ?? []).slice(0, 4).map((s, i) => `  ${i + 1}. ${s}`).join('\n');
+      return [
+        'ESTRATEGIA ELEGIDA (de 2-3 opciones evaluadas):',
+        `Enfoque: ${chosen.name}`,
+        `Por qué: ${parsed.rationale}`,
+        `Pasos clave:\n${steps}`,
+        'Sigue este enfoque. No evalúes alternativas durante la ejecución.',
+      ].join('\n');
+    } catch (err) {
+      this.logger.debug(`deliberateMediumTask skipped: ${(err as Error).message}`);
+      return null;
+    }
   }
 }
