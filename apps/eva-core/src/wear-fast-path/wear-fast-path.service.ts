@@ -16,6 +16,8 @@ import {
   WEAR_TOKEN_TTL_SECONDS,
 } from './wear-fast-path.types';
 
+const CURRENT_LOCATION_REQUEST = /\b(d[oó]nde\s+(?:me\s+)?(?:estoy|encuentro)|ubicaci[oó]n\s+(?:actual|en\s+tiempo\s+real)|mi\s+ubicaci[oó]n\s+actual|detecta(?:r)?\s+(?:mi\s+)?ub(?:icaci[oó]n)?|aqu[ií]\s+en\s+este\s+momento)\b/i;
+
 @Injectable()
 export class WearFastPathService {
   constructor(
@@ -139,6 +141,17 @@ export class WearFastPathService {
       requestType: input.requestType,
       text: input.text,
     });
+
+    if (CURRENT_LOCATION_REQUEST.test(input.text)) {
+      return this.fallbackAndLog({
+        ...input,
+        model,
+        latencyMs,
+        tokensUsed: estimatedTokens,
+        costUsd: estimatedCostUsd,
+        reason: 'request_location_requires_core',
+      });
+    }
 
     if (!policyDecision.allowed) {
       return this.fallbackAndLog({

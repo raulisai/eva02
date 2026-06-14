@@ -211,6 +211,37 @@ describe('WearFastPathService', () => {
     }));
   });
 
+  it('falls back to Core Path for current-location questions even when simple_question is allowed', async () => {
+    const metadata = {
+      request_context: {
+        source: 'wear_os',
+        location: { source: 'wear_os', latitude: 19.4326, longitude: -99.1332, accuracy_m: 12 },
+      },
+    };
+
+    const result = await service.handleRequest({
+      orgId: ORG,
+      userId: USER,
+      deviceId: DEVICE,
+      sessionId: SESSION,
+      requestType: 'simple_question',
+      text: 'donde estoy en este momento?',
+      estimatedTokens: 12,
+      estimatedCostUsd: 0.001,
+      metadata,
+    });
+
+    expect(result.decision).toBe('core_fallback');
+    expect(result.reason).toBe('request_location_requires_core');
+    expect(fallback.forward).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG,
+      userId: USER,
+      deviceId: DEVICE,
+      reason: 'request_location_requires_core',
+      metadata,
+    }));
+  });
+
   it('falls back to Core Path when session cost limit is exceeded', async () => {
     repo.getUsageTotals.mockResolvedValue({
       sessionCostUsd: 0.049,

@@ -91,6 +91,51 @@ describe('PlaygroundClient', () => {
     expect(screen.getByText('Waiting for the agent to start…')).toBeInTheDocument();
   });
 
+  it('attaches browser location context for location-aware orders', async () => {
+    const getCurrentPosition = jest.fn((success: PositionCallback) => success({
+      coords: {
+        latitude: 19.4326,
+        longitude: -99.1332,
+        accuracy: 22,
+        altitude: null,
+        altitudeAccuracy: null,
+        heading: null,
+        speed: null,
+      },
+      timestamp: Date.parse('2026-06-13T22:00:00.000Z'),
+    } as GeolocationPosition));
+    Object.defineProperty(global.navigator, 'geolocation', {
+      value: { getCurrentPosition },
+      configurable: true,
+    });
+
+    render(<PlaygroundClient />);
+
+    fireEvent.change(screen.getByLabelText('Order'), { target: { value: 'pideme un uber al trabajo ya' } });
+    fireEvent.click(screen.getByText('Run'));
+
+    await waitFor(() => expect(getCurrentPosition).toHaveBeenCalled());
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/tasks'),
+      expect.objectContaining({ method: 'POST' }),
+    ));
+
+    const [, init] = (global.fetch as jest.Mock).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.metadata.request_context.location).toEqual(expect.objectContaining({
+      source: 'browser',
+      latitude: 19.4326,
+      longitude: -99.1332,
+      accuracy_m: 22,
+    }));
+    expect(body.metadata.device_location).toEqual(expect.objectContaining({
+      latitude: 19.4326,
+      longitude: -99.1332,
+      accuracy: 22,
+      source: 'browser',
+    }));
+  });
+
   it('renders the final model answer for a simple greeting path', async () => {
     const greetingTask = {
       ...task,

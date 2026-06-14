@@ -35,6 +35,13 @@ import { AGENT_AUTONOMY_JOB_KEY, ScheduledJobsService } from '../jobs/scheduled-
 import { CommunicationService } from '../communication/communication.service';
 import type { CommunicationChannel } from '../communication/communication.types';
 import { PipelineRunnerService } from './pipeline-runner.service';
+import {
+  formatCoordinatePair,
+  normalizeRequestLocation,
+  requestLocationStatus as getRequestLocationStatus,
+  RequestLocationContext,
+  RequestLocationStatus,
+} from '../common/request-context';
 
 // Self-info: user asks about their OWN data — declared early so ACK_RULES can reference it.
 const SELF_INFO_SIGNALS = /\b(mi\s+(nombre|edad|direcci[oó]n|domicilio|casa|trabajo|empresa|oficina|horario|gustos?|hobbies?|perfil|ubicaci[oó]n|tel[eé]fono|peso|altura|estatura|informaci[oó]n|datos?|lugar(?:es)?|sitios?)|mis\s+(datos?|gustos?|hobbies?|lugares?|sitios?|preferencias?|relaciones?|alergias?|d[ií]as?|horarios?)|d[oó]nde\s+(vivo|trabajo|est[eé]|queda\s+mi|viv[ií]s|trabajas?)|cu[aá]ntos?\s+a[nñ]os\s+(tengo|tienes?|tiene?)|(?:sabes?|recuerdas?|tienes?)\s+(?:mi\s+)?(?:nombre|edad|direcci[oó]n|gustos?|hobbies?|trabajo|casa)|mis\s+datos\s+personales|mi\s+perfil)\b/i;
@@ -145,8 +152,9 @@ const CALENDAR_SIGNALS_PERSONAL = /\b(mi(s)? (citas?|eventos?|agenda|calendario)
 const DRIVE_SIGNALS = /\b(drive|google drive|mis archivos|mis documentos|mis carpetas|mis docs|mis hojas|mis sheets|archivos? (grandes?|pesados?|de google)|carpeta(s)? (de google|en drive)|qu[eé] (archivos?|carpetas?|docs?) tengo)\b/i;
 const UBER_SIGNALS = /\b(uber|taxi|viajes?|viajar|vieajes?|traslado|transporte)\b/i;
 const UBER_ESTIMATE_SIGNALS = /\b(cu[aá]nto|cuanto|costo|costar|cuesta|sale|precio|tarifa|cotiza|cotizar|estimaci[oó]n|estimate|quote)\b/i;
-const UBER_ORDER_SIGNALS = /\b(pedir|pide|solicita|solicitar|ordena|ordenar|manda|mandar|confirma|confirmar|reserva|reservar)\b/i;
+const UBER_ORDER_SIGNALS = /\b(pedir|p[ií]de(?:me|nos|lo|la)?|solicita(?:me|nos|lo|la)?|solicitar|ordena(?:me|nos|lo|la)?|ordenar|manda(?:me|nos|lo|la)?|mandar|confirma(?:me|lo|la)?|confirmar|reserva(?:me|nos|lo|la)?|reservar)\b/i;
 const UBER_EMAIL_LOGIN_SIGNALS = /\b(inicia[r]?\s+(?:sesi[oó]n|sesion)|log\s*in|iniciar|conectar|vincular)\b.{0,30}\b(uber)\b|\b(uber)\b.{0,30}\b(correo|email|mail)\b/i;
+const CURRENT_LOCATION_QUESTION_SIGNALS = /\b(d[oó]nde\s+(?:me\s+)?(?:estoy|encuentro)|ubicaci[oó]n\s+(?:actual|en\s+tiempo\s+real)|mi\s+ubicaci[oó]n\s+actual|detecta(?:r)?\s+(?:mi\s+)?ub(?:icaci[oó]n)?|aqu[ií]\s+en\s+este\s+momento)\b/i;
 const RAPPI_SIGNALS = /\b(rappi)\b/i;
 const RAPPI_EMAIL_LOGIN_SIGNALS = /\b(inicia[r]?\s+(?:sesi[oó]n|sesion)|log\s*in|iniciar|conectar|vincular)\b.{0,30}\b(rappi)\b|\b(rappi)\b.{0,30}\b(correo|email|mail)\b/i;
 // OTP code submission: short numeric string (4-8 digits) with optional "el código es" prefix
@@ -239,6 +247,9 @@ export interface RouteContext {
   patternBlock: string | null;
   proactiveTriggers: any[];
   recallResult: { isRecall: boolean; context: string | null; memories: any[] };
+  requestLocation: RequestLocationContext | null;
+  requestLocationStatus: RequestLocationStatus | null;
+  requestLocationBlock: string | null;
   routingInput: string;
   contextualInput: string;
   startedAt: number;
@@ -313,7 +324,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     this.events.on('approval.resolved', async (event) => {
       const payload = event.payload as { approvalId?: string; status?: string } | undefined;
       if (payload?.status !== 'approved' || !payload.approvalId || !event.taskId) return;
-      this.executeApprovedAction(event.orgId, event.taskId, payload.approvalId).catch((err) => this.logger.error('approval.resolved run error', err));
+      await this.executeApprovedAction(event.orgId, event.taskId, payload.approvalId).catch((err) => this.logger.error('approval.resolved run error', err));
     });
     this.logger.log('Agent runner subscribed to task.created + approval.resolved');
     // Re-queue any tasks that got stuck in a non-terminal state during a
@@ -500,7 +511,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
           await this.say(ctx.orgId, ctx.taskId, 'Abro Rappi e ingreso tu correo para iniciar sesión.');
-          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext, ctx.requestLocationBlock);
           if (loopHandled) return true;
           await this.handleRappiEmailLogin(ctx.orgId, ctx.taskId, ctx.input, ctx.startedAt);
           return true;
@@ -515,7 +526,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
           await this.say(ctx.orgId, ctx.taskId, 'Abro Uber e ingreso tu correo para iniciar sesión.');
-          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext, ctx.requestLocationBlock);
           if (loopHandled) return true;
           await this.handleUberEmailLogin(ctx.orgId, ctx.taskId, ctx.input, ctx.startedAt);
           return true;
@@ -544,7 +555,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.say(ctx.orgId, ctx.taskId, 'Abro Uber Web solo para cotizar y te mando screenshot antes de cualquier acción.');
           await this.log(ctx.orgId, ctx.taskId, 'uber quote request — opening Uber Web profile (quote-only)', 'tools');
           this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'uber');
-          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext, ctx.requestLocationBlock);
           if (loopHandled) return true;
           await this.handleUberQuoteRequest(ctx.orgId, ctx.taskId, ctx.input, ctx.startedAt, ctx.conversationContext);
           return true;
@@ -567,7 +578,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
           await this.say(ctx.orgId, ctx.taskId, 'Abro WhatsApp Web con tu perfil local. Si falta login, te paso el QR.');
           await this.log(ctx.orgId, ctx.taskId, 'whatsapp request — opening WhatsApp Web profile', 'tools');
-          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext, ctx.requestLocationBlock);
           if (loopHandled) return true;
           await this.handleWhatsAppRequest(ctx.orgId, ctx.taskId, ctx.task, ctx.input, ctx.startedAt, ctx.conversationContext);
           return true;
@@ -581,7 +592,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         handler: async (ctx) => {
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
-          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext, ctx.requestLocationBlock);
           if (loopHandled) return true;
           await this.handleScheduleIntent(ctx.orgId, ctx.taskId, ctx.task, ctx.input, ctx.startedAt);
           return true;
@@ -620,7 +631,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             await this.say(ctx.orgId, ctx.taskId, 'Preparo el cambio en tu agenda y te pido confirmación 🗓️');
             this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'calendar');
           }
-          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext, ctx.requestLocationBlock);
           if (loopHandled) return true;
           if (this.isGmailWriteIntent(ctx.input)) {
             await this.handleGmailWriteIntent(ctx.orgId, ctx.taskId, ctx.task, ctx.input, ctx.startedAt);
@@ -629,6 +640,18 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           }
           return true;
         }
+      },
+      {
+        name: 'request-location',
+        priority: 56,
+        risk: 'low',
+        matches: (ctx) => this.isCurrentLocationQuestion(ctx.input),
+        handler: async (ctx) => {
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+          await this.answerCurrentRequestLocation(ctx);
+          return true;
+        },
       },
       {
         name: 'chat-tier',
@@ -651,6 +674,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             ctx.soulContext,
             ctx.proactiveTriggers.map(t => t.message),
             ctx.recallResult.context,
+            ctx.requestLocationBlock,
           );
           const reply = await this.modelRouter.generate(chatInput, {
             orgId: ctx.orgId,
@@ -766,6 +790,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             ctx.startedAt,
             ctx.task.created_by,
             ctx.soulContext,
+            ctx.requestLocationBlock,
             await this.maxStepsForTier(ctx.orgId, 'medium'),
           );
           if (handled) return true;
@@ -788,6 +813,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             ctx.startedAt,
             ctx.task.created_by,
             ctx.soulContext,
+            ctx.requestLocationBlock,
             await this.maxStepsForTier(ctx.orgId, 'long'),
           );
           if (handled) return true;
@@ -946,7 +972,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           if (this.isUselessAnswer(result.text) || staleReason) {
             const reason = staleReason ?? 'non-actionable';
             await this.log(ctx.orgId, ctx.taskId, `model answer rejected as ${reason}; trying project tools`, 'model');
-            const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext);
+            const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext, ctx.requestLocationBlock);
             if (loopHandled) return true;
             const recovered = await this.recoverWithTools(ctx.orgId, ctx.taskId, ctx.contextualInput, ctx.startedAt, ctx.input);
             if (recovered) return true;
@@ -1156,6 +1182,9 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     }
 
     const conversationContext = await this.getConversationContext(task);
+    const requestLocation = normalizeRequestLocation(task.metadata, task.metadata?.source === 'wear_fast_path' ? 'wear_os' : 'browser');
+    const requestLocationStatus = getRequestLocationStatus(task.metadata, task.metadata?.source === 'wear_fast_path' ? 'wear_os' : 'browser');
+    const requestLocationBlock = this.formatRequestLocationBlock(requestLocation, requestLocationStatus);
 
     // Fetch soul, schedule, patterns, and memory recall in parallel — none blocks response
     const [soulContext, localScheduleBlock, gcalBlock, patternBlock, proactiveTriggers, recallResult, knownPlaces] = await Promise.all([
@@ -1182,7 +1211,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     const routingInput = this.withConversationContextForRouting(input, conversationContext);
     const contextualInput = this.buildContextualInput(
       input, conversationContext, soulContext, calendarBlock, patternBlock,
-      proactiveTriggers.map(t => t.message), recallResult.context, knownPlaces,
+      proactiveTriggers.map(t => t.message), recallResult.context, knownPlaces, requestLocationBlock,
     );
 
     const ctx: RouteContext = {
@@ -1198,6 +1227,9 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       patternBlock,
       proactiveTriggers,
       recallResult,
+      requestLocation,
+      requestLocationStatus,
+      requestLocationBlock,
       routingInput,
       contextualInput,
       startedAt,
@@ -1495,6 +1527,40 @@ Responde directamente al usuario en español, con un tono amable y natural.
       taskId,
     });
     await this.maybePublishBrowserScreenshot(orgId, taskId, result.session.screenshot, 'Uber Web');
+    if (UBER_ORDER_SIGNALS.test(input)) {
+      const rideType = result.candidates?.[0]?.label || 'UberX';
+      const approval = await this.approvals.requestForPreparedAction({
+        orgId,
+        userId: (await this.tasks.getTask(taskId, orgId)).created_by,
+        taskId,
+        actionType: 'uber.ride.order',
+        source: 'browser',
+        payload: {
+          origin: route.origin,
+          destination: route.destination,
+          ride_type: rideType,
+        },
+        summary: `Pedir Uber ${rideType}: ${route.origin} -> ${route.destination}`,
+        notify: false,
+      });
+      const text = [
+        result.text,
+        '',
+        `Voy a pedir **${rideType}** de **${route.origin}** a **${route.destination}**.`,
+        'Esto puede generar un cargo. Responde **sí** para aprobar o **no** para cancelar.',
+      ].join('\n');
+      await this.events.publish({
+        type: 'task.result',
+        orgId,
+        taskId,
+        payload: { text, model: 'uber-web', latency_ms: Date.now() - startedAt },
+      });
+      await this.tasks.transition(taskId, orgId, 'waiting_for_approval', {
+        result: { text, model: 'uber-web', approval_id: approval.id },
+      });
+      await this.log(orgId, taskId, `Uber Web ride prepared for approval (${rideType})`, 'approval');
+      return;
+    }
     await this.deliver(orgId, taskId, result.text, 'uber-web', Date.now() - startedAt);
     await this.log(orgId, taskId, `Uber Web quote finished: ${result.reason}`, 'tools');
     if (result.ok) {
@@ -1777,7 +1843,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
           // Let the outer logic decide if we should propagate or return null
           origin = '';
         }
-        const destination = this.cleanUberPlace(rawDest);
+        const destination = await this.normalizeUberDestinationPlace(rawDest, orgId, taskId);
         if (origin && destination) return { origin, destination };
         // Have destination but no origin from profile → ask form only for origin
         if (destination && !origin) {
@@ -1864,14 +1930,16 @@ Responde directamente al usuario en español, con un tono amable y natural.
       if (taskId) {
         try {
           const task = await this.tasks.getTask(taskId, orgId);
-          const deviceLocation = task.metadata?.device_location as { latitude: number; longitude: number } | null;
-          if (deviceLocation && typeof deviceLocation.latitude === 'number' && typeof deviceLocation.longitude === 'number') {
+          const deviceLocation = normalizeRequestLocation(task.metadata);
+          if (deviceLocation) {
             const matchedPlace = await this.matchCoordinatesToPlace(orgId, deviceLocation.latitude, deviceLocation.longitude);
             if (matchedPlace?.address) {
               return matchedPlace.address;
             }
+            if (deviceLocation.label) return deviceLocation.label;
             const address = await this.reverseGeocode(deviceLocation.latitude, deviceLocation.longitude);
             if (address) return address;
+            return formatCoordinatePair(deviceLocation);
           }
         } catch (e) {
           this.logger.warn(`Could not resolve device location from metadata: ${e.message}`);
@@ -1938,6 +2006,13 @@ Responde directamente al usuario en español, con un tono amable y natural.
     return cleaned;
   }
 
+  private async normalizeUberDestinationPlace(value: string, orgId: string, taskId?: string): Promise<string> {
+    const cleaned = this.cleanUberPlace(value);
+    if (!cleaned) return cleaned;
+    const resolved = await this.resolvePlaceContext(cleaned, orgId, taskId);
+    return resolved ?? cleaned;
+  }
+
   private async defaultUberOrigin(orgId: string, taskId?: string): Promise<string> {
     const resolved = await this.resolvePlaceContext('', orgId, taskId);
     if (resolved) return resolved;
@@ -1969,6 +2044,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
     let cleaned = value
       .replace(/\b(en|por)\s+uber\b/ig, '')
       .replace(/\b(cu[aá]nto|cuanto|costo|costar|cuesta|sale|precio|tarifa|cotiza|cotizar|estimaci[oó]n|uber|taxi|viajes?|vieajes?|traslados?|transportes?)\b/ig, '')
+      .replace(/\b(ahora|ya|por\s+favor|porfa)\b/ig, '')
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -2258,6 +2334,80 @@ Responde directamente al usuario en español, con un tono amable y natural.
     return `[Agenda local]\n${local}\n[Google Calendar]\n${gcal}`;
   }
 
+  private isCurrentLocationQuestion(input: string): boolean {
+    return CURRENT_LOCATION_QUESTION_SIGNALS.test(input);
+  }
+
+  private formatRequestLocationBlock(
+    location: RequestLocationContext | null,
+    status: RequestLocationStatus | null,
+  ): string | null {
+    if (location) {
+      const details = [
+        `fuente=${this.locationSourceLabel(location.source)}`,
+        `coords=${formatCoordinatePair(location)}`,
+        location.accuracy_m !== undefined ? `precision=${Math.round(location.accuracy_m)}m` : null,
+        location.captured_at ? `capturada=${location.captured_at}` : null,
+        location.label ? `label=${location.label}` : null,
+      ].filter(Boolean).join('; ');
+      return [
+        '## Ubicacion fresca de esta peticion',
+        details,
+        'Usa esta ubicacion como origen actual cuando el usuario diga "aqui", "mi ubicacion actual", "donde estoy" o pida un traslado desde el dispositivo. No la confundas con la ubicacion guardada del perfil.',
+      ].join('\n');
+    }
+    if (!status) return null;
+    return [
+      '## Ubicacion de esta peticion',
+      `No se recibieron coordenadas frescas. fuente=${this.locationSourceLabel(status.source)}; estado=${status.status}${status.message ? `; detalle=${status.message}` : ''}.`,
+      'Si la tarea depende de la ubicacion actual, pide al usuario habilitar/compartir ubicacion desde el dispositivo o completar el formulario.',
+    ].join('\n');
+  }
+
+  private locationSourceLabel(source: RequestLocationContext['source']): string {
+    if (source === 'wear_os') return 'Wear OS';
+    if (source === 'browser') return 'navegador';
+    if (source === 'telegram') return 'Telegram';
+    if (source === 'device') return 'dispositivo';
+    return 'desconocida';
+  }
+
+  private async answerCurrentRequestLocation(ctx: RouteContext): Promise<void> {
+    const started = Date.now();
+    if (!ctx.requestLocation) {
+      const status = ctx.requestLocationStatus;
+      const detail = status
+        ? `El dispositivo respondió "${status.status}"${status.message ? ` (${status.message})` : ''}.`
+        : 'La petición no trajo coordenadas frescas.';
+      await this.log(ctx.orgId, ctx.taskId, `request location unavailable: ${detail}`, 'location');
+      await this.deliver(
+        ctx.orgId,
+        ctx.taskId,
+        [
+          'No recibí una ubicación en tiempo real en esta petición.',
+          detail,
+          'Activa la ubicación en el navegador o envíala desde Wear OS y vuelvo a detectarla sin inventar.',
+        ].join('\n'),
+        'request-location',
+        Date.now() - started,
+      );
+      return;
+    }
+
+    const place = await this.matchCoordinatesToPlace(ctx.orgId, ctx.requestLocation.latitude, ctx.requestLocation.longitude);
+    const coords = formatCoordinatePair(ctx.requestLocation);
+    const lines = [
+      place
+        ? `Estás cerca de **${place.label}**${place.address ? `: ${place.address}` : ''}.`
+        : `Tu dispositivo reportó estas coordenadas: **${coords}**.`,
+      `Fuente: ${this.locationSourceLabel(ctx.requestLocation.source)}${ctx.requestLocation.accuracy_m !== undefined ? ` · precisión ~${Math.round(ctx.requestLocation.accuracy_m)} m` : ''}.`,
+      `Mapa: https://www.google.com/maps?q=${ctx.requestLocation.latitude},${ctx.requestLocation.longitude}`,
+    ];
+    if (ctx.requestLocation.captured_at) lines.splice(2, 0, `Capturada: ${ctx.requestLocation.captured_at}.`);
+    await this.log(ctx.orgId, ctx.taskId, `answered with request location ${coords}`, 'location');
+    await this.deliver(ctx.orgId, ctx.taskId, lines.join('\n'), 'request-location', Date.now() - started);
+  }
+
   /**
    * Contexto compacto para tier chat (la ruta de mayor volumen): identidad
    * esencial + estilo + memorias recordadas + sugerencias proactivas + últimos
@@ -2269,13 +2419,15 @@ Responde directamente al usuario en español, con un tono amable y natural.
     soulContext: AgentSoulContext,
     proactiveTriggerMessages: string[],
     memoryRecallContext: string | null,
+    requestLocationBlock: string | null = null,
   ): string {
-    return this.profileContext.buildChatContextualInput(input, {
+    const prompt = this.profileContext.buildChatContextualInput(input, {
       conversationContext,
       soulContext,
       proactiveTriggerMessages,
       memoryRecallContext,
     });
+    return requestLocationBlock ? `${prompt}\n\n${requestLocationBlock}` : prompt;
   }
 
   /**
@@ -2301,8 +2453,9 @@ Responde directamente al usuario en español, con un tono amable y natural.
     proactiveTriggerMessages: string[],
     memoryRecallContext: string | null,
     knownPlaces: KnownPlace[] = [],
+    requestLocationBlock: string | null = null,
   ): string {
-    return this.profileContext.buildContextualInput(input, {
+    const prompt = this.profileContext.buildContextualInput(input, {
       conversationContext,
       soulContext,
       calendarBlock,
@@ -2311,6 +2464,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
       memoryRecallContext,
       knownPlaces,
     });
+    return requestLocationBlock ? `${prompt}\n\n${requestLocationBlock}` : prompt;
   }
 
   /** Legacy alias used by answerPersonalProfileQuestion — kept for compat. */
@@ -2541,6 +2695,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
     startedAt: number,
     userId?: string,
     soulContext?: AgentSoulContext,
+    requestLocationBlock: string | null = null,
     maxSteps?: number,
   ): Promise<boolean> {
     try {
@@ -2550,6 +2705,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
       const contextParts: string[] = [];
       const identity = soulContext ? this.slimIdentityLine(soulContext) : null;
       if (identity) contextParts.push(`Usuario: ${identity}`);
+      if (requestLocationBlock) contextParts.push(requestLocationBlock);
       contextParts.push(this.formatHorizonForLoop(decideTaskHorizon(input)));
       if (conversationContext.length > 0) {
         contextParts.push(

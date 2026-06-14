@@ -305,7 +305,12 @@ describe('AgentRunnerService', () => {
         },
         {
           provide: ScheduleService,
-          useValue: { formatUpcomingForSoul: jest.fn().mockResolvedValue(null) },
+          useValue: {
+            formatUpcomingForSoul: jest.fn().mockResolvedValue(null),
+            getPlaces: jest.fn().mockResolvedValue([]),
+            getPlace: jest.fn().mockResolvedValue(null),
+            getLatestLocation: jest.fn().mockResolvedValue(null),
+          },
         },
         {
           provide: BehaviorPatternService,
@@ -655,7 +660,7 @@ describe('AgentRunnerService', () => {
       orgId: ORG,
       taskId: TASK,
       payload: expect.objectContaining({
-        message: expect.stringContaining('Me faltan estos datos en tu Soul'),
+        message: expect.stringContaining('Me faltan estos datos en tu perfil'),
         form: expect.objectContaining({
           form_key: 'personal_profile.identity',
           fields: expect.arrayContaining([
@@ -667,6 +672,101 @@ describe('AgentRunnerService', () => {
     }));
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_input');
     expect(publishedTypes()).not.toContain('task.result');
+  });
+
+  it('answers current-location questions from fresh request metadata instead of guessing', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'donde me encuentro en este momento? detecta mi ub en tiempo real',
+      metadata: {
+        source: 'playground',
+        request_context: {
+          source: 'browser',
+          location: {
+            source: 'browser',
+            latitude: 19.4326,
+            longitude: -99.1332,
+            accuracy_m: 25,
+            captured_at: '2026-06-13T22:00:00.000Z',
+          },
+        },
+      },
+    }));
+
+    await service.run(ORG, TASK);
+
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(intentRouter.classify).not.toHaveBeenCalled();
+    const resultEvent = events.publish.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'task.result');
+    expect(resultEvent).toEqual(expect.objectContaining({
+      payload: expect.objectContaining({
+        model: 'request-location',
+        text: expect.stringContaining('19.432600, -99.133200'),
+      }),
+    }));
+    expect((resultEvent!.payload as { text: string }).text).toContain('https://www.google.com/maps?q=19.4326,-99.1332');
+  });
+
+  it('prepares an Uber ride using browser location as origin and work place as destination', async () => {
+    const schedule = module.get(ScheduleService) as jest.Mocked<ScheduleService>;
+    const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+    const uber = module.get(UberWebService) as jest.Mocked<UberWebService>;
+    schedule.getPlace.mockImplementation(async (_orgId, label) => {
+      if (label !== 'work') return null;
+      return {
+          id: 'place-work',
+          org_id: ORG,
+          label: 'work',
+          address: 'Oficina EVA, Reforma 123',
+          radius_m: 120,
+          visit_count: 3,
+          metadata: {},
+          created_at: new Date().toISOString(),
+        };
+    });
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'pideme un uber al trabajo ya',
+      metadata: {
+        source: 'playground',
+        request_context: {
+          source: 'browser',
+          location: {
+            source: 'browser',
+            latitude: 19.4326,
+            longitude: -99.1332,
+            accuracy_m: 18,
+            label: 'Roma Norte, CDMX',
+          },
+        },
+      },
+    }));
+
+    await service.run(ORG, TASK);
+
+    expect(uber.estimateRide).toHaveBeenCalledWith(ORG, expect.objectContaining({
+      origin: 'Roma Norte, CDMX',
+      destination: 'Oficina EVA, Reforma 123',
+      taskId: TASK,
+    }));
+    expect(approvals.requestForPreparedAction).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG,
+      taskId: TASK,
+      actionType: 'uber.ride.order',
+      source: 'browser',
+      payload: expect.objectContaining({
+        origin: 'Roma Norte, CDMX',
+        destination: 'Oficina EVA, Reforma 123',
+        ride_type: 'UberX',
+      }),
+    }));
+    expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval', expect.objectContaining({
+      result: expect.objectContaining({ approval_id: 'approval-1' }),
+    }));
+    const resultEvent = events.publish.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'task.result');
+    expect((resultEvent!.payload as { text: string }).text).toContain('Responde **sí**');
   });
 
   it('runs weather through public APIs without spending planner tokens', async () => {

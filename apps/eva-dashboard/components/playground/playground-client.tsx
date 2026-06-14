@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Inbox, BrainCircuit, Cog, ShieldCheck, Flag, Send, Loader2,
   ChevronRight, ChevronDown, AlertTriangle, Clock, ClipboardList, ThumbsDown, ThumbsUp,
+  MapPin,
 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { coreFetch } from '@/lib/core-api';
@@ -49,6 +50,21 @@ interface ConversationContextTurn {
   text: string;
 }
 
+interface BrowserLocationContext {
+  source: 'browser';
+  latitude: number;
+  longitude: number;
+  accuracy_m?: number;
+  captured_at?: string;
+}
+
+interface BrowserLocationStatus {
+  source: 'browser';
+  status: 'granted' | 'denied' | 'unavailable' | 'timeout' | 'error';
+  message?: string;
+  captured_at: string;
+}
+
 export function PlaygroundClient() {
   const { events, taskPatches } = useWs();
   const [order, setOrder] = useState('');
@@ -57,6 +73,7 @@ export function PlaygroundClient() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
+  const [shareLocation, setShareLocation] = useState(false);
 
   const statusOf = (entry: SessionEntry): TaskStatus =>
     taskPatches[entry.task.id] ?? entry.task.status;
@@ -106,23 +123,17 @@ export function PlaygroundClient() {
     setBusy(true);
     setError(null);
     try {
-      let deviceLocation: { latitude: number; longitude: number; accuracy?: number; timestamp?: number } | null = null;
-      if (typeof window !== 'undefined' && navigator.geolocation) {
-        deviceLocation = await new Promise((resolve) => {
-          navigator.geolocation.getCurrentPosition(
-            (pos) => {
-              resolve({
-                latitude: pos.coords.latitude,
-                longitude: pos.coords.longitude,
-                accuracy: pos.coords.accuracy,
-                timestamp: pos.timestamp,
-              });
-            },
-            () => resolve(null),
-            { timeout: 2000, enableHighAccuracy: true }
-          );
-        });
-      }
+      const shouldRequestLocation = shareLocation || shouldAttachLocation(text);
+      const locationResult = shouldRequestLocation ? await captureBrowserLocation() : null;
+      const deviceLocation = locationResult?.location
+        ? {
+          latitude: locationResult.location.latitude,
+          longitude: locationResult.location.longitude,
+          accuracy: locationResult.location.accuracy_m,
+          timestamp: locationResult.location.captured_at,
+          source: 'browser',
+        }
+        : undefined;
 
       const created = await coreFetch<Task>('/tasks', {
         method: 'POST',
@@ -132,7 +143,12 @@ export function PlaygroundClient() {
           metadata: {
             source: 'playground',
             conversation_context: conversationContext,
-            device_location: deviceLocation || undefined,
+            request_context: {
+              source: 'browser',
+              ...(locationResult?.location ? { location: locationResult.location } : {}),
+              ...(locationResult?.status ? { location_status: locationResult.status } : {}),
+            },
+            device_location: deviceLocation,
           },
         }),
       });
@@ -173,6 +189,21 @@ export function PlaygroundClient() {
           aria-label="Order"
           className="flex-1 bg-zinc-900 border border-zinc-700 rounded-sm px-3 py-2 text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-cyan-500/60"
         />
+        <button
+          type="button"
+          aria-label="Compartir ubicación"
+          title="Compartir ubicación"
+          aria-pressed={shareLocation}
+          onClick={() => setShareLocation((value) => !value)}
+          className={cn(
+            'h-9 w-9 inline-flex items-center justify-center rounded-sm border transition-colors',
+            shareLocation
+              ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-200'
+              : 'border-zinc-700 bg-zinc-900 text-zinc-500 hover:text-zinc-200',
+          )}
+        >
+          <MapPin className="h-3.5 w-3.5" />
+        </button>
         <Button onClick={submit} disabled={busy || !order.trim()}>
           {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
           Run
@@ -360,6 +391,64 @@ function buildConversationContext(session: SessionEntry[], chronological: EvaEve
     .map((turn) => ({ ...turn, text: turn.text.trim().slice(0, 1200) }))
     .filter((turn) => turn.text.length > 0)
     .slice(-8);
+}
+
+function shouldAttachLocation(text: string): boolean {
+  return /\b(d[oó]nde\s+(?:me\s+)?(?:estoy|encuentro)|ubicaci[oó]n\s+(?:actual|en\s+tiempo\s+real)|mi\s+ubicaci[oó]n|detecta(?:r)?\s+(?:mi\s+)?ub|uber|taxi|traslado|transporte|clima|weather|aqu[ií])\b/i.test(text);
+}
+
+async function captureBrowserLocation(): Promise<{
+  location?: BrowserLocationContext;
+  status: BrowserLocationStatus;
+}> {
+  const capturedAt = new Date().toISOString();
+  if (typeof window === 'undefined' || !navigator.geolocation) {
+    return {
+      status: {
+        source: 'browser',
+        status: 'unavailable',
+        message: 'geolocation_not_supported',
+        captured_at: capturedAt,
+      },
+    };
+  }
+
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const captured_at = new Date(position.timestamp || Date.now()).toISOString();
+        resolve({
+          location: {
+            source: 'browser',
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            accuracy_m: position.coords.accuracy,
+            captured_at,
+          },
+          status: {
+            source: 'browser',
+            status: 'granted',
+            captured_at,
+          },
+        });
+      },
+      (err) => {
+        const status: BrowserLocationStatus['status'] =
+          err.code === 1 ? 'denied'
+          : err.code === 3 ? 'timeout'
+          : 'error';
+        resolve({
+          status: {
+            source: 'browser',
+            status,
+            message: err.message || `geolocation_error_${err.code}`,
+            captured_at: new Date().toISOString(),
+          },
+        });
+      },
+      { timeout: 6000, enableHighAccuracy: true, maximumAge: 15_000 },
+    );
+  });
 }
 
 /** One order + EVA's bubbles (acks, media, result) for a session task. */
