@@ -131,6 +131,7 @@ describe('BrowserService', () => {
             storageState: jest.fn().mockResolvedValue({ cookies: [{ name: 'sid', value: 'secret' }] }),
             openWithStorageState: jest.fn().mockResolvedValue({ url: 'https://accounts.google.com/', title: 'Google' }),
             typeCharacters: jest.fn(),
+            pressKey: jest.fn(),
             hasSession: jest.fn().mockReturnValue(false),
           } satisfies BrowserRuntime,
         },
@@ -193,6 +194,7 @@ describe('BrowserService', () => {
   it('emits browser debug logs without exposing typed text', async () => {
     await service.clickNow(SESSION, ORG, '#buy', { timeout: 1500 });
     await service.typeNow(SESSION, ORG, 'input[name="password"]', 'super-secret', { timeout: 1500 });
+    await service.pressKey(SESSION, ORG, 'Enter');
 
     expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({
       type: 'task.log',
@@ -215,6 +217,17 @@ describe('BrowserService', () => {
         action: 'browser.type',
         selector: 'input[name="password"]',
         chars: 12,
+      }),
+    }));
+    expect(events.publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'task.log',
+      orgId: ORG,
+      taskId: TASK,
+      payload: expect.objectContaining({
+        scope: 'browser',
+        module: 'BrowserService',
+        action: 'browser.keyboard.press',
+        key: 'Enter',
       }),
     }));
     expect(JSON.stringify(events.publish.mock.calls)).not.toContain('super-secret');

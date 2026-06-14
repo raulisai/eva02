@@ -1705,9 +1705,17 @@ describe('AgentRunnerService', () => {
       description: 'cuanto cuesta un Uber de Roma Norte a Aeropuerto?',
     }));
     const uber = module.get(UberWebService) as jest.Mocked<UberWebService>;
+    agentLoop.run.mockResolvedValueOnce({
+      ok: true,
+      text: 'No pude encontrar una tarifa exacta en internet.',
+      steps: [{ tool: 'web_search', args: { query: 'Uber Roma Norte Aeropuerto' }, thought: 'buscar', observation: 'sin tarifa' }],
+      tokensUsed: 100,
+      toolsUsed: ['web_search'],
+    });
 
     await service.run(ORG, TASK);
 
+    expect(agentLoop.run).not.toHaveBeenCalled();
     expect(uber.estimateRide).toHaveBeenCalledWith(ORG, {
       origin: 'Roma Norte',
       destination: 'Aeropuerto',

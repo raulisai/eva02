@@ -848,6 +848,9 @@ export class AgentLoopService {
       ...(has('delegate')
         ? ['- Objetivos complejos (varias partes, código + datos externos): delega primero a "planeador" para descomponer, ejecuta las subpartes con "investigador"/"programador", y si generaste código sensible o acciones con riesgo, valida con "seguridad" antes del final_answer. Cada sub-agente recibe tus hallazgos previos.']
         : []),
+      ...(has('uber_quote')
+        ? ['- Tarifas de Uber: usa uber_quote como fuente de verdad. NO uses web_search para estimar viajes de Uber; si uber_quote no muestra tarifa, reporta exactamente su estado/screenshot y pide el dato o login faltante.']
+        : []),
       '- Para código: aunque se sugiere dividir en pasos lógicos (inspeccionar→preparar→ejecutar→verificar), sé eficiente para no agotar tus pasos límite. Puedes escribir scripts completos que realicen múltiples acciones (como buscar, crear directorios y descargar) en una sola ejecución de code_execute. Los archivos en /work persisten entre pasos de esta tarea.',
       ...(has('code_execute') && has('telegram_send_file')
         ? ['- Para descargar medios/videos (YouTube, etc.): el sandbox tiene listo yt-dlp y ffmpeg. Escribe un script en code_execute (con "network": true) que use yt-dlp directamente. IMPORTANTE: yt-dlp puede buscar videos por ti sin que busques el enlace antes (ej: usar `yt-dlp --max-downloads 1 --format mp4 "ytsearch1:one piece quinto emperador"` busca y descarga el primer video de esa búsqueda). No malgastes pasos en web_search intentando encontrar enlaces exactos; ¡usa la búsqueda integrada de yt-dlp! Una vez descargado el archivo en /work, usa telegram_send_file para enviarlo de inmediato.']
@@ -2071,7 +2074,7 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
       },
       {
         name: 'uber_quote',
-        usage: 'uber_quote{"origin","destination"}: obtiene una cotización/tarifa estimada de Uber para una ruta.',
+        usage: 'uber_quote{"origin","destination"}: abre Uber Web con perfil local y obtiene una cotización visible para una ruta. No lo sustituyas con web_search; si no hay tarifa visible, devuelve el estado/screenshot de Uber.',
         inputSchema: {
           type: 'object',
           properties: {

@@ -555,8 +555,6 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.say(ctx.orgId, ctx.taskId, 'Abro Uber Web solo para cotizar y te mando screenshot antes de cualquier acción.');
           await this.log(ctx.orgId, ctx.taskId, 'uber quote request — opening Uber Web profile (quote-only)', 'tools');
           this.updateActiveToolSession(ctx.orgId, ctx.task.created_by, 'uber');
-          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext, ctx.requestLocationBlock);
-          if (loopHandled) return true;
           await this.handleUberQuoteRequest(ctx.orgId, ctx.taskId, ctx.input, ctx.startedAt, ctx.conversationContext);
           return true;
         }

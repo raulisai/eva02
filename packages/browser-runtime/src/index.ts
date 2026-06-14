@@ -136,6 +136,11 @@ export class PlaywrightBrowserRuntime {
     await session.page.keyboard.type(text, { delay });
   }
 
+  async pressKey(sessionId: string, key: string): Promise<void> {
+    const session = this.requireSession(sessionId);
+    await session.page.keyboard.press(key);
+  }
+
   async close(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -316,6 +321,7 @@ export type BrowserRuntime = Pick<
   | 'click'
   | 'type'
   | 'typeCharacters'
+  | 'pressKey'
   | 'screenshot'
   | 'extractText'
   | 'extractTable'

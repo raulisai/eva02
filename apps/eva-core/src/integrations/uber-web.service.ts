@@ -81,6 +81,8 @@ interface UberPageSignals {
   title?: string;
 }
 
+type UberRouteEntryResult = 'dom_route_form' | 'smart_navigator' | null;
+
 export interface UberGoogleLoginResult {
   ok: boolean;
   reason: 'logged_in' | 'login_required' | 'google_credential_missing' | 'google_mfa_required' | 'google_blocked' | 'google_unknown';
@@ -181,11 +183,23 @@ export class UberWebService {
     }, orgId);
 
     await this.browser.wait(opened.id, orgId, this.settleMs());
-    const signals = await this.inspectPage(opened.id, orgId);
+    let signals = await this.inspectAfterSettled(opened.id, orgId);
+    const routeEntry = await this.maybeEnterRouteOnVisibleForm(
+      opened.id,
+      orgId,
+      signals,
+      originNormalized,
+      destinationNormalized,
+      input.taskId,
+    );
+    if (routeEntry) {
+      signals = await this.inspectAfterSettled(opened.id, orgId);
+    }
     const screenshot = await this.browser.screenshot(opened.id, orgId);
     await this.persistSessionCheck(opened.id, orgId, signals, screenshot, {
       origin: originNormalized,
       destination: destinationNormalized,
+      ...(routeEntry ? { route_entry: routeEntry } : {}),
     });
     const session: UberSessionStatus = {
       session_id: opened.id,
@@ -668,6 +682,309 @@ export class UberWebService {
     return url.toString();
   }
 
+  private async inspectAfterSettled(sessionId: string, orgId: string): Promise<UberPageSignals> {
+    let signals = await this.inspectPage(sessionId, orgId);
+    for (let attempt = 0; attempt < 2 && signals.state === 'loading'; attempt += 1) {
+      await this.browser.wait(sessionId, orgId, 2000);
+      signals = await this.inspectPage(sessionId, orgId);
+    }
+    return signals;
+  }
+
+  private async maybeEnterRouteOnVisibleForm(
+    sessionId: string,
+    orgId: string,
+    signals: UberPageSignals,
+    origin: string,
+    destination: string,
+    taskId?: string,
+  ): Promise<UberRouteEntryResult> {
+    const canEditRoute = (signals.state === 'logged_in' || signals.state === 'unknown') && signals.quoteCandidates.length === 0;
+    if (!canEditRoute) return null;
+
+    const domEntered = await this.enterRouteViaDomControls(sessionId, orgId, origin, destination);
+    if (domEntered) return 'dom_route_form';
+
+    if (this.smartNav?.available) {
+      this.logger.log('Uber route form not found via selectors — handing off to SmartNavigator');
+      const nav = await this.smartNav.navigate(
+        orgId,
+        sessionId,
+        'Configura la ruta para cotizar Uber Web. Rellena origen y destino, avanza hasta que aparezcan precios o tipos de viaje. '
+        + 'No selecciones "Request", "Pedir", "Confirmar viaje", "Pay" ni confirmes ningún cargo; solo deja visible la cotización.',
+        {
+          maxSteps: 6,
+          settleMs: 1500,
+          taskId,
+          context: { origin, destination },
+        },
+      );
+      if (nav.ok) return 'smart_navigator';
+    }
+
+    return null;
+  }
+
+  private async enterRouteViaDomControls(
+    sessionId: string,
+    orgId: string,
+    origin: string,
+    destination: string,
+  ): Promise<boolean> {
+    const openedRouteEntry = await this.clickFirst(sessionId, orgId, [
+      'button:has-text("Where to")',
+      'button:has-text("¿A dónde")',
+      'button:has-text("A dónde")',
+      'button:has-text("Destino")',
+      'div[role="button"]:has-text("Where to")',
+      'div[role="button"]:has-text("¿A dónde")',
+      'div[role="button"]:has-text("A dónde")',
+      'div[role="button"]:has-text("Destino")',
+      'text=Where to?',
+      'text=¿A dónde vas?',
+    ], 1200);
+    if (openedRouteEntry) {
+      await this.browser.wait(sessionId, orgId, 1000);
+    }
+
+    const originFilled = await this.fillPlaceField(sessionId, orgId, this.originFieldSelectors(), origin);
+    const destinationFilled = await this.fillPlaceField(sessionId, orgId, this.destinationFieldSelectors(), destination);
+    const jsFilled = originFilled && destinationFilled
+      ? false
+      : await this.fillRouteFieldsByDom(sessionId, orgId, {
+        origin: originFilled ? null : origin,
+        destination: destinationFilled ? null : destination,
+      });
+
+    if (!originFilled && !destinationFilled && !jsFilled) {
+      return false;
+    }
+
+    await this.browser.wait(sessionId, orgId, 1000);
+    await this.clickFirst(sessionId, orgId, [
+      'a[aria-label="See prices"]',
+      'a[data-baseweb="button"][href*="/looking"]',
+      'a:has-text("See prices")',
+      'xpath=//*[@id="main"]/div[3]/div/section/div/div/div/div/div/div/div[2]/a',
+      'button:has-text("See prices")',
+      'button:has-text("Ver precios")',
+      'button:has-text("Buscar")',
+      'button:has-text("Search")',
+      'button:has-text("Done")',
+      'button:has-text("Listo")',
+      'button:has-text("Next")',
+      'button:has-text("Siguiente")',
+      'button:has-text("Confirm pickup")',
+      'button:has-text("Confirmar recogida")',
+      'button:has-text("Set pickup")',
+      'button:has-text("Establecer recogida")',
+    ], 1200);
+
+    return true;
+  }
+
+  private originFieldSelectors(): string[] {
+    return [
+      '#rv-pudo-select-pickup',
+      'input[data-testid="dotcom-ui.pickup-destination.input.pickup"]',
+      'input[aria-label="Pickup location needs to be filled in"]',
+      'xpath=//*[@id="rv-pudo-select-pickup"]',
+      'input[aria-label*="pickup" i] >> nth=0',
+      'input[placeholder*="pickup" i] >> nth=0',
+      'input[name*="pickup" i] >> nth=0',
+      'input[id*="pickup" i] >> nth=0',
+      'input[aria-label*="recogida" i] >> nth=0',
+      'input[placeholder*="recogida" i] >> nth=0',
+      'input[aria-label*="origen" i] >> nth=0',
+      'input[placeholder*="origen" i] >> nth=0',
+      'input[aria-label*="from" i] >> nth=0',
+      'input[placeholder*="from" i] >> nth=0',
+      'textarea[aria-label*="pickup" i] >> nth=0',
+      'textarea[placeholder*="pickup" i] >> nth=0',
+      '[contenteditable="true"][aria-label*="pickup" i] >> nth=0',
+      '[contenteditable="true"][aria-label*="origen" i] >> nth=0',
+    ];
+  }
+
+  private destinationFieldSelectors(): string[] {
+    return [
+      '#rv-pudo-select-drop0',
+      'input[data-testid="dotcom-ui.pickup-destination.input.destination.drop0"]',
+      'input[aria-label="Dropoff location needs to be filled in"]',
+      'xpath=//*[@id="rv-pudo-select-drop0"]',
+      'input[aria-label*="destination" i] >> nth=0',
+      'input[placeholder*="destination" i] >> nth=0',
+      'input[name*="destination" i] >> nth=0',
+      'input[id*="destination" i] >> nth=0',
+      'input[aria-label*="dropoff" i] >> nth=0',
+      'input[placeholder*="dropoff" i] >> nth=0',
+      'input[name*="dropoff" i] >> nth=0',
+      'input[id*="dropoff" i] >> nth=0',
+      'input[aria-label*="destino" i] >> nth=0',
+      'input[placeholder*="destino" i] >> nth=0',
+      'input[aria-label*="where to" i] >> nth=0',
+      'input[placeholder*="where to" i] >> nth=0',
+      'input[aria-label*="a dónde" i] >> nth=0',
+      'input[placeholder*="a dónde" i] >> nth=0',
+      'input[aria-label*="adónde" i] >> nth=0',
+      'input[placeholder*="adónde" i] >> nth=0',
+      'textarea[aria-label*="destination" i] >> nth=0',
+      'textarea[placeholder*="destination" i] >> nth=0',
+      '[contenteditable="true"][aria-label*="destination" i] >> nth=0',
+      '[contenteditable="true"][aria-label*="destino" i] >> nth=0',
+      'input[role="combobox"] >> nth=0',
+      'input[type="text"] >> nth=0',
+    ];
+  }
+
+  private async fillPlaceField(sessionId: string, orgId: string, selectors: string[], value: string): Promise<boolean> {
+    for (const selector of selectors) {
+      try {
+        await this.browser.typeNow(sessionId, orgId, selector, value, { timeout: 1200 });
+        await this.browser.wait(sessionId, orgId, 700);
+        const clickedSuggestion = await this.clickFirstMatchingPlaceSuggestion(sessionId, orgId, value);
+        if (!clickedSuggestion) {
+          await this.browser.pressKey(sessionId, orgId, 'Enter').catch(() => undefined);
+        }
+        await this.browser.wait(sessionId, orgId, 700);
+        return true;
+      } catch {
+        // Try the next visible affordance; Uber changes labels often.
+      }
+    }
+    return false;
+  }
+
+  private async clickFirst(
+    sessionId: string,
+    orgId: string,
+    selectors: string[],
+    timeout = 1000,
+  ): Promise<boolean> {
+    for (const selector of selectors) {
+      try {
+        await this.browser.clickNow(sessionId, orgId, selector, { timeout });
+        return true;
+      } catch {
+        // Try next selector.
+      }
+    }
+    return false;
+  }
+
+  private async clickFirstMatchingPlaceSuggestion(sessionId: string, orgId: string, value: string): Promise<boolean> {
+    return this.browser.evaluate<boolean, { value: string }>(
+      sessionId,
+      orgId,
+      ({ value }) => {
+        const normalize = (v: string) => v.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+        const tokens = normalize(value)
+          .toLowerCase()
+          .split(/[^\p{L}\p{N}]+/u)
+          .filter((token) => token.length >= 4)
+          .slice(0, 5);
+        if (tokens.length === 0) return false;
+
+        const isVisible = (el: Element | null) => {
+          if (!el) return false;
+          const he = el as HTMLElement;
+          const s = window.getComputedStyle(he);
+          const hasSize = he.offsetWidth > 0 || he.offsetHeight > 0 || he.getClientRects().length > 0;
+          return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && hasSize;
+        };
+        const guarded = /\b(request|pedir|solicitar|confirm|confirmar|pay|pagar)\b/i;
+        const candidates = Array.from(document.querySelectorAll('[role="option"], li, button, a, div[role="button"]'));
+        const match = candidates.find((el) => {
+          if (!isVisible(el)) return false;
+          const text = normalize(`${el.textContent ?? ''} ${el.getAttribute('aria-label') ?? ''}`);
+          if (text.length < 4 || text.length > 240 || guarded.test(text)) return false;
+          const lower = text.toLowerCase();
+          return tokens.some((token) => lower.includes(token));
+        });
+        if (!match) return false;
+        (match as HTMLElement).click();
+        return true;
+      },
+      { value },
+    ).catch(() => false);
+  }
+
+  private async fillRouteFieldsByDom(
+    sessionId: string,
+    orgId: string,
+    input: { origin: string | null; destination: string | null },
+  ): Promise<boolean> {
+    return this.browser.evaluate<boolean, { origin: string | null; destination: string | null }>(
+      sessionId,
+      orgId,
+      ({ origin, destination }) => {
+        const isVisible = (el: Element | null) => {
+          if (!el) return false;
+          const he = el as HTMLElement;
+          const s = window.getComputedStyle(he);
+          const hasSize = he.offsetWidth > 0 || he.offsetHeight > 0 || he.getClientRects().length > 0;
+          return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && hasSize;
+        };
+        const labelFor = (el: Element) => [
+          el.getAttribute('aria-label'),
+          el.getAttribute('placeholder'),
+          el.getAttribute('name'),
+          el.getAttribute('id'),
+          el.getAttribute('data-testid'),
+          el.closest('label')?.textContent,
+          el.parentElement?.textContent,
+        ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
+        const setValue = (el: Element, value: string) => {
+          const inputEl = el as HTMLInputElement;
+          inputEl.focus();
+          inputEl.click();
+          if ((el as HTMLElement).isContentEditable) {
+            (el as HTMLElement).textContent = value;
+          } else {
+            const proto = el instanceof HTMLTextAreaElement
+              ? window.HTMLTextAreaElement.prototype
+              : window.HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+            if (setter) setter.call(inputEl, value);
+            else inputEl.value = value;
+          }
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+        };
+
+        const controls = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]'))
+          .filter((el) => {
+            const type = (el.getAttribute('type') ?? '').toLowerCase();
+            return isVisible(el) && !['email', 'password', 'tel', 'number', 'hidden'].includes(type);
+          });
+        let filled = false;
+
+        if (origin) {
+          const originField = controls.find((el) => /\b(pickup|recogida|origen|from|salida)\b/i.test(labelFor(el)));
+          if (originField) {
+            setValue(originField, origin);
+            filled = true;
+          }
+        }
+
+        if (destination) {
+          const destinationField = controls.find((el) => /\b(destination|destino|dropoff|where to|a d[oó]nde|ad[oó]nde|to)\b/i.test(labelFor(el)))
+            ?? (controls.length === 1 ? controls[0] : undefined)
+            ?? controls.find((el) => !/\b(pickup|recogida|origen|from|salida)\b/i.test(labelFor(el)));
+          if (destinationField) {
+            setValue(destinationField, destination);
+            filled = true;
+          }
+        }
+
+        return filled;
+      },
+      input,
+    ).catch(() => false);
+  }
+
   private async inspectPage(sessionId: string, orgId: string): Promise<UberPageSignals> {
     try {
       return await this.browser.evaluate<UberPageSignals>(sessionId, orgId, () => {
@@ -687,7 +1004,7 @@ export class UberWebService {
           && !/\b(uberx|comfort|black|xl|moto|taxi|elige|choose|precio|price)\b/i.test(text);
         const loading = /loading|cargando|espera|please wait/i.test(text);
 
-        const pricePattern = /\b(?:MX\$|M\$|\$|USD|MXN)\s?\d[\d,.]*(?:\s?(?:MXN|USD))?\b/i;
+        const pricePattern = /\b(?:(?:MX\$|M\$|\$)\s?\d[\d,.]*|(?:USD|MXN)\s?\d[\d,.]*|\d[\d,.]*\s?(?:MXN|USD))(?:\s?[-–]\s?(?:(?:MX\$|M\$|\$)?\s?\d[\d,.]*|\d[\d,.]*\s?(?:MXN|USD)))?\b/i;
         const productPattern = /\b(uberx|comfort|black|xl|moto|flash|taxi|priority|planet|green|share|reserve|uber)\b/i;
         const quoteCandidates = uniqueLines
           .map((line, index) => ({ line, index }))
@@ -695,8 +1012,9 @@ export class UberWebService {
           .slice(0, 8)
           .map(({ line, index }) => {
             const windowLines = uniqueLines.slice(Math.max(0, index - 3), index + 4);
+            const priorLines = uniqueLines.slice(Math.max(0, index - 4), index);
             const label =
-              [...windowLines].reverse().find((candidate) => productPattern.test(candidate) && !pricePattern.test(candidate))
+              [...priorLines].reverse().find((candidate) => productPattern.test(candidate) && !pricePattern.test(candidate))
               ?? uniqueLines[index - 1]
               ?? 'Uber';
             return {
@@ -728,6 +1046,10 @@ export class UberWebService {
           return { state: 'login_required', googleLoginAvailable, quoteCandidates: [], textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
         }
 
+        if (quoteCandidates.length > 0) {
+          return { state: 'quote_ready', googleLoginAvailable, quoteCandidates, textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
+        }
+
         if (loading || uniqueLines.length < 3) {
           return { state: 'loading', googleLoginAvailable, quoteCandidates: [], textSample: uniqueLines.slice(0, 30).join('\n'), currentUrl, title };
         }
@@ -736,7 +1058,7 @@ export class UberWebService {
         return {
           state: rideForm ? 'logged_in' : 'unknown',
           googleLoginAvailable,
-          quoteCandidates: [],
+          quoteCandidates,
           textSample: uniqueLines.slice(0, 30).join('\n'),
           currentUrl,
           title,

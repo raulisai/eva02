@@ -321,6 +321,20 @@ export class BrowserService {
     return { sessionId };
   }
 
+  async pressKey(sessionId: string, orgId: string, key: string) {
+    const session = await this.repo.findSessionOrThrow(sessionId, orgId);
+    await this.runtime.pressKey(sessionId, key);
+    await this.logBrowserAction(orgId, {
+      action: 'browser.keyboard.press',
+      message: `pressed keyboard key ${key}`,
+      taskId: session.task_id,
+      sessionId,
+      profileId: session.profile_id,
+      data: { key },
+    });
+    return { sessionId, key };
+  }
+
   async clickNow(sessionId: string, orgId: string, selector: string, options?: { timeout?: number }) {
     const session = await this.repo.findSessionOrThrow(sessionId, orgId);
     await this.runtime.click(sessionId, selector, options);

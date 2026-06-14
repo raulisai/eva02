@@ -62,7 +62,7 @@ Orchestrates backend operations, models routing, memory management, and agent wo
 
 ### 3. Execution & Integration Layer
 - **Playwright Browser Runtime**: Handles web automation (like booking Uber rides or checking website states) using persistent browser profiles.
-- **Uber Browser Flow**: Route preparation can resolve the origin from fresh request location and destination from `known_places` such as `work`; actual ride ordering remains approval-gated through `uber.ride.order`.
+- **Uber Browser Flow**: Quote-only tasks route through `UberWebService` before the generic agent loop, open Uber Web with the local profile, extract visible fare candidates, and fall back to filling pickup/dropoff form controls when deep links land on the home/search UI. Route preparation can resolve the origin from fresh request location and destination from `known_places` such as `work`; actual ride ordering remains approval-gated through `uber.ride.order`.
 - **Docker Code Sandbox**: Spawns isolated containers per task to execute arbitrary python/node code with resource limits and transient workspaces.
 - **MCP Adapters**: Integrates external tools using the Model Context Protocol (MCP).
 - **Development Control Center**: Connects to the local repository, runs CLI commands, builds/tests, and bridges with Claude Code CLI sessions.

@@ -22,7 +22,9 @@ describe('UberWebService', () => {
       wait: jest.fn().mockResolvedValue({}),
       evaluate: jest.fn(),
       clickNow: jest.fn().mockResolvedValue({}),
+      typeNow: jest.fn().mockResolvedValue({}),
       typeCharacters: jest.fn().mockResolvedValue({}),
+      pressKey: jest.fn().mockResolvedValue({}),
       getOrCreateProfile: jest.fn().mockResolvedValue({ id: 'profile-1', encrypted_state: 'enc-state' }),
       findLatestOpenSession: jest.fn().mockResolvedValue({ id: SESSION, metadata: {} }),
       findLatestSession: jest.fn().mockResolvedValue({
@@ -111,6 +113,93 @@ describe('UberWebService', () => {
       { label: 'UberX', price: '$180', raw_lines: ['UberX', '$180'] },
     ]);
     expect(result.text).toContain('No pedí ni confirmé ningún viaje');
+  });
+
+  it('detects visible quote candidates from Uber page text', async () => {
+    const previousDocument = (global as any).document;
+    const previousLocation = (global as any).location;
+    (global as any).document = {
+      title: 'Uber',
+      body: {
+        innerText: [
+          'Elige un viaje',
+          'UberX',
+          'Llega en 4 min',
+          'MX$180 - MX$220',
+          'Comfort',
+          'MX$240',
+        ].join('\n'),
+      },
+    };
+    (global as any).location = { href: 'https://m.uber.com/go/product-selection' };
+    browser.evaluate.mockImplementation(async (_sessionId: string, _orgId: string, fn: any, arg?: unknown) => fn(arg));
+
+    try {
+      const result = await service.estimateRide(ORG, {
+        origin: 'Roma Norte',
+        destination: 'Aeropuerto',
+        taskId: TASK,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.reason).toBe('quote_ready');
+      expect(result.candidates[0]).toEqual(expect.objectContaining({
+        label: 'UberX',
+        price: 'MX$180 - MX$220',
+      }));
+    } finally {
+      (global as any).document = previousDocument;
+      (global as any).location = previousLocation;
+    }
+  });
+
+  it('fills the visible route form when the deep link lands on Uber home without prices', async () => {
+    browser.evaluate
+      .mockResolvedValueOnce({
+        state: 'logged_in',
+        googleLoginAvailable: false,
+        quoteCandidates: [],
+        textSample: 'Where to?',
+        currentUrl: 'https://m.uber.com/go/home',
+        title: 'Uber',
+      })
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce({
+        state: 'quote_ready',
+        googleLoginAvailable: false,
+        quoteCandidates: [{ label: 'UberX', price: '$180', raw_lines: ['UberX', '$180'] }],
+        textSample: 'UberX\n$180',
+        currentUrl: 'https://m.uber.com/go/product-selection',
+        title: 'Uber',
+      });
+
+    const result = await service.estimateRide(ORG, {
+      origin: 'Calle 1 31, Agrícola Pantitlán',
+      destination: 'El Zócalo, Ciudad de México',
+      taskId: TASK,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(browser.typeNow).toHaveBeenCalledWith(
+      SESSION,
+      ORG,
+      '#rv-pudo-select-pickup',
+      'Calle 1 31, Agrícola Pantitlán',
+      { timeout: 1200 },
+    );
+    expect(browser.typeNow).toHaveBeenCalledWith(
+      SESSION,
+      ORG,
+      '#rv-pudo-select-drop0',
+      'El Zócalo, Ciudad de México',
+      { timeout: 1200 },
+    );
+    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, 'a[aria-label="See prices"]', { timeout: 1200 });
+    expect(browser.pressKey).toHaveBeenCalledWith(SESSION, ORG, 'Enter');
+    expect(browser.updateSessionMetadata).toHaveBeenCalledWith(SESSION, ORG, expect.objectContaining({
+      route_entry: 'dom_route_form',
+    }));
   });
 
   it('uses the stored Google Web credential when Uber asks for Google login', async () => {
