@@ -708,6 +708,40 @@ describe('AgentRunnerService', () => {
     expect((resultEvent!.payload as { text: string }).text).toContain('https://www.google.com/maps?q=19.4326,-99.1332');
   });
 
+  it('routes "sabes cual mi ubicacion" to request location when browser coordinates exist', async () => {
+    tasks.getTask.mockResolvedValue(makeTask({
+      description: 'sabes cual mi ubicacion?',
+      metadata: {
+        source: 'playground',
+        request_context: {
+          source: 'browser',
+          location: {
+            source: 'browser',
+            latitude: 19.406002,
+            longitude: -99.0691,
+            accuracy_m: 20,
+            captured_at: '2026-06-14T00:23:00.000Z',
+          },
+        },
+      },
+    }));
+
+    await service.run(ORG, TASK);
+
+    expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(agentLoop.run).not.toHaveBeenCalled();
+    expect(intentRouter.classify).not.toHaveBeenCalled();
+    const resultEvent = events.publish.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === 'task.result');
+    expect(resultEvent).toEqual(expect.objectContaining({
+      payload: expect.objectContaining({
+        model: 'request-location',
+        text: expect.stringContaining('19.406002, -99.069100'),
+      }),
+    }));
+  });
+
   it('prepares an Uber ride using browser location as origin and work place as destination', async () => {
     const schedule = module.get(ScheduleService) as jest.Mocked<ScheduleService>;
     const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;

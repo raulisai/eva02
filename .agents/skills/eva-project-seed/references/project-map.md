@@ -27,7 +27,7 @@ Key Documentation References:
 - `packages/browser-runtime`: Playwright runtime used by core browser module.
 - `packages/mcp-adapters`: MCP adapter/manager package.
 - `packages/skill-runtime`: runtime skill manifests/instructions/tests.
-- `supabase/migrations`: SQL migrations currently `001` through `033`.
+- `supabase/migrations`: SQL migrations currently `001` through `036`.
 - `docker`: Redis/Postgres local helpers; Supabase cloud remains expected DB in AGENTS.
 - `.agents/skills`: repo-local agent skills, including this seed.
 
@@ -103,12 +103,12 @@ Key Documentation References:
 
 ## Supabase Schema Groups
 
-Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_events`, `005_memories`, `006_intent_routes`, `007_communication`, `008_skills`, `009_browser`, `010_dev_manager`, `011_wear_fast_path`, `012_nodes_devices`, `013_approvals`, `014_rls_policies`, `015_wear_ui`, `016_integrations_soul_artifacts`, `017_credentials_skill_seed`, `018_tasks_schema_align`, `019_fix_missing_rls_and_grants`, `020_soul_v2`, `021_schedule_places_patterns`, `022_scheduled_jobs`, `023_token_logs`, `024_fix_billing_stats_rpc`, `025_add_task_id_to_token_logs`, `026_fix_task_events_event_nullable`, `027_skill_learning_graph`, `028_agent_intelligence_metrics`, `029_agent_intelligence_flywheels`, `030_capability_gaps`, `031_soul_private_context`, `032_agent_tier_step_settings`, `033_profile_hub`, `034_skill_docs`.
+Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_events`, `005_memories`, `006_intent_routes`, `007_communication`, `008_skills`, `009_browser`, `010_dev_manager`, `011_wear_fast_path`, `012_nodes_devices`, `013_approvals`, `014_rls_policies`, `015_wear_ui`, `016_integrations_soul_artifacts`, `017_credentials_skill_seed`, `018_tasks_schema_align`, `019_fix_missing_rls_and_grants`, `020_soul_v2`, `021_schedule_places_patterns`, `022_scheduled_jobs`, `023_token_logs`, `024_fix_billing_stats_rpc`, `025_add_task_id_to_token_logs`, `026_fix_task_events_event_nullable`, `027_skill_learning_graph`, `028_agent_intelligence_metrics`, `029_agent_intelligence_flywheels`, `030_capability_gaps`, `031_soul_private_context`, `032_agent_tier_step_settings`, `033_profile_hub`, `034_skill_docs`, `035_allow_delete_skills_artifacts`, `036_agent_data_log`.
 
 - Identity/org: `organizations`, `users`.
 - Tasks/events: `tasks`, `task_events`; `014` references `task_steps` but no `CREATE TABLE` was found in current scan.
 - Memory/soul/profile: `memories`, `memory_embeddings`, `agent_souls`, `profile_todos`, `profile_notes`, `profile_goals`, `profile_private_items`, `profile_suggestions`, `profile_private_access_logs`; RPC `match_memories`. `agent_souls` keeps agent identity and legacy persona_context. Profile Hub tables own user todos/notes/goals and encrypted private vault items; Data API grants expose only private hints, never `profile_private_items.ciphertext`.
-- Routing/planning/tools/agent intelligence: `intent_routes`, `skills`, `skill_versions`, `skill_files`, `tools`, `tool_calls`, `skill_usage_stats`, `skill_graph_edges`, `skill_selection_events`, `agent_trajectories`, `skill_embeddings`, `agent_input_requests`, `agent_runtime_artifacts`, `org_agent_settings`; `org_agent_settings.max_steps_by_tier` controls safe agent-loop step budgets by tier; views `agent_tool_success_metrics`, `agent_goal_success_metrics`, `agent_defense_metrics`, `agent_skill_funnel_metrics`, `agent_task_efficiency_metrics`.
+- Routing/planning/tools/agent intelligence: `intent_routes`, `skills`, `skill_versions`, `skill_files`, `tools`, `tool_calls`, `skill_usage_stats`, `skill_graph_edges`, `skill_selection_events`, `agent_trajectories`, `skill_embeddings`, `agent_input_requests`, `agent_runtime_artifacts`, `agent_data_log`, `org_agent_settings`; `agent_data_log` is an org-scoped key/value time-series store for monitoring jobs; `org_agent_settings.max_steps_by_tier` controls safe agent-loop step budgets by tier; views `agent_tool_success_metrics`, `agent_goal_success_metrics`, `agent_defense_metrics`, `agent_skill_funnel_metrics`, `agent_task_efficiency_metrics`.
 - Browser: `browser_profiles`, `browser_sessions`, `browser_screenshots`, `browser_action_preparations`.
 - Dev manager: `projects`, `dev_tasks`, `claude_code_sessions`, `build_runs`, `test_runs`, `code_reviews`, `roadmap_items`.
 - Wear/devices: `wear_sessions`, `wear_tokens`, `wear_fast_path_logs`, `fast_path_policies`, `wear_capabilities`, `wear_directives`, `wear_form_responses`, `wear_sensor_consents`, `nodes`, `node_capabilities`, `devices`.
@@ -125,7 +125,7 @@ Migration order observed: `001_extensions`, `002_orgs_users`, `003_tasks`, `004_
 
 ## Local Drift / Watchlist
 
-- AGENTS/README migration lists are stale versus actual `001-033`.
+- AGENTS/README migration lists are stale versus actual `001-036`.
 - AGENTS says RLS policies live exclusively in `014_rls_policies.sql`, but later migrations include policy creation; decide convention before adding more tables.
 - `014_rls_policies.sql` references `task_steps`; current migration scan did not find `CREATE TABLE task_steps`.
 - `TasksRepository.findStuck` lacks an `org_id` argument/filter; may be intended system-wide but violates the written non-negotiable unless bounded elsewhere.
