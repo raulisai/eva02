@@ -25,14 +25,15 @@ export class ProfileFactsService {
   ) {}
 
   async getOverview(orgId: string) {
-    const [todos, notes, goals, privateItems, suggestions] = await Promise.all([
+    const [todos, notes, goals, privateItems, suggestions, places] = await Promise.all([
       this.readTable('profile_todos', 'id,title,notes,status,due_date,priority,source,confidence,sensitivity,sensitive_hint,updated_at', orgId, 'position'),
       this.readTable('profile_notes', 'id,title,content,color,pinned,agent_visible,source,confidence,sensitivity,sensitive_hint,updated_at', orgId, 'updated_at'),
       this.readTable('profile_goals', 'id,title,description,status,deadline,progress,category,source,confidence,sensitivity,sensitive_hint,updated_at', orgId, 'updated_at'),
       this.readTable('profile_private_items', 'id,kind,label,hint,sensitivity,source,updated_at', orgId, 'updated_at'),
       this.readTable('profile_suggestions', 'id,fact_type,payload,confidence,status,reason,created_at', orgId, 'created_at', { status: 'pending' }),
+      this.getPlaces(orgId),
     ]);
-    return { todos, notes, goals, private_items: privateItems, suggestions };
+    return { todos, notes, goals, private_items: privateItems, suggestions, places };
   }
 
   async createPrivateItem(orgId: string, userId: string, input: { kind: string; label: string; value: string }) {
@@ -127,6 +128,144 @@ export class ProfileFactsService {
       .eq('id', id);
     if (error) throw error;
     return { dismissed: true };
+  }
+
+  async deletePrivateItem(orgId: string, id: string) {
+    const { error } = await this.db.admin
+      .from('profile_private_items')
+      .delete()
+      .eq('org_id', orgId)
+      .eq('id', id);
+    if (error) throw error;
+    return { deleted: true };
+  }
+
+  async deleteTodo(orgId: string, id: string) {
+    const { error } = await this.db.admin
+      .from('profile_todos')
+      .delete()
+      .eq('org_id', orgId)
+      .eq('id', id);
+    if (error) throw error;
+    return { deleted: true };
+  }
+
+  async deleteNote(orgId: string, id: string) {
+    const { error } = await this.db.admin
+      .from('profile_notes')
+      .delete()
+      .eq('org_id', orgId)
+      .eq('id', id);
+    if (error) throw error;
+    return { deleted: true };
+  }
+
+  async deleteGoal(orgId: string, id: string) {
+    const { error } = await this.db.admin
+      .from('profile_goals')
+      .delete()
+      .eq('org_id', orgId)
+      .eq('id', id);
+    if (error) throw error;
+    return { deleted: true };
+  }
+
+  async updatePersonaField(orgId: string, key: string, value: string, section: 'personal_profile' | 'persona_context' | 'cowork_context' = 'personal_profile') {
+    const trimmedKey = key.trim();
+    const trimmedValue = value.trim();
+    if (!trimmedKey) return { skipped: true, reason: 'missing_key' };
+
+    if (section === 'personal_profile') {
+      return this.soul.updatePersonalProfile(orgId, { [trimmedKey]: trimmedValue || undefined });
+    }
+
+    const { data, error } = await this.db.admin
+      .from('agent_souls')
+      .select('persona_context')
+      .eq('org_id', orgId)
+      .maybeSingle();
+    if (error) throw error;
+
+    const current = ((data?.persona_context ?? {}) as Record<string, unknown>);
+
+    let updated: Record<string, unknown>;
+    if (section === 'cowork_context') {
+      const nested = (current.cowork_context ?? {}) as Record<string, unknown>;
+      updated = { ...current, cowork_context: { ...nested, [trimmedKey]: trimmedValue || undefined } };
+    } else {
+      updated = { ...current, [trimmedKey]: trimmedValue || undefined };
+    }
+
+    await this.db.admin
+      .from('agent_souls')
+      .upsert({ org_id: orgId, persona_context: updated }, { onConflict: 'org_id' })
+      .select();
+
+    return updated;
+  }
+
+  async getPlaces(orgId: string) {
+    const { data, error } = await this.db.admin
+      .from('known_places')
+      .select('id,label,address,lat,lng,radius_m,visit_count,last_visit,typical_days,typical_time')
+      .eq('org_id', orgId)
+      .order('visit_count', { ascending: false });
+    if (error) {
+      this.logger.warn(`Could not read known_places for org ${orgId}: ${error.message}`);
+      return [];
+    }
+    return data ?? [];
+  }
+
+  async addPlace(orgId: string, userId: string, input: { label: string; address?: string; lat?: number; lng?: number; radius_m?: number }) {
+    const { data, error } = await this.db.admin
+      .from('known_places')
+      .upsert({
+        org_id: orgId,
+        label: input.label.trim(),
+        address: input.address?.trim() || null,
+        lat: input.lat ?? null,
+        lng: input.lng ?? null,
+        radius_m: input.radius_m ?? 150,
+      }, { onConflict: 'org_id,label' })
+      .select('id,label,address,lat,lng,radius_m,visit_count,last_visit')
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  async deletePlace(orgId: string, id: string) {
+    const { error } = await this.db.admin
+      .from('known_places')
+      .delete()
+      .eq('org_id', orgId)
+      .eq('id', id);
+    if (error) throw error;
+    return { deleted: true };
+  }
+
+  async addRelationship(orgId: string, input: { display_name: string; relation: string; contact_hint?: string; notes?: string }) {
+    const current = await this.soul.getPersonaContext(orgId);
+    const existing = Array.isArray(current.relationship_map) ? current.relationship_map : [];
+    const entry = {
+      id: crypto.randomUUID(),
+      display_name: input.display_name.trim(),
+      relation: input.relation.trim(),
+      aliases: [] as string[],
+      contact_hint: input.contact_hint?.trim() || undefined,
+      notes: input.notes?.trim() || undefined,
+      priority: existing.length,
+    };
+    await this.soul.updatePersonaContext(orgId, { relationship_map: [...existing, entry] });
+    return entry;
+  }
+
+  async removeRelationship(orgId: string, relId: string) {
+    const current = await this.soul.getPersonaContext(orgId);
+    const existing = Array.isArray(current.relationship_map) ? current.relationship_map : [];
+    const filtered = existing.filter((r) => r.id !== relId);
+    await this.soul.updatePersonaContext(orgId, { relationship_map: filtered });
+    return { deleted: true };
   }
 
   private async insertTodo(orgId: string, userId: string, input: ApplyFactInput) {

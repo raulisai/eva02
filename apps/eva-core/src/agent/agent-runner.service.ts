@@ -36,6 +36,9 @@ import { CommunicationService } from '../communication/communication.service';
 import type { CommunicationChannel } from '../communication/communication.types';
 import { PipelineRunnerService } from './pipeline-runner.service';
 
+// Self-info: user asks about their OWN data — declared early so ACK_RULES can reference it.
+const SELF_INFO_SIGNALS = /\b(mi\s+(nombre|edad|direcci[oó]n|domicilio|casa|trabajo|empresa|oficina|horario|gustos?|hobbies?|perfil|ubicaci[oó]n|tel[eé]fono|peso|altura|estatura|informaci[oó]n|datos?|lugar(?:es)?|sitios?)|mis\s+(datos?|gustos?|hobbies?|lugares?|sitios?|preferencias?|relaciones?|alergias?|d[ií]as?|horarios?)|d[oó]nde\s+(vivo|trabajo|est[eé]|queda\s+mi|viv[ií]s|trabajas?)|cu[aá]ntos?\s+a[nñ]os\s+(tengo|tienes?|tiene?)|(?:sabes?|recuerdas?|tienes?)\s+(?:mi\s+)?(?:nombre|edad|direcci[oó]n|gustos?|hobbies?|trabajo|casa)|mis\s+datos\s+personales|mi\s+perfil)\b/i;
+
 /**
  * Immediate spoken acknowledgments — EVA answers in <100ms with one of these
  * while the real work happens, so the user always knows she heard them.
@@ -62,9 +65,15 @@ const ACK_RULES: Array<{ pattern: RegExp; say: string; hint: string }> = [
     say: 'Lo consulto directo en una API pública y te doy solo lo útil.',
     hint: 'public_api',
   },
+  // Self-info: user asks about THEIR OWN data — answer from profile, never web search
+  {
+    pattern: SELF_INFO_SIGNALS,
+    say: 'Déjame revisar tu perfil 👤',
+    hint: 'profile',
+  },
   // Web-search triggers — words that clearly need current internet data
   {
-    pattern: /\b(busca|buscar|búsqueda|search|internet|noticias|news|precio|cotiza|tipo de cambio|reciente|actual|hoy|ma[nñ]ana|ayer|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|fixture|cap[ií]tulo|episodio|anime|manga|estreno|presidente|presidenta|gobernador|gobernadora|alcalde|alcaldesa|ceo|director|directora|titular|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i,
+    pattern: /\b(busca|buscar|búsqueda|search|internet|noticias|news|precio|cotiza|tipo de cambio|reciente|actual|hoy|ma[nñ]ana|ayer|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|fixture|cap[ií]tulo|episodio|anime|manga|estreno|presidente|presidenta|gobernador|gobernadora|alcalde|alcaldesa|ceo|director|directora|titular|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i,
     say: 'Dame un momento, voy a buscar en internet 🔎',
     hint: 'search',
   },
@@ -124,7 +133,10 @@ const USELESS_ANSWER_PATTERNS = [
   /\bno dispongo de informaci[oó]n actualizada\b/i,
 ];
 
-const RESEARCH_REQUIRED_SIGNALS = /\b(busca|buscar|b[uú]squeda|search|internet|noticias|news|precio|cotiza|tipo de cambio|clima|weather|pron[oó]stico|receta|recetas|recipe|recipes|cocina|cocinar|ingredientes?|reciente|actual|ahora|hoy|ma[nñ]ana|ayer|en vivo|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|fixture|cap[ií]tulo|episodio|anime|manga|temporada|estreno|release|direcci[oó]n|ubicaci[oó]n|tel[eé]fono|horario|restaurante|comida|recomienda|recomendaci[oó]n)\b/i;
+const RESEARCH_REQUIRED_SIGNALS = /\b(busca|buscar|b[uú]squeda|search|internet|noticias|news|precio|cotiza|tipo de cambio|clima|weather|pron[oó]stico|receta|recetas|recipe|recipes|cocina|cocinar|ingredientes?|reciente|actual|ahora|hoy|ma[nñ]ana|ayer|en vivo|mundial|munidal|world cup|fifa|partidos?|jugar[aá]|fixture|cap[ií]tulo|episodio|anime|manga|temporada|estreno|release|tel[eé]fono|restaurante|comida|recomienda|recomendaci[oó]n)\b/i;
+// NOTE: "dirección", "ubicación" and "horario" removed from RESEARCH_REQUIRED_SIGNALS — they are personal
+// profile fields when preceded by "mi/mis" or used alone in first-person context. Those are handled by
+// SELF_INFO_SIGNALS below. Only add them back here if the user explicitly says "busca la dirección de X".
 const PUBLIC_API_DIRECT_SIGNALS = /\b(clima|weather|temperatura|pron[oó]stico|lluvia|llover|calor|fr[ií]o|receta|recetas|recipe|recipes|cocina|cocinar|prepara(?:r)?|platillo|ingredientes?)\b/i;
 
 // Personal-data requests: these must NEVER go to web search — they use their own APIs
@@ -1146,7 +1158,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     const conversationContext = await this.getConversationContext(task);
 
     // Fetch soul, schedule, patterns, and memory recall in parallel — none blocks response
-    const [soulContext, localScheduleBlock, gcalBlock, patternBlock, proactiveTriggers, recallResult] = await Promise.all([
+    const [soulContext, localScheduleBlock, gcalBlock, patternBlock, proactiveTriggers, recallResult, knownPlaces] = await Promise.all([
       this.soul.getAgentContext(orgId).catch(() => ({
         personal_profile: {}, cowork_context: {}, goals: [], persona_context: {},
       })),
@@ -1160,6 +1172,8 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       this.patterns.getTriggersNow(orgId).catch(() => []),
       // Memory recall — only relevant when user asks to remember
       this.memoryRecall.check(input, orgId).catch(() => ({ isRecall: false, context: null, memories: [] })),
+      // Known places — always available, used for location/address questions
+      this.schedule.getPlaces(orgId).catch((): KnownPlace[] => []),
     ]);
 
     // Merge schedule sources: local first, then fill gaps with Google Calendar
@@ -1168,7 +1182,7 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     const routingInput = this.withConversationContextForRouting(input, conversationContext);
     const contextualInput = this.buildContextualInput(
       input, conversationContext, soulContext, calendarBlock, patternBlock,
-      proactiveTriggers.map(t => t.message), recallResult.context,
+      proactiveTriggers.map(t => t.message), recallResult.context, knownPlaces,
     );
 
     const ctx: RouteContext = {
@@ -2286,6 +2300,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
     patternBlock: string | null,
     proactiveTriggerMessages: string[],
     memoryRecallContext: string | null,
+    knownPlaces: KnownPlace[] = [],
   ): string {
     return this.profileContext.buildContextualInput(input, {
       conversationContext,
@@ -2294,6 +2309,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
       patternBlock,
       proactiveTriggerMessages,
       memoryRecallContext,
+      knownPlaces,
     });
   }
 
@@ -2375,10 +2391,10 @@ Responde directamente al usuario en español, con un tono amable y natural.
 
   // rawInput = user's current message only; routingInput may include conversation history
   private shouldUseResearch(rawInput: string, routingInput: string, ackHint: string, freshnessRequired = false): boolean {
-    // Personal-data requests must never fall to web search.
-    // Always check raw input — routingInput may contain prior-turn keywords.
-    if (ackHint === 'email' || ackHint === 'calendar' || ackHint === 'drive') return false;
+    // Personal-data requests must NEVER fall to web search. Check raw input first.
+    if (ackHint === 'email' || ackHint === 'calendar' || ackHint === 'drive' || ackHint === 'profile') return false;
     if (EMAIL_SIGNALS.test(rawInput) || CALENDAR_SIGNALS_PERSONAL.test(rawInput) || DRIVE_SIGNALS.test(rawInput)) return false;
+    if (SELF_INFO_SIGNALS.test(rawInput)) return false;
     return freshnessRequired || ackHint === 'search' || ackHint === 'public_api' || RESEARCH_REQUIRED_SIGNALS.test(routingInput);
   }
 
@@ -2410,23 +2426,25 @@ Responde directamente al usuario en español, con un tono amable y natural.
   }
 
   private isPersonalProfileQuestion(input: string): boolean {
-    return /\b(mi nombre|me llamo|quien soy|qui[eé]n soy|mi edad|cu[aá]ntos a[nñ]os|mis datos|sabes.*(?:nombre|edad|datos)|datos personales)\b/i
-      .test(input);
+    return SELF_INFO_SIGNALS.test(input) ||
+      /\b(mi nombre|me llamo|quien soy|qui[eé]n soy|mi edad|cu[aá]ntos a[nñ]os|mis datos|sabes.*(?:nombre|edad|datos)|datos personales)\b/i.test(input);
   }
 
   private requestedProfileFields(input: string): Array<{ key: keyof PersonalProfile; label: string; type: 'text' | 'number' }> {
     const fields: Array<{ key: keyof PersonalProfile; label: string; type: 'text' | 'number'; pattern: RegExp }> = [
       { key: 'full_name', label: 'Nombre', type: 'text', pattern: /\b(nombre|me llamo|quien soy|qui[eé]n soy)\b/i },
       { key: 'preferred_address', label: 'Como quieres que te llame', type: 'text', pattern: /\b(como me llamas|c[oó]mo me llamas|llamarme|apodo|trato)\b/i },
-      { key: 'age', label: 'Edad', type: 'number', pattern: /\b(edad|a[nñ]os)\b/i },
-      { key: 'current_location', label: 'Ubicacion actual', type: 'text', pattern: /\b(ubicaci[oó]n actual|d[oó]nde estoy|donde estoy)\b/i },
-      { key: 'address', label: 'Direccion', type: 'text', pattern: /\b(direcci[oó]n|domicilio|casa)\b/i },
-      { key: 'workplace', label: 'Lugar de trabajo', type: 'text', pattern: /\b(trabajo|empresa|oficina)\b/i },
-      { key: 'likes', label: 'Gustos', type: 'text', pattern: /\b(gustos|me gusta)\b/i },
-      { key: 'dislikes', label: 'Lo que no te gusta', type: 'text', pattern: /\b(no me gusta|disgustos)\b/i },
-      { key: 'allergies', label: 'Alergias', type: 'text', pattern: /\b(alergias|al[eé]rgico)\b/i },
+      { key: 'age', label: 'Edad', type: 'number', pattern: /\b(edad|a[nñ]os|cu[aá]ntos a[nñ]os)\b/i },
+      { key: 'current_location', label: 'Ubicación actual', type: 'text', pattern: /\b(ubicaci[oó]n|d[oó]nde estoy|donde estoy|d[oó]nde vivo|donde vivo)\b/i },
+      { key: 'address', label: 'Dirección / domicilio', type: 'text', pattern: /\b(direcci[oó]n|domicilio|mi casa|donde vivo|d[oó]nde vivo)\b/i },
+      { key: 'workplace', label: 'Lugar de trabajo', type: 'text', pattern: /\b(trabajo|empresa|oficina|d[oó]nde trabajo|donde trabajo)\b/i },
+      { key: 'likes', label: 'Gustos', type: 'text', pattern: /\b(gustos?|me gusta|mis gustos)\b/i },
+      { key: 'hobbies', label: 'Hobbies', type: 'text', pattern: /\b(hobbies?|pasatiempos?)\b/i },
+      { key: 'dislikes', label: 'Lo que no te gusta', type: 'text', pattern: /\b(no me gusta|disgustos?)\b/i },
+      { key: 'allergies', label: 'Alergias', type: 'text', pattern: /\b(alergias?|al[eé]rgico)\b/i },
       { key: 'weight', label: 'Peso', type: 'text', pattern: /\b(peso|cu[aá]nto peso)\b/i },
       { key: 'height', label: 'Altura', type: 'text', pattern: /\b(altura|estatura|mido)\b/i },
+      { key: 'occupation', label: 'Ocupación', type: 'text', pattern: /\b(ocupaci[oó]n|profesi[oó]n|a qu[eé] me dedico)\b/i },
     ];
 
     const requested = fields
@@ -2440,27 +2458,52 @@ Responde directamente al usuario en español, con un tono amable y natural.
         .map(({ key, label, type }) => ({ key, label, type }));
   }
 
+  private isPlacesQuestion(input: string): boolean {
+    return /\b(mis?\s+lugares?|mis?\s+sitios?|mis?\s+direcciones?|d[oó]nde\s+vivo|d[oó]nde\s+trabajo|mi\s+casa|mi\s+trabajo|mi\s+domicilio|mis?\s+direcci[oó]n|places?)\b/i.test(input);
+  }
+
   private async answerPersonalProfileQuestion(
     orgId: string,
     taskId: string,
     input: string,
     startedAt: number,
   ): Promise<boolean> {
-    const profile = await this.soul.getPersonalProfile(orgId);
+    const [profile, knownPlaces] = await Promise.all([
+      this.soul.getPersonalProfile(orgId),
+      this.isPlacesQuestion(input) ? this.schedule.getPlaces(orgId).catch((): KnownPlace[] => []) : Promise.resolve<KnownPlace[]>([]),
+    ]);
+
     const requested = this.requestedProfileFields(input);
     const known = requested
-      .map((field) => ({ ...field, value: String(profile[field.key] ?? '').trim() }))
+      .map((field) => ({ ...field, value: String((profile as Record<string, unknown>)[field.key] ?? '').trim() }))
       .filter((field) => field.value.length > 0);
     const missing = requested
-      .filter((field) => !String(profile[field.key] ?? '').trim());
+      .filter((field) => !String((profile as Record<string, unknown>)[field.key] ?? '').trim());
+
+    const lines: string[] = [];
+
+    if (known.length > 0) {
+      lines.push('Esto tengo guardado sobre ti:', ...known.map((field) => `- ${field.label}: ${field.value}`));
+    }
+
+    if (knownPlaces.length > 0) {
+      lines.push('\nMis lugares guardados:');
+      knownPlaces.forEach((place) => {
+        const address = place.address ? ` — ${place.address}` : '';
+        const visits = place.visit_count > 0 ? ` (${place.visit_count} visitas)` : '';
+        lines.push(`- ${place.label}${address}${visits}`);
+      });
+    }
+
+    if (lines.length > 0 && (missing.length === 0 || knownPlaces.length > 0)) {
+      await this.log(orgId, taskId, 'answered from soul personal_profile + known_places', 'soul');
+      await this.deliver(orgId, taskId, lines.join('\n'), 'soul-profile', Date.now() - startedAt);
+      return true;
+    }
 
     if (known.length > 0 && missing.length === 0) {
-      const text = [
-        'Esto tengo guardado sobre ti:',
-        ...known.map((field) => `- ${field.label}: ${field.value}`),
-      ].join('\n');
       await this.log(orgId, taskId, 'answered from soul personal_profile', 'soul');
-      await this.deliver(orgId, taskId, text, 'soul-profile', Date.now() - startedAt);
+      await this.deliver(orgId, taskId, lines.join('\n'), 'soul-profile', Date.now() - startedAt);
       return true;
     }
 
@@ -2469,7 +2512,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
       : '';
     const missingLabels = missing.map((field) => field.label).join(', ');
     throw new MissingInformationError(
-      `${knownText}Me faltan estos datos en tu Soul: ${missingLabels}.`,
+      `${knownText}Me faltan estos datos en tu perfil: ${missingLabels}.`,
       {
         form_key: 'personal_profile.identity',
         title: 'Completa tu perfil personal',

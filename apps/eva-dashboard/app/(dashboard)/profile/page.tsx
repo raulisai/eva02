@@ -17,6 +17,7 @@ export default async function ProfilePage() {
     goalsResult,
     privateResult,
     scheduleResult,
+    placesResult,
   ] = await Promise.all([
     supabase
       .from('agent_souls')
@@ -50,13 +51,18 @@ export default async function ProfilePage() {
       .eq('event_type', 'one_time')
       .order('scheduled_date', { ascending: true })
       .limit(8),
+    supabase
+      .from('known_places')
+      .select('id,label,address,lat,lng,visit_count,last_visit,typical_days')
+      .eq('org_id', orgId)
+      .order('visit_count', { ascending: false }),
   ]);
 
   if (soulResult.error?.code === '42501') redirect('/login');
 
   return (
     <>
-      <Topbar title="Mi Perfil" subtitle="user profile · relationships · private vault" />
+      <Topbar title="Mi Perfil" subtitle="user profile · relationships · private vault · places" />
       <div className="flex-1 min-h-0">
         <ProfileHubClient
           personaContext={(soulResult.data?.persona_context ?? {}) as Record<string, unknown>}
@@ -65,6 +71,7 @@ export default async function ProfilePage() {
           goals={goalsResult.data ?? []}
           privateItems={privateResult.data ?? []}
           scheduleEvents={scheduleResult.data ?? []}
+          places={placesResult.data ?? []}
         />
       </div>
     </>

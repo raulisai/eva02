@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { AgentSoulContext } from './soul-context.service';
+import { KnownPlace } from './schedule.service';
 
 export interface ConversationContextTurn {
   role: 'user' | 'assistant';
@@ -44,6 +45,7 @@ export class ProfileContextBuilderService {
     patternBlock?: string | null;
     proactiveTriggerMessages?: string[];
     memoryRecallContext?: string | null;
+    knownPlaces?: KnownPlace[];
   }): string {
     const blocks: string[] = [input];
 
@@ -51,6 +53,7 @@ export class ProfileContextBuilderService {
       options.soulContext,
       options.calendarBlock ?? null,
       options.patternBlock ?? null,
+      options.knownPlaces ?? [],
     );
     if (soulSummary) blocks.push('', soulSummary);
 
@@ -99,13 +102,14 @@ export class ProfileContextBuilderService {
   }
 
   formatSoulContext(context: AgentSoulContext): string | null {
-    return this.formatEnrichedSoulContext(context, null, null);
+    return this.formatEnrichedSoulContext(context, null, null, []);
   }
 
   formatEnrichedSoulContext(
     context: AgentSoulContext,
     calendarBlock: string | null,
     patternBlock: string | null = null,
+    knownPlaces: KnownPlace[] = [],
   ): string | null {
     const sections: string[] = ['## Contexto personal de tu usuario:'];
     let hasContent = false;
@@ -216,12 +220,25 @@ export class ProfileContextBuilderService {
       hasContent = true;
     }
 
+    if (knownPlaces.length > 0) {
+      sections.push(
+        '\n### Mis lugares (usa esto para preguntas de dirección, "mi casa", "donde trabajo", etc.)',
+        'Responde SIEMPRE desde aquí si el usuario pregunta por su dirección, lugar de trabajo, casa u otro lugar personal. NO busques en internet.',
+        ...knownPlaces.slice(0, 10).map((place) => {
+          const address = place.address ? ` — ${place.address}` : '';
+          const visits = place.visit_count > 0 ? ` (visitado ${place.visit_count} veces)` : '';
+          return `- ${place.label}${address}${visits}`;
+        }),
+      );
+      hasContent = true;
+    }
+
     if (patternBlock) {
       sections.push('\n### Patrones de comportamiento detectados', patternBlock);
       hasContent = true;
     }
 
     if (!hasContent) return null;
-    return sections.join('\n').slice(0, 5000);
+    return sections.join('\n').slice(0, 6000);
   }
 }

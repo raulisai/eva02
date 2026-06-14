@@ -1,4 +1,4 @@
-import { IsIn, IsObject, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsIn, IsNumber, IsObject, IsOptional, IsString, MaxLength, Min, MinLength } from 'class-validator';
 
 export class CreatePrivateProfileItemDto {
   @IsString()
@@ -37,4 +37,66 @@ export class ApplyProfileFactDto {
 
   @IsOptional()
   evidenceTaskId?: string;
+}
+
+export class UpdatePersonaFieldDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  key!: string;
+
+  @IsString()
+  @MaxLength(2000)
+  value!: string;
+
+  @IsOptional()
+  @IsIn(['personal_profile', 'persona_context', 'cowork_context'])
+  section?: 'personal_profile' | 'persona_context' | 'cowork_context';
+}
+
+export class CreatePlaceDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(80)
+  label!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  address?: string;
+
+  @IsOptional()
+  @IsNumber()
+  lat?: number;
+
+  @IsOptional()
+  @IsNumber()
+  lng?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(10)
+  radius_m?: number;
+}
+
+export class AddRelationshipDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(120)
+  display_name!: string;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(60)
+  relation!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  contact_hint?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
 }
