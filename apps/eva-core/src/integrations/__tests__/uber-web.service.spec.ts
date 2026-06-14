@@ -88,14 +88,16 @@ describe('UberWebService', () => {
   });
 
   it('uses Uber Web deep link and extracts visible quote candidates', async () => {
-    browser.evaluate.mockResolvedValueOnce({
-      state: 'quote_ready',
-      googleLoginAvailable: false,
-      quoteCandidates: [
-        { label: 'UberX', price: '$180', raw_lines: ['UberX', '$180'] },
-      ],
-      textSample: 'UberX\n$180',
-    });
+    browser.evaluate
+      .mockResolvedValueOnce(undefined)  // dismissConsentBanner
+      .mockResolvedValueOnce({
+        state: 'quote_ready',
+        googleLoginAvailable: false,
+        quoteCandidates: [
+          { label: 'UberX', price: '$180', raw_lines: ['UberX', '$180'] },
+        ],
+        textSample: 'UberX\n$180',
+      });
 
     const result = await service.estimateRide(ORG, {
       origin: 'Roma Norte',
@@ -154,25 +156,16 @@ describe('UberWebService', () => {
   });
 
   it('fills the visible route form when the deep link lands on Uber home without prices', async () => {
+    const noQuotes = { state: 'logged_in', googleLoginAvailable: false, quoteCandidates: [], textSample: 'Where to?', currentUrl: 'https://m.uber.com/go/home', title: 'Uber' };
+    const withQuotes = { state: 'quote_ready', googleLoginAvailable: false, quoteCandidates: [{ label: 'UberX', price: '$180', raw_lines: ['UberX', '$180'] }], textSample: 'UberX\n$180', currentUrl: 'https://m.uber.com/go/product-selection', title: 'Uber' };
     browser.evaluate
-      .mockResolvedValueOnce({
-        state: 'logged_in',
-        googleLoginAvailable: false,
-        quoteCandidates: [],
-        textSample: 'Where to?',
-        currentUrl: 'https://m.uber.com/go/home',
-        title: 'Uber',
-      })
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce({
-        state: 'quote_ready',
-        googleLoginAvailable: false,
-        quoteCandidates: [{ label: 'UberX', price: '$180', raw_lines: ['UberX', '$180'] }],
-        textSample: 'UberX\n$180',
-        currentUrl: 'https://m.uber.com/go/product-selection',
-        title: 'Uber',
-      });
+      .mockResolvedValueOnce(undefined)    // dismissConsentBanner (after settleMs)
+      .mockResolvedValueOnce(noQuotes)     // inspectPage in inspectAfterSettled
+      .mockResolvedValueOnce(false)        // clickFirstMatchingPlaceSuggestion (origin)
+      .mockResolvedValueOnce(false)        // clickFirstMatchingPlaceSuggestion (destination)
+      .mockResolvedValueOnce(undefined)    // dismissConsentBanner (before "See prices")
+      .mockResolvedValueOnce(noQuotes)     // inspectAfterRouteEntry attempt 1 (still loading)
+      .mockResolvedValueOnce(withQuotes);  // inspectAfterRouteEntry attempt 2 (prices ready)
 
     const result = await service.estimateRide(ORG, {
       origin: 'Calle 1 31, Agrícola Pantitlán',
@@ -181,22 +174,13 @@ describe('UberWebService', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(browser.typeNow).toHaveBeenCalledWith(
-      SESSION,
-      ORG,
-      '#rv-pudo-select-pickup',
-      'Calle 1 31, Agrícola Pantitlán',
-      { timeout: 1200 },
-    );
-    expect(browser.typeNow).toHaveBeenCalledWith(
-      SESSION,
-      ORG,
-      '#rv-pudo-select-drop0',
-      'El Zócalo, Ciudad de México',
-      { timeout: 1200 },
-    );
+    // Fields are now clicked (to focus) then typed char-by-char for proper autocomplete
+    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, '#rv-pudo-select-pickup', { timeout: 1200 });
+    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, '#rv-pudo-select-drop0', { timeout: 1200 });
+    expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, 'Calle 1 31, Agrícola Pantitlán', 50);
+    expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, 'El Zócalo, Ciudad de México', 50);
     expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, 'button:has-text("See prices")', { timeout: 800 });
-    expect(browser.pressKey).toHaveBeenCalledWith(SESSION, ORG, 'Enter');
+    expect(browser.pressKey).toHaveBeenCalledWith(SESSION, ORG, 'Control+a');
     expect(browser.updateSessionMetadata).toHaveBeenCalledWith(SESSION, ORG, expect.objectContaining({
       route_entry: 'dom_route_form',
     }));
@@ -214,6 +198,7 @@ describe('UberWebService', () => {
       text: 'Google Web ya está autenticado.',
     });
     browser.evaluate
+      .mockResolvedValueOnce(undefined) // dismissConsentBanner (1st estimateRide)
       // Initial Uber route opens login page.
       .mockResolvedValueOnce({
         state: 'login_required',
@@ -234,6 +219,7 @@ describe('UberWebService', () => {
         currentUrl: 'https://m.uber.com/go/home',
         title: 'Uber',
       })
+      .mockResolvedValueOnce(undefined) // dismissConsentBanner (2nd estimateRide, recursive)
       // Re-open route after login and extract quote.
       .mockResolvedValueOnce({
         state: 'quote_ready',

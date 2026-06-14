@@ -684,16 +684,16 @@ export class UberWebService {
   }
 
   private async dismissConsentBanner(sessionId: string, orgId: string): Promise<void> {
-    await this.clickFirst(sessionId, orgId, [
-      '#onetrust-accept-btn-handler',
-      'button:has-text("Accept")',
-      'button:has-text("Accept All")',
-      'button:has-text("Accept Cookies")',
-      'button:has-text("Aceptar")',
-      'button:has-text("Aceptar todo")',
-      '[data-testid="cookie-accept"]',
-      '[aria-label*="accept cookies" i]',
-    ], 1500);
+    // Use a single JS evaluate to avoid N×timeout sequential Playwright selector tries
+    await this.browser.evaluate(sessionId, orgId, () => {
+      const btn =
+        (document.querySelector('#onetrust-accept-btn-handler') as HTMLElement)
+        ?? (document.querySelector('[data-testid="cookie-accept"]') as HTMLElement)
+        ?? Array.from(document.querySelectorAll('button')).find(
+          (b) => /^(accept|accept all|aceptar|aceptar todo|accept cookies)$/i.test((b.textContent ?? '').trim()),
+        ) as HTMLElement | undefined;
+      if (btn) btn.click();
+    }).catch(() => undefined);
   }
 
   private async inspectAfterSettled(sessionId: string, orgId: string): Promise<UberPageSignals> {
@@ -872,13 +872,20 @@ export class UberWebService {
   private async fillPlaceField(sessionId: string, orgId: string, selectors: string[], value: string): Promise<boolean> {
     for (const selector of selectors) {
       try {
-        await this.browser.typeNow(sessionId, orgId, selector, value, { timeout: 1200 });
-        await this.browser.wait(sessionId, orgId, 700);
+        // Click to focus; .fill() (used by typeNow) doesn't trigger React autocomplete events
+        await this.browser.clickNow(sessionId, orgId, selector, { timeout: 1200 });
+        // Select-all then type char-by-char so Uber's autocomplete dropdown fires
+        await this.browser.pressKey(sessionId, orgId, 'Control+a');
+        await this.browser.typeCharacters(sessionId, orgId, value, 50);
+        // Wait for Uber's autocomplete suggestions to appear
+        await this.browser.wait(sessionId, orgId, 1500);
         const clickedSuggestion = await this.clickFirstMatchingPlaceSuggestion(sessionId, orgId, value);
-        if (!clickedSuggestion) {
+        if (clickedSuggestion) {
+          await this.browser.wait(sessionId, orgId, 600); // wait for field to confirm selected address
+        } else {
           await this.browser.pressKey(sessionId, orgId, 'Enter').catch(() => undefined);
+          await this.browser.wait(sessionId, orgId, 600);
         }
-        await this.browser.wait(sessionId, orgId, 700);
         return true;
       } catch {
         // Try the next visible affordance; Uber changes labels often.
