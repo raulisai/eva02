@@ -77,7 +77,9 @@ export function escalateOnEvent(state: BudgetState, reason: string): BudgetState
     rank = budgetRank('powerful');
   } else if (rank < budgetRank('balanced')) {
     rank = budgetRank('balanced');
-  } else if (reason === 'parse_failure') {
+  } else if (reason === 'parse_failure' || reason === 'user_steer') {
+    // parse_failure: a weak model that can't format won't fix itself at the same tier.
+    // user_steer: a live user redirection deserves one stronger reasoning step.
     rank = Math.min(rank + 1, budgetRank('powerful'));
   }
   // else: already at balanced for a soft reason — hold (don't burn powerful yet).

@@ -195,7 +195,7 @@ describe('UberWebService', () => {
       'El Zócalo, Ciudad de México',
       { timeout: 1200 },
     );
-    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, 'a[aria-label="See prices"]', { timeout: 1200 });
+    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, 'button:has-text("See prices")', { timeout: 800 });
     expect(browser.pressKey).toHaveBeenCalledWith(SESSION, ORG, 'Enter');
     expect(browser.updateSessionMetadata).toHaveBeenCalledWith(SESSION, ORG, expect.objectContaining({
       route_entry: 'dom_route_form',

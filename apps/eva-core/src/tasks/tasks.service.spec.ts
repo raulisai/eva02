@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { TasksService } from './tasks.service';
 import { TasksRepository } from './tasks.repository';
 import { EventBusService } from '../events/event-bus.service';
@@ -50,6 +50,7 @@ describe('TasksService', () => {
           provide: EventBusService,
           useValue: {
             publish: jest.fn().mockResolvedValue('0-1'),
+            pushSteer: jest.fn().mockResolvedValue(undefined),
           } satisfies Partial<EventBusService>,
         },
       ],
@@ -99,6 +100,34 @@ describe('TasksService', () => {
       await expect(service.getTask('nonexistent', MOCK_ORG_ID)).rejects.toThrow(
         NotFoundException,
       );
+    });
+  });
+
+  // ── steer ─────────────────────────────────────────────────────────────────
+
+  describe('steer', () => {
+    it('pushes a steer message and emits task.steer for a running task', async () => {
+      repo.findByIdOrThrow.mockResolvedValue(makeTask({ status: 'running' }));
+
+      const result = await service.steer(MOCK_TASK_ID, MOCK_ORG_ID, 'enfócate en X');
+
+      expect(result).toEqual({ accepted: true });
+      expect(events.pushSteer).toHaveBeenCalledWith(MOCK_TASK_ID, 'enfócate en X');
+      expect(events.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'task.steer', taskId: MOCK_TASK_ID }),
+      );
+    });
+
+    it('accepts steering while planning', async () => {
+      repo.findByIdOrThrow.mockResolvedValue(makeTask({ status: 'planning' }));
+      await expect(service.steer(MOCK_TASK_ID, MOCK_ORG_ID, 'X')).resolves.toEqual({ accepted: true });
+    });
+
+    it('rejects steering a task that is not actively executing', async () => {
+      repo.findByIdOrThrow.mockResolvedValue(makeTask({ status: 'completed' }));
+
+      await expect(service.steer(MOCK_TASK_ID, MOCK_ORG_ID, 'X')).rejects.toThrow(ConflictException);
+      expect(events.pushSteer).not.toHaveBeenCalled();
     });
   });
 

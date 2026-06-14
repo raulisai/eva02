@@ -154,6 +154,8 @@ const UBER_SIGNALS = /\b(uber|taxi|viajes?|viajar|vieajes?|traslado|transporte)\
 const UBER_ESTIMATE_SIGNALS = /\b(cu[aá]nto|cuanto|costo|costar|cuesta|sale|precio|tarifa|cotiza|cotizar|estimaci[oó]n|estimate|quote)\b/i;
 const UBER_ORDER_SIGNALS = /\b(pedir|p[ií]de(?:me|nos|lo|la)?|solicita(?:me|nos|lo|la)?|solicitar|ordena(?:me|nos|lo|la)?|ordenar|manda(?:me|nos|lo|la)?|mandar|confirma(?:me|lo|la)?|confirmar|reserva(?:me|nos|lo|la)?|reservar)\b/i;
 const UBER_EMAIL_LOGIN_SIGNALS = /\b(inicia[r]?\s+(?:sesi[oó]n|sesion)|log\s*in|iniciar|conectar|vincular)\b.{0,30}\b(uber)\b|\b(uber)\b.{0,30}\b(correo|email|mail)\b/i;
+// Follow-up signals when user responds to a previous Uber result (e.g. "no veo el precio en la captura")
+const UBER_FOLLOW_UP_SIGNALS = /\bno\b.{0,40}\b(veo|aparece|muestra|se\s+ve|encontr[eé])\b|\b(precio|tarifa|cotizaci[oó]n)\b.{0,20}\bno\b|\bno\b.{0,20}\b(precio|tarifa)\b|\b(captura|screenshot)\b/i;
 const CURRENT_LOCATION_QUESTION_SIGNALS = /\b(d[oó]nde\s+(?:me\s+)?(?:estoy|encuentro)|(?:sabes?\s+)?cu[aá]l\s+(?:es\s+)?mi\s+(?:ubicaci[oó]n|ub)|ubicaci[oó]n\s+(?:actual|en\s+tiempo\s+real)|mi\s+ubicaci[oó]n\s+(?:actual|en\s+tiempo\s+real)|detecta(?:r)?\s+(?:mi\s+)?ub(?:icaci[oó]n)?|aqu[ií]\s+en\s+este\s+momento)\b|\bmi\s+ubicaci[oó]n\s*\?/i;
 const RAPPI_SIGNALS = /\b(rappi)\b/i;
 const RAPPI_EMAIL_LOGIN_SIGNALS = /\b(inicia[r]?\s+(?:sesi[oó]n|sesion)|log\s*in|iniciar|conectar|vincular)\b.{0,30}\b(rappi)\b|\b(rappi)\b.{0,30}\b(correo|email|mail)\b/i;
@@ -548,7 +550,14 @@ export class AgentRunnerService implements OnApplicationBootstrap {
         name: 'uber-quote',
         priority: 75,
         risk: 'medium',
-        matches: (ctx) => this.isUberBrowserQuoteRequest(ctx.input, ctx.orgId, ctx.conversationContext, ctx.taskId),
+        matches: async (ctx) => {
+          if (await this.isUberBrowserQuoteRequest(ctx.input, ctx.orgId, ctx.conversationContext, ctx.taskId)) return true;
+          // Follow-up: user responding to a previous Uber result without repeating "uber" keyword
+          if (this.isUberFollowUp(ctx.input, ctx.conversationContext)) return true;
+          // Active Uber session + explicit retry signal
+          return this.checkActiveToolContext(ctx.orgId, ctx.task.created_by, 'uber')
+            && RETRY_INTENT_RE.test(ctx.input);
+        },
         handler: async (ctx) => {
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
@@ -1564,6 +1573,13 @@ Responde directamente al usuario en español, con un tono amable y natural.
     if (result.ok) {
       this.digester.digestAsync({ orgId, taskId, userInput: input, evaReply: result.text, conversationContext });
     }
+  }
+
+  private isUberFollowUp(input: string, conversationContext: ConversationContextTurn[]): boolean {
+    const lastReply = [...conversationContext].reverse().find(t => t.role === 'assistant')?.text ?? '';
+    if (!/\buber\b/i.test(lastReply)) return false;
+    return UBER_FOLLOW_UP_SIGNALS.test(input)
+      || RETRY_INTENT_RE.test(input);
   }
 
   private async isUberBrowserQuoteRequest(input: string, orgId: string, context: ConversationContextTurn[] = [], taskId?: string): Promise<boolean> {

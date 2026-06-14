@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException } from '@nestjs/common';
 import { TasksRepository } from './tasks.repository';
 import { EventBusService } from '../events/event-bus.service';
 import { Task, TaskStatus, isValidTransition } from './task.types';
@@ -26,6 +26,31 @@ export class TasksService {
 
   async getTask(taskId: string, orgId: string): Promise<Task> {
     return this.repo.findByIdOrThrow(taskId, orgId);
+  }
+
+  /**
+   * Inject a live steer message into a running task. The agent loop drains it at
+   * the start of its next step (mid-loop intervention — no restart). Only valid
+   * while the task is actively executing.
+   */
+  async steer(taskId: string, orgId: string, message: string): Promise<{ accepted: true }> {
+    const task = await this.repo.findByIdOrThrow(taskId, orgId);
+
+    if (task.status !== 'running' && task.status !== 'planning') {
+      throw new ConflictException(
+        `Cannot steer a task in '${task.status}' — only running/planning tasks accept live steering`,
+      );
+    }
+
+    await this.events.pushSteer(taskId, message);
+    await this.events.publish({
+      type: 'task.steer',
+      orgId,
+      taskId,
+      payload: { taskId, message },
+    });
+
+    return { accepted: true };
   }
 
   async findStuck(opts: { pendingOlderThanMs: number; runningOlderThanMs: number }): Promise<Task[]> {

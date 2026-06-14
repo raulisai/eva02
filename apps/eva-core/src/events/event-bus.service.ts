@@ -18,6 +18,8 @@ export type EvaEventType =
   | 'task.media'    // media attachment uploaded to storage (image/audio)
   | 'task.form_request'    // server-driven form request for missing information
   | 'task.setup_required' // capability gate: integration not configured, setup instructions sent
+  | 'task.steer'          // user injected a live steer message into a running task
+  | 'task.steer_applied'  // the loop drained and applied a steer message mid-run
   | 'approval.requested'
   | 'approval.resolved'
   | 'dev.task.created'
@@ -119,6 +121,53 @@ export class EventBusService implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error(`Failed to publish ${event.type}`, err);
       return null;
+    }
+  }
+
+  /**
+   * Steer queue — transient, per-task Redis list of live user messages injected
+   * into a RUNNING task. Drained by the agent loop at the start of each step so
+   * the user can redirect a long task without cancelling and restarting.
+   *
+   * Ephemeral by design: a 6h TTL covers the longest run; no DB persistence
+   * (steer is a signal, not durable state). No Redis → no-op / empty.
+   */
+  private steerKey(taskId: string): string {
+    return `eva:steer:${taskId}`;
+  }
+
+  async pushSteer(taskId: string, message: string): Promise<void> {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    if (!this.publisher) {
+      this.logger.warn('pushSteer skipped — Redis unavailable');
+      return;
+    }
+    try {
+      const key = this.steerKey(taskId);
+      await this.publisher.lpush(key, trimmed);
+      await this.publisher.expire(key, 6 * 60 * 60);
+    } catch (err) {
+      this.logger.error(`Failed to push steer for task ${taskId}`, err);
+    }
+  }
+
+  /** Atomically read + clear the steer queue, returning messages in chronological order. */
+  async drainSteer(taskId: string): Promise<string[]> {
+    if (!this.publisher) return [];
+    try {
+      const key = this.steerKey(taskId);
+      const [[, range]] = (await this.publisher
+        .multi()
+        .lrange(key, 0, -1)
+        .del(key)
+        .exec()) as Array<[Error | null, unknown]>;
+      const messages = (range as string[] | null) ?? [];
+      // LPUSH prepends, so the list is newest-first — reverse for chronological order.
+      return messages.reverse();
+    } catch (err) {
+      this.logger.error(`Failed to drain steer for task ${taskId}`, err);
+      return [];
     }
   }
 

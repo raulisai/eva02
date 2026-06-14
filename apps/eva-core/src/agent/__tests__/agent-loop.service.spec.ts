@@ -20,6 +20,7 @@ import { UberWebService } from '../../integrations/uber-web.service';
 import { RappiWebService } from '../../integrations/rappi-web.service';
 import { ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
 import { SkillDocsService } from '../skill-docs.service';
+import { EventBusService } from '../../events/event-bus.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -98,6 +99,7 @@ describe('AgentLoopService', () => {
   let rappi: jest.Mocked<RappiWebService>;
   let scheduledJobs: jest.Mocked<ScheduledJobsService>;
   let database: { admin: { from: jest.Mock } };
+  let events: jest.Mocked<EventBusService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -257,6 +259,14 @@ describe('AgentLoopService', () => {
             delete: jest.fn().mockResolvedValue(undefined),
           },
         },
+        {
+          provide: EventBusService,
+          useValue: {
+            drainSteer: jest.fn().mockResolvedValue([]),
+            pushSteer: jest.fn().mockResolvedValue(undefined),
+            publish: jest.fn().mockResolvedValue(null),
+          },
+        },
       ],
     }).compile();
 
@@ -277,6 +287,7 @@ describe('AgentLoopService', () => {
     rappi = module.get(RappiWebService);
     scheduledJobs = module.get(ScheduledJobsService);
     database = module.get(DatabaseService);
+    events = module.get(EventBusService);
   });
 
   it('returns the final answer when the model answers directly', async () => {
@@ -351,6 +362,38 @@ describe('AgentLoopService', () => {
         expect.objectContaining({ budget: 'balanced', reason: 'tool_error' }),
       ],
     }));
+  });
+
+  it('drains a mid-loop steer message, injects it as a user_steer step, and bumps the budget', async () => {
+    // Step 0 drain → none; step 1 drain → live user redirection.
+    events.drainSteer
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(['enfócate solo en el clima de hoy']);
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"buscar","tool":"web_search","args":{"query":"clima CDMX"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"cierro","tool":"final_answer","args":{"text":"Hace 22°C."}}'));
+
+    const result = await service.run(ORG, TASK, 'dime el clima');
+    await new Promise((r) => setImmediate(r));
+
+    const steerStep = result.steps.find((s) => s.tool === 'user_steer');
+    expect(steerStep).toBeDefined();
+    expect(steerStep!.args.message).toBe('enfócate solo en el clima de hoy');
+    // The decide call after the steer runs one rung stronger (cheap → balanced).
+    expect(modelRouter.generate.mock.calls[1][1]!.budget).toBe('balanced');
+    expect(events.publish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'task.steer_applied' }),
+    );
+    expect(result.text).toBe('Hace 22°C.');
+  });
+
+  it('does not inject any user_steer step when the steer queue is empty', async () => {
+    modelRouter.generate.mockResolvedValueOnce(modelReply('{"thought":"ok","tool":"final_answer","args":{"text":"listo"}}'));
+
+    const result = await service.run(ORG, TASK, 'objetivo');
+
+    expect(events.drainSteer).toHaveBeenCalled();
+    expect(result.steps.some((s) => s.tool === 'user_steer')).toBe(false);
   });
 
   it('executes multiple native read-only tool calls concurrently in one loop cycle', async () => {

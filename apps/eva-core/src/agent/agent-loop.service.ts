@@ -88,6 +88,11 @@ export interface AgentLoopOptions {
 
 type ToolExecutor = (orgId: string, taskId: string, args: Record<string, unknown>) => Promise<string>;
 type AgentDecision = { thought: string; tool: string; args: Record<string, unknown> };
+
+/** Result of the definition-of-done gate for a final_answer candidate. */
+type FinalEvaluation =
+  | { accept: true; text: string }
+  | { accept: false; event: 'dod_rejection' | 'security_review'; observation: string; logDetail?: string };
 type DeliveryRequirementKind = 'pdf_file' | 'telegram_file';
 
 interface DeliveryRequirement {
@@ -344,6 +349,13 @@ export class AgentLoopService {
         throw new TaskCancelledError();
       }
 
+      // Mid-loop steer — drain live user redirections injected via POST /tasks/:id/steer.
+      const steered = await this.applyPendingSteer(orgId, taskId, depth, steps, log);
+      if (steered) {
+        budgetState = escalateOnEvent(budgetState, 'user_steer');
+        this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
+      }
+
       if (depth === 0 && this.intelligence) {
         const capMessage = await this.intelligence.enforceTokenCap(orgId, taskId, tokensUsed).catch(() => null);
         if (capMessage) {
@@ -433,39 +445,25 @@ export class AgentLoopService {
           continue;
         }
 
-        const dodViolation = dodRejections < MAX_DOD_REJECTIONS && depth === 0
-          ? await this.validateFinalAnswer(text, steps, dodCriteria, orgId, taskId, deliveryRequirements)
-          : null;
+        const evaluation = await this.evaluateFinalCandidate(
+          orgId, taskId, goal, text, steps, dodCriteria, deliveryRequirements, depth, dodRejections,
+        );
 
-        if (dodViolation) {
-          dodRejections += 1;
-          budgetState = escalateOnEvent(budgetState, 'dod_rejection');
-          await log(`agent-loop: DoD rechazó final_answer (${dodRejections}/${MAX_DOD_REJECTIONS}): ${dodViolation.slice(0, 80)}`, 'loop');
+        if (!evaluation.accept) {
+          if (evaluation.event === 'dod_rejection') {
+            dodRejections += 1;
+            await log(`agent-loop: DoD rechazó final_answer (${dodRejections}/${MAX_DOD_REJECTIONS}): ${(evaluation.logDetail ?? '').slice(0, 80)}`, 'loop');
+          }
+          budgetState = escalateOnEvent(budgetState, evaluation.event);
           steps.push({
             tool: decision.tool, args: decision.args, thought: decision.thought,
-            observation: `VERIFICACIÓN FALLIDA: ${dodViolation} Corrige el problema antes de declarar éxito.`,
+            observation: evaluation.observation,
           });
           this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
           continue;
         }
 
-        let securityCheckedText = text;
-        if (depth === 0 && this.intelligence) {
-          const review = await this.intelligence.securityReview(orgId, taskId, goal, steps, text).catch(() => ({ ok: true, text }));
-          if (!review.ok) {
-            steps.push({
-              tool: decision.tool,
-              args: decision.args,
-              thought: decision.thought,
-              observation: `VERIFICACIÓN DE SEGURIDAD FALLIDA: ${review.text}`,
-            });
-            budgetState = escalateOnEvent(budgetState, 'security_review');
-            this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
-            continue;
-          }
-          securityCheckedText = review.text;
-        }
-
+        const securityCheckedText = evaluation.text;
         await log(`agent-loop: final_answer en paso ${i + 1} (${tokensUsed} tokens de razonamiento)`, 'loop');
         const refinedText = depth === 0 ? await this.refineAndValidateResponse(orgId, taskId, goal, securityCheckedText) : securityCheckedText;
         this.recordSkillOutcome(orgId, taskId, goal, extras.skills, steps, true, refinedText);
@@ -557,13 +555,9 @@ export class AgentLoopService {
               });
             }
             try {
-              const rateLimit = depth === 0 && this.intelligence ? await this.intelligence.enforceToolRateLimit(orgId, tool.name) : null;
-              if (rateLimit) return { tool, decision: d, observation: `ERROR: ${rateLimit}` };
-              const policyError = this.validateRuntimePolicy(tool.name, steps, deliveryRequirements);
-              if (policyError) return { tool, decision: d, observation: policyError };
-              const validationError = this.validateToolArgs(tool, d.args);
-              if (validationError) return { tool, decision: d, observation: validationError };
-              
+              const guardError = await this.toolGuards(orgId, tool, d.args, steps, depth, deliveryRequirements);
+              if (guardError) return { tool, decision: d, observation: guardError };
+
               let observation: string;
               if (tool.name === 'delegate') {
                 observation = await this.runDelegate(orgId, taskId, d.args, depth, opts, log, steps);
@@ -610,15 +604,9 @@ export class AgentLoopService {
 
       let observation: string;
       try {
-        const rateLimit = depth === 0 && this.intelligence ? await this.intelligence.enforceToolRateLimit(orgId, spec.name) : null;
-        const policyError = this.validateRuntimePolicy(spec.name, steps, deliveryRequirements);
-        const validationError = this.validateToolArgs(spec, decision.args);
-        if (rateLimit) {
-          observation = `ERROR: ${rateLimit}`;
-        } else if (policyError) {
-          observation = policyError;
-        } else if (validationError) {
-          observation = validationError;
+        const guardError = await this.toolGuards(orgId, spec, decision.args, steps, depth, deliveryRequirements);
+        if (guardError) {
+          observation = guardError;
         } else
         if (spec.name === 'delegate') {
           observation = await this.runDelegate(orgId, taskId, decision.args, depth, opts, log, steps);
@@ -1211,6 +1199,71 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
       'ERROR: presupuesto de investigación web agotado para esta tarea con entregables.',
       'Ya hiciste 2 búsquedas. Deja de buscar, consolida los hallazgos existentes y usa code_execute para crear/verificar el archivo pendiente; después usa la herramienta de entrega solicitada.',
     ].join(' ');
+  }
+
+  /**
+   * Pre-execution guards shared by the sequential and parallel dispatch paths:
+   * rate-limit → runtime policy → arg validation. Returns the error observation
+   * to short-circuit with, or null when the tool is cleared to run. Keeping this
+   * in one place avoids the two call sites drifting apart.
+   */
+  private async toolGuards(
+    orgId: string,
+    spec: ToolSpec,
+    args: Record<string, unknown>,
+    steps: AgentLoopStep[],
+    depth: number,
+    deliveryRequirements: DeliveryRequirement[],
+  ): Promise<string | null> {
+    const rateLimit = depth === 0 && this.intelligence
+      ? await this.intelligence.enforceToolRateLimit(orgId, spec.name)
+      : null;
+    if (rateLimit) return `ERROR: ${rateLimit}`;
+    const policyError = this.validateRuntimePolicy(spec.name, steps, deliveryRequirements);
+    if (policyError) return policyError;
+    return this.validateToolArgs(spec, args);
+  }
+
+  /**
+   * Definition-of-done gate for a non-empty `final_answer` candidate: DoD
+   * verification first, then security review. Pure validation — no trajectory
+   * I/O or budget mutation (the caller applies those), so it is unit-testable in
+   * isolation. `text` may be transformed by the security review on accept.
+   */
+  private async evaluateFinalCandidate(
+    orgId: string,
+    taskId: string,
+    goal: string,
+    text: string,
+    steps: AgentLoopStep[],
+    dodCriteria: string[],
+    deliveryRequirements: DeliveryRequirement[],
+    depth: number,
+    dodRejections: number,
+  ): Promise<FinalEvaluation> {
+    const dodViolation = dodRejections < MAX_DOD_REJECTIONS && depth === 0
+      ? await this.validateFinalAnswer(text, steps, dodCriteria, orgId, taskId, deliveryRequirements)
+      : null;
+    if (dodViolation) {
+      return {
+        accept: false,
+        event: 'dod_rejection',
+        observation: `VERIFICACIÓN FALLIDA: ${dodViolation} Corrige el problema antes de declarar éxito.`,
+        logDetail: dodViolation,
+      };
+    }
+    if (depth === 0 && this.intelligence) {
+      const review = await this.intelligence.securityReview(orgId, taskId, goal, steps, text).catch(() => ({ ok: true, text }));
+      if (!review.ok) {
+        return {
+          accept: false,
+          event: 'security_review',
+          observation: `VERIFICACIÓN DE SEGURIDAD FALLIDA: ${review.text}`,
+        };
+      }
+      return { accept: true, text: review.text };
+    }
+    return { accept: true, text };
   }
 
   private isBrittleRawPdfSkill(code: string): boolean {
@@ -2993,6 +3046,41 @@ Analiza la captura de pantalla de WhatsApp Web provista para complementar la lis
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Mid-loop steer — drains any live user messages pushed to a running task and
+   * injects each as a synthetic `user_steer` step so the next decide() sees it in
+   * history (no restart). Returns true if any were applied, so the caller can bump
+   * the model budget one rung (a live redirection deserves a stronger reasoning step).
+   * Root-only (depth 0); no-op without the event bus.
+   */
+  private async applyPendingSteer(
+    orgId: string,
+    taskId: string,
+    depth: number,
+    steps: AgentLoopStep[],
+    log: (m: string, s: string) => Promise<unknown>,
+  ): Promise<boolean> {
+    if (depth > 0 || !this.events) return false;
+    const messages = await this.events.drainSteer(taskId).catch(() => [] as string[]);
+    if (messages.length === 0) return false;
+    for (const message of messages) {
+      steps.push({
+        tool: 'user_steer',
+        args: { message },
+        thought: 'intervención del usuario',
+        observation: `MENSAJE DEL USUARIO (en vivo): ${message}\nAjusta el plan si corresponde; no reinicies lo ya hecho.`,
+      });
+      await log(`agent-loop: steer del usuario aplicado — "${message.slice(0, 120)}"`, 'loop');
+    }
+    await this.events.publish({
+      type: 'task.steer_applied',
+      orgId,
+      taskId,
+      payload: { taskId, count: messages.length, messages },
+    }).catch(() => undefined);
+    return true;
   }
 
   private async latestInputAnswerContext(orgId: string, taskId: string): Promise<string | null> {

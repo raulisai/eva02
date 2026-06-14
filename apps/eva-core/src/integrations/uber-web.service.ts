@@ -183,6 +183,7 @@ export class UberWebService {
     }, orgId);
 
     await this.browser.wait(opened.id, orgId, this.settleMs());
+    await this.dismissConsentBanner(opened.id, orgId);
     let signals = await this.inspectAfterSettled(opened.id, orgId);
     const routeEntry = await this.maybeEnterRouteOnVisibleForm(
       opened.id,
@@ -193,7 +194,7 @@ export class UberWebService {
       input.taskId,
     );
     if (routeEntry) {
-      signals = await this.inspectAfterSettled(opened.id, orgId);
+      signals = await this.inspectAfterRouteEntry(opened.id, orgId);
     }
     const screenshot = await this.browser.screenshot(opened.id, orgId);
     await this.persistSessionCheck(opened.id, orgId, signals, screenshot, {
@@ -682,10 +683,36 @@ export class UberWebService {
     return url.toString();
   }
 
+  private async dismissConsentBanner(sessionId: string, orgId: string): Promise<void> {
+    await this.clickFirst(sessionId, orgId, [
+      '#onetrust-accept-btn-handler',
+      'button:has-text("Accept")',
+      'button:has-text("Accept All")',
+      'button:has-text("Accept Cookies")',
+      'button:has-text("Aceptar")',
+      'button:has-text("Aceptar todo")',
+      '[data-testid="cookie-accept"]',
+      '[aria-label*="accept cookies" i]',
+    ], 1500);
+  }
+
   private async inspectAfterSettled(sessionId: string, orgId: string): Promise<UberPageSignals> {
     let signals = await this.inspectPage(sessionId, orgId);
-    for (let attempt = 0; attempt < 2 && signals.state === 'loading'; attempt += 1) {
+    for (let attempt = 0; attempt < 3 && signals.state === 'loading'; attempt += 1) {
       await this.browser.wait(sessionId, orgId, 2000);
+      signals = await this.inspectPage(sessionId, orgId);
+    }
+    return signals;
+  }
+
+  // After filling the route form and clicking "See prices", wait patiently for prices to appear.
+  // Retries up to ~12 seconds — the page navigation + rendering takes 2-5s on Uber.
+  private async inspectAfterRouteEntry(sessionId: string, orgId: string): Promise<UberPageSignals> {
+    const maxAttempts = 5;
+    let signals = await this.inspectPage(sessionId, orgId);
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (signals.quoteCandidates.length > 0 || signals.state === 'login_required') break;
+      await this.browser.wait(sessionId, orgId, 2500);
       signals = await this.inspectPage(sessionId, orgId);
     }
     return signals;
@@ -761,13 +788,16 @@ export class UberWebService {
     }
 
     await this.browser.wait(sessionId, orgId, 1000);
+    // Dismiss cookie banner again in case it appeared after form interaction
+    await this.dismissConsentBanner(sessionId, orgId);
+    // Put <button> selectors first — www.uber.com uses <button>, m.uber.com uses <a>
     await this.clickFirst(sessionId, orgId, [
-      'a[aria-label="See prices"]',
-      'a[data-baseweb="button"][href*="/looking"]',
-      'a:has-text("See prices")',
-      'xpath=//*[@id="main"]/div[3]/div/section/div/div/div/div/div/div/div[2]/a',
       'button:has-text("See prices")',
       'button:has-text("Ver precios")',
+      'a[aria-label="See prices"]',
+      'a:has-text("See prices")',
+      'a[data-baseweb="button"][href*="/looking"]',
+      'xpath=//*[@id="main"]/div[3]/div/section/div/div/div/div/div/div/div[2]/a',
       'button:has-text("Buscar")',
       'button:has-text("Search")',
       'button:has-text("Done")',
@@ -778,7 +808,9 @@ export class UberWebService {
       'button:has-text("Confirmar recogida")',
       'button:has-text("Set pickup")',
       'button:has-text("Establecer recogida")',
-    ], 1200);
+    ], 800);
+    // Wait for page navigation after clicking "See prices" (Uber takes 2-5s to load results)
+    await this.browser.wait(sessionId, orgId, 3000);
 
     return true;
   }
@@ -1006,9 +1038,19 @@ export class UberWebService {
 
         const pricePattern = /\b(?:(?:MX\$|M\$|\$)\s?\d[\d,.]*|(?:USD|MXN)\s?\d[\d,.]*|\d[\d,.]*\s?(?:MXN|USD))(?:\s?[-–]\s?(?:(?:MX\$|M\$|\$)?\s?\d[\d,.]*|\d[\d,.]*\s?(?:MXN|USD)))?\b/i;
         const productPattern = /\b(uberx|comfort|black|xl|moto|flash|taxi|priority|planet|green|share|reserve|uber)\b/i;
+        // Reject promotional/marketing text that happens to contain a price (credits, discounts, app download promos)
+        const promoGuard = /\b(?:download|descargar|app\s+store|google\s+play|primera?\s+(?:vez|carrera|viaje|trip)|first\s+trip|cr[eé]dito|off\s+(?:your\s+)?first|\d+%\s+off|descuento|promo|gift|regalo|bonus|bienvenida|reward|recompensa|invite)\b/i;
         const quoteCandidates = uniqueLines
           .map((line, index) => ({ line, index }))
           .filter(({ line }) => pricePattern.test(line))
+          .filter(({ index }) => {
+            const windowLines = uniqueLines.slice(Math.max(0, index - 3), index + 4);
+            const windowText = windowLines.join(' ');
+            // Must have a product name nearby (real quotes always show UberX, Comfort, etc.)
+            if (!productPattern.test(windowText)) return false;
+            // Reject if promotional context detected in surrounding lines
+            return !promoGuard.test(windowText);
+          })
           .slice(0, 8)
           .map(({ line, index }) => {
             const windowLines = uniqueLines.slice(Math.max(0, index - 3), index + 4);
