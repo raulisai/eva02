@@ -471,7 +471,8 @@ export class AgentLoopService {
         this.recordTrajectory(orgId, taskId, goal, steps, 'ok', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         // Background learning loop — fires async, never blocks the response
         if (depth === 0) {
-          this.backgroundReview?.scheduleReview({ orgId, taskId, goal, steps, finalText: refinedText });
+          const nudge = steps.some((s) => s.tool === 'user_steer');
+          this.backgroundReview?.scheduleReview({ orgId, taskId, goal, steps, finalText: refinedText, nudge });
         }
         return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
       }
@@ -693,7 +694,8 @@ export class AgentLoopService {
       this.maybeMemorizeSolution(orgId, taskId, goal, steps, depth);
       this.recordTrajectory(orgId, taskId, goal, steps, 'ok', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
       if (depth === 0) {
-        this.backgroundReview?.scheduleReview({ orgId, taskId, goal, steps, finalText: refinedText });
+        const nudge = steps.some((s) => s.tool === 'user_steer');
+        this.backgroundReview?.scheduleReview({ orgId, taskId, goal, steps, finalText: refinedText, nudge });
       }
       return { ok: true, text: refinedText, steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
     } catch (error) {

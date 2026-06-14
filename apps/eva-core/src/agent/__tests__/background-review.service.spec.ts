@@ -141,4 +141,77 @@ describe('BackgroundReviewService', () => {
     service.scheduleReview({ ...input, steps: [step('terminal', 'ERROR: boom')] });
     expect(spy).not.toHaveBeenCalled();
   });
+
+  // ── nudge counter gating ──────────────────────────────────────────────────
+
+  describe('nudge counter gating', () => {
+    let runReviewSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      runReviewSpy = jest
+        .spyOn(service as unknown as { runReview: (i: ReviewInput) => Promise<void> }, 'runReview')
+        .mockResolvedValue(undefined);
+    });
+
+    it('defers review for the first 4 completions (below REVIEW_INTERVAL=5)', () => {
+      for (let i = 0; i < 4; i++) {
+        service.scheduleReview(input);
+      }
+      expect(runReviewSpy).not.toHaveBeenCalled();
+    });
+
+    it('fires on the 5th completion and resets the counter', () => {
+      for (let i = 0; i < 5; i++) {
+        service.scheduleReview(input);
+      }
+      expect(runReviewSpy).toHaveBeenCalledTimes(1);
+
+      // Counter reset — next 4 should defer again
+      for (let i = 0; i < 4; i++) {
+        service.scheduleReview(input);
+      }
+      expect(runReviewSpy).toHaveBeenCalledTimes(1);
+
+      // 5th again fires
+      service.scheduleReview(input);
+      expect(runReviewSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('nudge=true always fires immediately regardless of counter', () => {
+      // Only 1 completion, but nudge is true (user steer happened)
+      service.scheduleReview({ ...input, nudge: true });
+      expect(runReviewSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('nudge=true resets the counter so the next interval starts fresh', () => {
+      // Advance counter to 3 (below interval)
+      for (let i = 0; i < 3; i++) {
+        service.scheduleReview(input);
+      }
+      expect(runReviewSpy).not.toHaveBeenCalled();
+
+      // Nudge fires and resets counter to 0
+      service.scheduleReview({ ...input, nudge: true });
+      expect(runReviewSpy).toHaveBeenCalledTimes(1);
+
+      // Counter is now 0 — needs 5 more to fire again (not 2 as it would if not reset)
+      for (let i = 0; i < 4; i++) {
+        service.scheduleReview(input);
+      }
+      expect(runReviewSpy).toHaveBeenCalledTimes(1);
+
+      service.scheduleReview(input);
+      expect(runReviewSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('user_steer steps are excluded from the meaningful-steps count', () => {
+      // Only meaningful step is the user_steer — should not count as meaningful work
+      const steerOnlyInput: ReviewInput = {
+        ...input,
+        steps: [step('user_steer', 'MENSAJE DEL USUARIO: haz X'), step('final_answer', 'ok')],
+      };
+      service.scheduleReview(steerOnlyInput);
+      expect(runReviewSpy).not.toHaveBeenCalled();
+    });
+  });
 });

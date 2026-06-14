@@ -85,6 +85,8 @@ export interface ReviewInput {
   steps: AgentLoopStep[];
   finalText: string;
   userId?: string;
+  /** True when the user injected a live steer correction — always triggers review regardless of interval. */
+  nudge?: boolean;
 }
 
 /** One decision emitted by the skill-review mini-agent. */
@@ -115,9 +117,14 @@ interface SkillReviewDecision {
  *   - Whitelist de acciones: solo skill_manage y memory_save.
  *   - Guarded: no toca skills bundled ni pinned.
  */
+/** Fire background review after this many meaningful completions per org (absent a nudge). */
+const REVIEW_INTERVAL = 5;
+
 @Injectable()
 export class BackgroundReviewService {
   private readonly logger = new Logger(BackgroundReviewService.name);
+  /** Completions since last review, keyed by orgId. Resets to 0 each time review fires. */
+  private readonly completionsSinceReview = new Map<string, number>();
 
   constructor(
     private readonly modelRouter: ModelRouterService,
@@ -142,15 +149,28 @@ export class BackgroundReviewService {
   /**
    * Schedules a background review after task completion.
    * Non-blocking — returns immediately.
-   * Only triggers when the task had meaningful work (≥2 tool steps).
+   * Only triggers when the task had meaningful work (≥2 tool steps) AND either:
+   *   - input.nudge is true (user injected a live steer correction — always worth learning from), OR
+   *   - completionsSinceReview for this org has reached REVIEW_INTERVAL.
    */
   scheduleReview(input: ReviewInput): void {
     const meaningfulSteps = input.steps.filter(
-      (s) => s.tool !== 'final_answer' && !s.observation.startsWith('ERROR:'),
+      (s) => s.tool !== 'final_answer' && s.tool !== 'user_steer' && !s.observation.startsWith('ERROR:'),
     ).length;
 
     if (meaningfulSteps < 2) return;
 
+    const prev = this.completionsSinceReview.get(input.orgId) ?? 0;
+    const count = prev + 1;
+    const shouldReview = input.nudge === true || count >= REVIEW_INTERVAL;
+
+    if (!shouldReview) {
+      this.completionsSinceReview.set(input.orgId, count);
+      this.logger.debug(`background-review: deferred (${count}/${REVIEW_INTERVAL}) for org ${input.orgId}`);
+      return;
+    }
+
+    this.completionsSinceReview.set(input.orgId, 0);
     // Fire and forget — no await
     void this.runReview(input).catch((err) => {
       this.logger.warn(`background-review failed (task ${input.taskId}): ${(err as Error).message}`);
