@@ -42,6 +42,7 @@ import {
   RequestLocationContext,
   RequestLocationStatus,
 } from '../common/request-context';
+import { classifyDevMode, buildHandshakeMessage } from '../dev-studio/dev-mode-classifier';
 
 // Self-info: user asks about their OWN data — declared early so ACK_RULES can reference it.
 const SELF_INFO_SIGNALS = /\b(mi\s+(nombre|edad|direcci[oó]n|domicilio|casa|trabajo|empresa|oficina|horario|gustos?|hobbies?|perfil|ubicaci[oó]n|tel[eé]fono|peso|altura|estatura|informaci[oó]n|datos?|lugar(?:es)?|sitios?)|mis\s+(datos?|gustos?|hobbies?|lugares?|sitios?|preferencias?|relaciones?|alergias?|d[ií]as?|horarios?)|d[oó]nde\s+(vivo|trabajo|est[eé]|queda\s+mi|viv[ií]s|trabajas?)|cu[aá]ntos?\s+a[nñ]os\s+(tengo|tienes?|tiene?)|(?:sabes?|recuerdas?|tienes?)\s+(?:mi\s+)?(?:nombre|edad|direcci[oó]n|gustos?|hobbies?|trabajo|casa)|mis\s+datos\s+personales|mi\s+perfil)\b/i;
@@ -657,6 +658,83 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
           await this.answerCurrentRequestLocation(ctx);
+          return true;
+        },
+      },
+      // ── Dev Studio gate ────────────────────────────────────────────────────
+      // Intercepts tasks that are (a) a continuation of a dev_session (tagged in
+      // task.metadata) or (b) a new project-intent detected by DevModeClassifier.
+      // Priority 58 beats chat-tier (55) so a "ok confirmo" reply to a dev-studio
+      // handshake is routed here before being swallowed as small talk.
+      {
+        name: 'dev-studio',
+        priority: 58,
+        risk: 'low',
+        matches: (ctx) => {
+          // Continuation: task was created from Dev Studio UI (has session_id in metadata)
+          const meta = (ctx.task.metadata ?? {}) as Record<string, unknown>;
+          if (meta.dev_session_id || meta.dev_studio) return true;
+          // New project intent — only classify if not already clearly a chat
+          if (ctx.tier.tier === 'chat' && ctx.input.length < 80) return false;
+          const classification = classifyDevMode(ctx.input);
+          return classification.isDevProject && classification.confidence >= 0.75;
+        },
+        handler: async (ctx) => {
+          const meta = (ctx.task.metadata ?? {}) as Record<string, unknown>;
+
+          // ── Continuation: session already exists ────────────────────────
+          if (meta.dev_session_id) {
+            // This task was dispatched by the orchestrator — run the agent loop
+            // with the role context already embedded in the task input.
+            const loopHandled = await this.runAgentLoop(
+              ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext,
+              ctx.startedAt, ctx.task.created_by, ctx.soulContext, ctx.requestLocationBlock,
+            );
+            if (loopHandled) return true;
+          }
+
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'planning');
+          await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
+
+          // ── Explicit trigger: skip handshake ────────────────────────────
+          const classification = classifyDevMode(ctx.input);
+          if (!classification.requiresHandshake) {
+            // Create dev session and fire orchestration via event
+            const title = classification.extractedTitle ?? ctx.input.slice(0, 80);
+            const { data: sessionRow } = await this.db.admin
+              .from('dev_sessions')
+              .insert({
+                org_id: ctx.orgId,
+                user_id: ctx.task.created_by,
+                title,
+                original_prompt: ctx.input,
+                status: 'idea_intake',
+              })
+              .select()
+              .single();
+
+            if (sessionRow) {
+              const sessionId = (sessionRow as { id: string }).id;
+              // Fire start event so orchestrator picks it up
+              await this.events.publish({
+                type: 'dev.session.created' as any,
+                orgId: ctx.orgId,
+                payload: { sessionId, title, autoStart: true },
+              });
+              const reply =
+                `🚀 **Dev Studio activado** — Sesión creada: _"${title}"_\n\n` +
+                `Estoy generando la North Star y los goals del proyecto. Puedes seguir el progreso en la sección **Dev Studio** del dashboard.\n\n` +
+                `*Session ID: \`${sessionId}\`*`;
+              await this.deliver(ctx.orgId, ctx.taskId, reply, 'dev-studio-gate', Date.now() - ctx.startedAt);
+            } else {
+              await this.deliver(ctx.orgId, ctx.taskId, 'No pude crear la sesión de Dev Studio. Inténtalo desde el dashboard.', 'dev-studio-gate', 0);
+            }
+            return true;
+          }
+
+          // ── Needs handshake confirmation ────────────────────────────────
+          const handshake = buildHandshakeMessage(ctx.input);
+          await this.deliver(ctx.orgId, ctx.taskId, handshake, 'dev-studio-gate', Date.now() - ctx.startedAt);
           return true;
         },
       },

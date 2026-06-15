@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   ListTodo, Server, Zap, FileText, ShieldCheck, LogOut, Terminal,
-  FlaskConical, Puzzle, Plug, Package, Sparkles, KeyRound, MessageSquare, Fingerprint, Clock, Coins, Sliders, UserRound,
+  FlaskConical, Puzzle, Plug, Package, Sparkles, KeyRound, MessageSquare, Fingerprint, Clock, Coins, Sliders, UserRound, Code2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { createClient } from '@/lib/supabase/client';
@@ -21,6 +21,12 @@ const NAV_GROUPS = [
       { href: '/approvals', label: 'Approvals', icon: ShieldCheck },
       { href: '/jobs',      label: 'Jobs',      icon: Clock },
       { href: '/billing',   label: 'Billing',   icon: Coins },
+    ],
+  },
+  {
+    label: 'Dev Studio',
+    items: [
+      { href: '/dev-studio', label: 'Dev Studio', icon: Code2 },
     ],
   },
   {

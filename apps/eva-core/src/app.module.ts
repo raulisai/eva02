@@ -20,6 +20,7 @@ import { CommunicationModule } from './communication/communication.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { AgentModule } from './agent/agent.module';
 import { JobsModule } from './jobs/jobs.module';
+import { DevStudioModule } from './dev-studio/dev-studio.module';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { JobsModule } from './jobs/jobs.module';
     ApprovalsModule,
     WearFastPathModule,
     JobsModule,
+    DevStudioModule,
   ],
   providers: [
     {
