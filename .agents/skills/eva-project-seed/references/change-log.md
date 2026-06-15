@@ -2,6 +2,14 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-15 05:44Z
+C: browser-agent: upgraded SmartNavigator with task memory, enriched visual snapshots, failure diagnosis, progress verification, and per-site learning; files=apps/eva-core/src/browser/smart-navigator.service.ts,apps/eva-core/src/browser/__tests__/smart-navigator.service.spec.ts,apps/eva-core/src/agent/tool-catalog.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm test --workspace @eva/core -- src/browser/__tests__/smart-navigator.service.spec.ts --runInBand; npm test --workspace @eva/core -- src/agent/__tests__/agent-loop.service.spec.ts --runInBand; npm run build --workspace @eva/core; eslint changed core files
+P: pending/improve -> run live Smart Browser smoke on WhatsApp/Uber to verify browser_memory and browser:site learnings against real UI changes
+
+### 2026-06-15 05:34Z
+C: analysis/browser: assessed SmartNavigator gaps vs Comet-style session memory, visual fallback, error diagnosis, and self-improving selectors; files=apps/eva-core/src/browser/smart-navigator.service.ts,apps/eva-core/src/agent/tool-catalog.ts,apps/eva-core/src/agent/agent-loop.service.ts; tests=n/a analysis only
+P: pending/improve -> implement browser navigation memory/checkpoints and visual-diagnosis fallback after failed actions or empty DOM
+
 ### 2026-06-15 05:19Z
 C: agent/browser: exposed SmartNavigator as browser_navigate, added WhatsApp visual unanswered analysis, and blocked generic private-app capability refusals; files=apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/tool-catalog.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm test --workspace @eva/core -- src/agent/__tests__/agent-loop.service.spec.ts --runInBand; npm test --workspace @eva/core -- src/browser/__tests__/smart-navigator.service.spec.ts --runInBand; npm run build --workspace @eva/core
 P: pending/improve -> run a live WhatsApp Web visual smoke with a logged-in profile to verify unread color/badge and last-message-direction inference on real UI

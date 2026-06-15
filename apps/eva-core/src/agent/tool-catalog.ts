@@ -554,7 +554,7 @@ export function buildToolCatalog(deps: ToolCatalogDeps): ToolSpec[] {
     },
     {
       name: 'browser_navigate',
-      usage: 'browser_navigate{"session_id","goal","max_steps"?}: navega una sesión de navegador ya abierta con ciclo visual observar→decidir→click/type/wait; usa DOM + captura de pantalla en cada paso.',
+      usage: 'browser_navigate{"session_id","goal","max_steps"?}: navega una sesión de navegador ya abierta con memoria, diagnóstico visual, verificación de progreso y aprendizaje por sitio; usa DOM + captura en cada paso.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -593,6 +593,10 @@ export function buildToolCatalog(deps: ToolCatalogDeps): ToolSpec[] {
           result.ok ? '✅ Navegación visual completada.' : `ERROR: navegación visual no completada: ${result.reason}`,
           result.finalUrl ? `URL final: ${result.finalUrl}` : undefined,
           last ? `Último estado: ${last.snapshot.title || '(sin título)'} — ${last.snapshot.url}` : undefined,
+          result.memory ? `Memoria: estado="${result.memory.currentState}", estrategia="${result.memory.nextStrategy}", sin_progreso=${result.memory.noProgressCount}` : undefined,
+          result.memory?.visualFindings?.length ? `Hallazgos visuales: ${result.memory.visualFindings.slice(-5).join('; ')}` : undefined,
+          last?.verification ? `Verificación última acción: ${last.verification.progressed ? 'avanzó' : 'sin progreso'} — ${last.verification.reason}` : undefined,
+          last?.diagnostic ? `Diagnóstico: ${last.diagnostic.failure_reason}; próxima estrategia: ${last.diagnostic.next_strategy}` : undefined,
           trace ? `Pasos recientes:\n${trace}` : undefined,
         ].filter(Boolean).join('\n');
       },

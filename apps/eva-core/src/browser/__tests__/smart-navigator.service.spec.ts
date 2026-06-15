@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BrowserService } from '../browser.service';
 import { ModelRouterService } from '../../model-router/model-router.service';
 import { SmartNavigatorService, PageSnapshot } from '../smart-navigator.service';
+import { DatabaseService } from '../../database/database.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const SESSION = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
@@ -35,8 +36,10 @@ describe('SmartNavigatorService', () => {
     screenshot: jest.Mock;
     clickNow: jest.Mock;
     typeNow: jest.Mock;
+    pressKey: jest.Mock;
   };
   let models: { generate: jest.Mock };
+  let db: { admin: { from: jest.Mock } };
 
   async function build(): Promise<void> {
     const module: TestingModule = await Test.createTestingModule({
@@ -44,6 +47,7 @@ describe('SmartNavigatorService', () => {
         SmartNavigatorService,
         { provide: BrowserService, useValue: browser },
         { provide: ModelRouterService, useValue: models },
+        { provide: DatabaseService, useValue: db },
       ],
     }).compile();
     service = module.get(SmartNavigatorService);
@@ -56,8 +60,32 @@ describe('SmartNavigatorService', () => {
       screenshot: jest.fn().mockResolvedValue({ image_base64: 'mocked-base64' }),
       clickNow: jest.fn().mockRejectedValue(new Error('native click failed')),
       typeNow: jest.fn().mockRejectedValue(new Error('native type failed')),
+      pressKey: jest.fn().mockResolvedValue(undefined),
     };
     models = { generate: jest.fn() };
+    db = {
+      admin: {
+        from: jest.fn().mockImplementation((table: string) => {
+          if (table === 'tasks') {
+            const builder = {
+              select: jest.fn().mockReturnThis(),
+              eq: jest.fn().mockReturnThis(),
+              maybeSingle: jest.fn().mockResolvedValue({ data: { metadata: {} }, error: null }),
+              update: jest.fn().mockReturnThis(),
+            };
+            return builder;
+          }
+          const builder = {
+            select: jest.fn().mockReturnThis(),
+            eq: jest.fn().mockReturnThis(),
+            order: jest.fn().mockReturnThis(),
+            limit: jest.fn().mockResolvedValue({ data: [], error: null }),
+            insert: jest.fn().mockResolvedValue({ error: null }),
+          };
+          return builder;
+        }),
+      },
+    };
   });
 
   it('clicks "continue with email" then reports done — never picking a payment element', async () => {
@@ -154,5 +182,77 @@ describe('SmartNavigatorService', () => {
     // evaluate was only called for perceive, not for the click effect
     const evaluateCalls = browser.evaluate.mock.calls.filter((c) => c[3] !== undefined);
     expect(evaluateCalls).toHaveLength(0);
+  });
+
+  it('diagnoses visually and persists navigation memory when an action makes no progress', async () => {
+    const samePage: PageSnapshot = {
+      url: 'https://web.whatsapp.com/',
+      title: 'WhatsApp',
+      textSample: 'Chats',
+      fingerprint: 'same',
+      visualHints: ['chat list visible'],
+      domHints: ['#0 button "Ana"'],
+      elements: [
+        { idx: 0, kind: 'button', label: 'Ana', value: '', disabled: false, selector: 'button:nth-of-type(1)' },
+      ],
+    };
+    browser.evaluate.mockImplementation(async (_sid: string, _org: string, fn: any, arg?: unknown) => {
+      const fnStr = fn ? fn.toString() : '';
+      if (fnStr.includes('readyState') || fnStr.includes('spinner')) return;
+      if (arg === undefined) return samePage;
+      return true;
+    });
+    browser.clickNow.mockResolvedValue(undefined);
+    models.generate
+      .mockResolvedValueOnce({ text: JSON.stringify({ action: 'click', target: 0, value: null, reason: 'open Ana chat' }), model: 'm', backend: 'google', usage: {} })
+      .mockResolvedValueOnce({
+        text: JSON.stringify({
+          current_state: 'whatsapp_chat_list',
+          visible_findings: ['Ana sigue visible; el click no abrió el chat'],
+          failure_reason: 'no observable progress after click',
+          hypotheses: ['selector may hit a nested inactive node'],
+          next_strategy: 'try pressing Enter or click a different chat row target',
+          suggested_action: { action: 'press', target: null, value: 'Enter', reason: 'activate focused row' },
+          confidence: 0.72,
+        }),
+        model: 'm',
+        backend: 'google',
+        usage: {},
+      });
+
+    await build();
+    const result = await service.navigate(ORG, SESSION, 'open Ana chat', { maxSteps: 1, settleMs: 300, taskId: 'task-1' });
+
+    expect(result.ok).toBe(false);
+    expect(result.steps[0].verification?.progressed).toBe(false);
+    expect(result.steps[0].diagnostic?.current_state).toBe('whatsapp_chat_list');
+    expect(result.memory?.nextStrategy).toContain('pressing Enter');
+    const taskBuilders = db.admin.from.mock.results.map((r) => r.value).filter((builder) => builder.update);
+    expect(taskBuilders.some((builder) => builder.update.mock.calls.some((call: any[]) => (
+      call[0]?.metadata?.browser_memory
+    )))).toBe(true);
+  });
+
+  it('loads and writes site learnings for successful browser actions', async () => {
+    const after: PageSnapshot = { ...emailForm, url: 'https://auth.uber.com/v2/email', fingerprint: 'after' };
+    const before: PageSnapshot = { ...methodChoice, fingerprint: 'before' };
+    const snapshots = [before, after, after];
+    browser.evaluate.mockImplementation(async (_sid: string, _org: string, fn: any, arg?: unknown) => {
+      const fnStr = fn ? fn.toString() : '';
+      if (fnStr.includes('readyState') || fnStr.includes('spinner')) return;
+      if (arg === undefined) return snapshots.shift() ?? after;
+      return true;
+    });
+    browser.clickNow.mockResolvedValue(undefined);
+    models.generate
+      .mockResolvedValueOnce({ text: JSON.stringify({ action: 'click', target: 2, value: null, reason: 'email option' }), model: 'm', backend: 'google', usage: {} })
+      .mockResolvedValueOnce({ text: JSON.stringify({ action: 'done', target: null, value: null, reason: 'email form visible' }), model: 'm', backend: 'google', usage: {} });
+
+    await build();
+    const result = await service.navigate(ORG, SESSION, 'reach the email login form', { maxSteps: 3, settleMs: 300, taskId: 'task-2' });
+
+    expect(result.ok).toBe(true);
+    const dataLogBuilders = db.admin.from.mock.results.map((r) => r.value).filter((builder) => builder.insert);
+    expect(dataLogBuilders.some((builder) => builder.insert.mock.calls.some((call: any[]) => call[0].key === 'browser:site:auth.uber.com'))).toBe(true);
   });
 });
