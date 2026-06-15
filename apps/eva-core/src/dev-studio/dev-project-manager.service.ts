@@ -3,42 +3,76 @@ import { ModelRouterService } from '../model-router/model-router.service';
 import { DevSessionService } from './dev-session.service';
 import { DevSession, DevGoal, DevIteration, AGENT_SYSTEM_PROMPTS, SuccessCriterion } from './dev-studio.types';
 
-/** Extract the first valid JSON object/array from a possibly noisy LLM response. */
+/**
+ * Extract and repair JSON from a potentially noisy / truncated LLM response.
+ * Handles: markdown fences, leading prose, trailing prose, truncated JSON.
+ */
 function extractJson<T>(text: string): T {
-  // Strip markdown code fences
   let s = text.trim()
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```\s*$/, '');
 
-  // Try direct parse first
+  // Try direct parse first (happy path)
   try { return JSON.parse(s) as T; } catch { /* continue */ }
 
-  // Find first { or [ and take from there
-  const start = Math.min(
-    s.indexOf('{') === -1 ? Infinity : s.indexOf('{'),
-    s.indexOf('[') === -1 ? Infinity : s.indexOf('['),
-  );
-  if (start !== Infinity) s = s.slice(start);
+  // Find the start of the first JSON structure
+  const objStart = s.indexOf('{');
+  const arrStart = s.indexOf('[');
+  let start = -1;
+  if (objStart === -1) start = arrStart;
+  else if (arrStart === -1) start = objStart;
+  else start = Math.min(objStart, arrStart);
 
-  // Find matching close bracket by scanning
-  const open = s[0];
-  const close = open === '{' ? '}' : ']';
-  let depth = 0;
-  let end = -1;
+  if (start !== -1) s = s.slice(start);
+
+  // Strip trailing commas before closing brackets (common LLM artifact)
+  s = s.replace(/,(\s*[}\]])/g, '$1');
+  // Try after stripping leading prose
+  try { return JSON.parse(s) as T; } catch { /* continue */ }
+
+  // Repair truncated JSON: track structure depth and open/close containers
+  const opens: string[] = [];
   let inStr = false;
   let escape = false;
+  let strStart = -1;         // index of the opening " of the current string
+  let lastStructIndex = 0;   // last index of a structural character outside strings
+
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
     if (escape) { escape = false; continue; }
     if (ch === '\\' && inStr) { escape = true; continue; }
-    if (ch === '"') { inStr = !inStr; continue; }
-    if (!inStr) {
-      if (ch === open) depth++;
-      else if (ch === close) { depth--; if (depth === 0) { end = i; break; } }
+    if (ch === '"') {
+      if (!inStr) { inStr = true; strStart = i; }
+      else { inStr = false; strStart = -1; lastStructIndex = i; }
+      continue;
     }
+    if (inStr) continue;
+    if (ch === '{') { opens.push('}'); lastStructIndex = i; }
+    else if (ch === '[') { opens.push(']'); lastStructIndex = i; }
+    else if (ch === '}' || ch === ']') { opens.pop(); lastStructIndex = i; }
+    else if (ch === ',' || ch === ':') { lastStructIndex = i; }
   }
-  const candidate = end !== -1 ? s.slice(0, end + 1) : s;
-  return JSON.parse(candidate) as T;
+
+  let candidate: string;
+  if (inStr) {
+    // Truncated inside a string — close the string, then strip the incomplete key or value
+    candidate = s.slice(0, strStart); // drop the unterminated string entirely
+    // Remove trailing `: ` (incomplete value slot) or `, "key": ` (incomplete KV pair)
+    candidate = candidate.replace(/[,]?\s*"[^"]*"\s*:\s*$/, '').trimEnd();
+    candidate = candidate.replace(/[,]?\s*$/, '');
+  } else {
+    candidate = s;
+    // Trim trailing incomplete key-value
+    candidate = candidate.replace(/,\s*"[^"]*"\s*:\s*$/, '').trimEnd();
+    candidate = candidate.replace(/,\s*$/, '');
+  }
+
+  // Close open containers in reverse order
+  candidate += opens.reverse().join('');
+
+  try { return JSON.parse(candidate) as T; } catch (e) {
+    throw new Error(`extractJson failed: ${(e as Error).message}\nInput (first 300): ${text.slice(0, 300)}`);
+  }
 }
 
 interface NorthStarResult {
@@ -142,6 +176,7 @@ export class DevProjectManagerService {
       systemPrompt: NORTH_STAR_SYSTEM,
       responseFormat: 'json',
       temperature: 0.3,
+      maxTokens: 4096,
     });
 
     const parsed = extractJson<NorthStarResult>(result.text);
@@ -194,6 +229,7 @@ Evalúa si el goal está completo.`.trim();
         systemPrompt: EVAL_SYSTEM,
         responseFormat: 'json',
         temperature: 0,
+        maxTokens: 2048,
       });
       parsed = extractJson<GoalEvaluation>(result.text);
     } catch {
@@ -237,6 +273,7 @@ Esto es la iteración #${iterationNumber}. Planea la siguiente ronda de trabajo 
         systemPrompt: ITERATION_SYSTEM,
         responseFormat: 'json',
         temperature: 0.2,
+        maxTokens: 2048,
       });
       const parsed = extractJson<IterationPlan>(result.text);
       if (!parsed.title || !parsed.objective) throw new Error('invalid plan');

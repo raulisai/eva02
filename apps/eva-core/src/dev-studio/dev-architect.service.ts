@@ -5,21 +5,38 @@ import { DevSession, DevGoal, DevIteration, AGENT_SYSTEM_PROMPTS, SuccessCriteri
 function extractJson<T>(text: string): T {
   let s = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
   try { return JSON.parse(s) as T; } catch { /* continue */ }
-  const start = Math.min(
-    s.indexOf('{') === -1 ? Infinity : s.indexOf('{'),
-    s.indexOf('[') === -1 ? Infinity : s.indexOf('['),
-  );
-  if (start !== Infinity) s = s.slice(start);
-  const open = s[0]; const close = open === '{' ? '}' : ']';
-  let depth = 0, end = -1, inStr = false, escape = false;
+
+  const objStart = s.indexOf('{');
+  const arrStart = s.indexOf('[');
+  let start = -1;
+  if (objStart === -1) start = arrStart;
+  else if (arrStart === -1) start = objStart;
+  else start = Math.min(objStart, arrStart);
+  if (start !== -1) s = s.slice(start);
+  s = s.replace(/,(\s*[}\]])/g, '$1');
+  try { return JSON.parse(s) as T; } catch { /* continue */ }
+
+  // Repair truncated JSON
+  const opens: string[] = [];
+  let inStr = false, escape = false, strStart = -1;
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
     if (escape) { escape = false; continue; }
     if (ch === '\\' && inStr) { escape = true; continue; }
-    if (ch === '"') { inStr = !inStr; continue; }
-    if (!inStr) { if (ch === open) depth++; else if (ch === close) { depth--; if (depth === 0) { end = i; break; } } }
+    if (ch === '"') {
+      if (!inStr) { inStr = true; strStart = i; }
+      else { inStr = false; strStart = -1; }
+      continue;
+    }
+    if (inStr) continue;
+    if (ch === '{') opens.push('}');
+    else if (ch === '[') opens.push(']');
+    else if (ch === '}' || ch === ']') opens.pop();
   }
-  return JSON.parse(end !== -1 ? s.slice(0, end + 1) : s) as T;
+  let candidate = inStr ? s.slice(0, strStart) : s;
+  candidate = candidate.replace(/[,]?\s*"[^"]*"\s*:\s*$/, '').trimEnd().replace(/[,]?\s*$/, '');
+  candidate += opens.reverse().join('');
+  return JSON.parse(candidate) as T;
 }
 
 export interface TechnicalTask {
@@ -121,6 +138,7 @@ Genera las tareas técnicas para esta iteración.`.trim();
         systemPrompt: TASK_DERIVATION_SYSTEM,
         responseFormat: 'json',
         temperature: 0.2,
+        maxTokens: 4096,
       });
 
       const parsed = extractJson<ArchitectPlan>(result.text);
