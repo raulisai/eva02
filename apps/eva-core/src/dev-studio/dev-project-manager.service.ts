@@ -3,6 +3,44 @@ import { ModelRouterService } from '../model-router/model-router.service';
 import { DevSessionService } from './dev-session.service';
 import { DevSession, DevGoal, DevIteration, AGENT_SYSTEM_PROMPTS, SuccessCriterion } from './dev-studio.types';
 
+/** Extract the first valid JSON object/array from a possibly noisy LLM response. */
+function extractJson<T>(text: string): T {
+  // Strip markdown code fences
+  let s = text.trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/, '');
+
+  // Try direct parse first
+  try { return JSON.parse(s) as T; } catch { /* continue */ }
+
+  // Find first { or [ and take from there
+  const start = Math.min(
+    s.indexOf('{') === -1 ? Infinity : s.indexOf('{'),
+    s.indexOf('[') === -1 ? Infinity : s.indexOf('['),
+  );
+  if (start !== Infinity) s = s.slice(start);
+
+  // Find matching close bracket by scanning
+  const open = s[0];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0;
+  let end = -1;
+  let inStr = false;
+  let escape = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inStr) { escape = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (!inStr) {
+      if (ch === open) depth++;
+      else if (ch === close) { depth--; if (depth === 0) { end = i; break; } }
+    }
+  }
+  const candidate = end !== -1 ? s.slice(0, end + 1) : s;
+  return JSON.parse(candidate) as T;
+}
+
 interface NorthStarResult {
   northStar: string;
   definitionOfDone: SuccessCriterion[];
@@ -106,8 +144,7 @@ export class DevProjectManagerService {
       temperature: 0.3,
     });
 
-    const raw = result.text.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
-    const parsed = JSON.parse(raw) as NorthStarResult;
+    const parsed = extractJson<NorthStarResult>(result.text);
 
     if (!parsed.northStar || !Array.isArray(parsed.goals)) {
       throw new Error('PM Agent: respuesta de North Star inválida');
@@ -158,8 +195,7 @@ Evalúa si el goal está completo.`.trim();
         responseFormat: 'json',
         temperature: 0,
       });
-      const raw = result.text.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
-      parsed = JSON.parse(raw) as GoalEvaluation;
+      parsed = extractJson<GoalEvaluation>(result.text);
     } catch {
       // Fallback: if no outputs, needs more work
       parsed = {
@@ -202,8 +238,7 @@ Esto es la iteración #${iterationNumber}. Planea la siguiente ronda de trabajo 
         responseFormat: 'json',
         temperature: 0.2,
       });
-      const raw = result.text.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
-      const parsed = JSON.parse(raw) as IterationPlan;
+      const parsed = extractJson<IterationPlan>(result.text);
       if (!parsed.title || !parsed.objective) throw new Error('invalid plan');
       return parsed;
     } catch {

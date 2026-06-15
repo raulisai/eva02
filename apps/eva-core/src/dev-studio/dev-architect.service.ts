@@ -2,6 +2,26 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ModelRouterService } from '../model-router/model-router.service';
 import { DevSession, DevGoal, DevIteration, AGENT_SYSTEM_PROMPTS, SuccessCriterion } from './dev-studio.types';
 
+function extractJson<T>(text: string): T {
+  let s = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+  try { return JSON.parse(s) as T; } catch { /* continue */ }
+  const start = Math.min(
+    s.indexOf('{') === -1 ? Infinity : s.indexOf('{'),
+    s.indexOf('[') === -1 ? Infinity : s.indexOf('['),
+  );
+  if (start !== Infinity) s = s.slice(start);
+  const open = s[0]; const close = open === '{' ? '}' : ']';
+  let depth = 0, end = -1, inStr = false, escape = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inStr) { escape = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (!inStr) { if (ch === open) depth++; else if (ch === close) { depth--; if (depth === 0) { end = i; break; } } }
+  }
+  return JSON.parse(end !== -1 ? s.slice(0, end + 1) : s) as T;
+}
+
 export interface TechnicalTask {
   title: string;
   prompt: string;
@@ -103,8 +123,7 @@ Genera las tareas técnicas para esta iteración.`.trim();
         temperature: 0.2,
       });
 
-      const raw = result.text.trim().replace(/^```json?\n?/, '').replace(/\n?```$/, '');
-      const parsed = JSON.parse(raw) as ArchitectPlan;
+      const parsed = extractJson<ArchitectPlan>(result.text);
 
       if (!Array.isArray(parsed.tasks) || parsed.tasks.length === 0) {
         throw new Error('No tasks generated');

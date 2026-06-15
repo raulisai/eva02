@@ -5,11 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Plus, Code2, Loader2, ChevronRight } from 'lucide-react';
 import { devStudioApi } from '@/lib/dev-studio-api';
 import type { DevSession } from '@/lib/dev-studio-types';
-import { SESSION_STATUS_LABEL } from '@/lib/dev-studio-types';
 import { SessionStatusBadge } from '@/components/dev-studio/session-status-badge';
-
-const EMPTY_STATE = `🚀 Sin sesiones de desarrollo activas.
-Inicia un nuevo proyecto y el equipo de agentes se encarga del resto.`;
 
 export default function DevStudioPage() {
   const router = useRouter();
@@ -40,24 +36,23 @@ export default function DevStudioPage() {
   const done = sessions.filter((s) => ['completed', 'cancelled', 'failed'].includes(s.status));
 
   return (
-    <div className="p-6 max-w-4xl mx-auto space-y-6">
-      {/* Page header */}
+    <div className="p-6 max-w-3xl mx-auto space-y-6">
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-100">
-            <Code2 className="h-5 w-5 text-blue-600" />
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-500/10 border border-cyan-500/20">
+            <Code2 className="h-4 w-4 text-cyan-400" />
           </div>
           <div>
-            <h1 className="text-xl font-semibold text-slate-900">Dev Studio</h1>
-            <p className="text-sm text-slate-500">Desarrollo autónomo con equipo de agentes</p>
+            <h1 className="text-sm font-semibold text-zinc-100">Dev Studio</h1>
+            <p className="text-[11px] text-zinc-600">Desarrollo autónomo multi-agente</p>
           </div>
         </div>
-
         <button
           onClick={() => setShowNew((s) => !s)}
-          className="flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+          className="flex items-center gap-1.5 rounded-md bg-cyan-500/10 border border-cyan-500/20 px-3 py-1.5 text-xs font-medium text-cyan-400 hover:bg-cyan-500/20 transition-colors"
         >
-          <Plus className="h-4 w-4" />
+          <Plus className="h-3.5 w-3.5" />
           Nueva sesión
         </button>
       </div>
@@ -66,109 +61,82 @@ export default function DevStudioPage() {
       {showNew && (
         <form
           onSubmit={handleCreate}
-          className="rounded-2xl border border-blue-200 bg-blue-50 p-5 space-y-4"
+          className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 space-y-3"
         >
-          <p className="text-sm font-semibold text-blue-800">Describe tu proyecto</p>
+          <p className="text-xs font-mono text-zinc-500 uppercase tracking-widest">nuevo proyecto</p>
 
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-slate-600">Nombre (opcional)</label>
-            <input
-              type="text"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Ej: E-commerce con Next.js"
-              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-            />
-          </div>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Nombre del proyecto (opcional)"
+            className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+          />
 
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-slate-600">Descripción detallada *</label>
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder={`Describe qué quieres construir. Cuanto más detallado, mejor.
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder={`Describe qué quieres construir con el mayor detalle posible.\n\nEj: Una plataforma SaaS de gestión de inventario con autenticación, roles, catálogo de productos, movimientos de stock, reportes y dashboard analytics. Stack: Next.js 14 + Supabase + TailwindCSS.`}
+            rows={7}
+            className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-700 resize-none focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+          />
 
-Ej: Quiero una plataforma de e-commerce con autenticación, catálogo de productos con búsqueda, carrito de compras, pagos con Stripe, panel de administración y dashboard de analytics. Stack: Next.js + Supabase + TailwindCSS.`}
-              rows={6}
-              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400"
-            />
-          </div>
-
-          <div className="flex items-center justify-end gap-3">
+          <div className="flex items-center justify-end gap-2">
             <button
               type="button"
               onClick={() => setShowNew(false)}
-              className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800"
+              className="px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
             >
               Cancelar
             </button>
             <button
               type="submit"
               disabled={creating || !prompt.trim()}
-              className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              className="flex items-center gap-1.5 rounded-md bg-cyan-500 px-4 py-1.5 text-xs font-medium text-zinc-950 hover:bg-cyan-400 disabled:opacity-40 transition-colors"
             >
-              {creating ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Creando…
-                </>
-              ) : (
-                <>
-                  <Code2 className="h-4 w-4" />
-                  Iniciar proyecto
-                </>
-              )}
+              {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Code2 className="h-3.5 w-3.5" />}
+              {creating ? 'Creando…' : 'Iniciar proyecto'}
             </button>
           </div>
         </form>
       )}
 
-      {/* Loading */}
       {loading && (
-        <div className="flex items-center justify-center py-16 text-slate-400">
-          <Loader2 className="h-6 w-6 animate-spin" />
+        <div className="flex items-center justify-center py-16 text-zinc-700">
+          <Loader2 className="h-5 w-5 animate-spin" />
         </div>
       )}
 
-      {/* Active sessions */}
       {!loading && active.length > 0 && (
-        <section className="space-y-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Activas ({active.length})
-          </h2>
-          <div className="space-y-2">
-            {active.map((s) => (
-              <SessionCard key={s.id} session={s} />
-            ))}
-          </div>
+        <section className="space-y-1.5">
+          <p className="text-[9px] font-mono uppercase tracking-widest text-zinc-700 px-1">
+            Activas — {active.length}
+          </p>
+          {active.map((s) => <SessionRow key={s.id} session={s} />)}
         </section>
       )}
 
-      {/* Completed sessions */}
       {!loading && done.length > 0 && (
-        <section className="space-y-2">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-            Finalizadas ({done.length})
-          </h2>
-          <div className="space-y-2 opacity-70">
-            {done.map((s) => (
-              <SessionCard key={s.id} session={s} />
-            ))}
+        <section className="space-y-1.5">
+          <p className="text-[9px] font-mono uppercase tracking-widest text-zinc-700 px-1">
+            Finalizadas — {done.length}
+          </p>
+          <div className="opacity-50">
+            {done.map((s) => <SessionRow key={s.id} session={s} />)}
           </div>
         </section>
       )}
 
-      {/* Empty state */}
       {!loading && sessions.length === 0 && !showNew && (
-        <div className="flex flex-col items-center justify-center py-20 text-center space-y-4">
-          <div className="text-5xl">🤖</div>
-          <p className="text-slate-500 whitespace-pre-line text-sm leading-relaxed">{EMPTY_STATE}</p>
+        <div className="flex flex-col items-center justify-center py-24 gap-4 text-center">
+          <Code2 className="h-8 w-8 text-zinc-800" />
+          <p className="text-xs text-zinc-600">Sin sesiones de desarrollo activas</p>
           <button
             onClick={() => setShowNew(true)}
-            className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-700"
+            className="flex items-center gap-1.5 rounded-md border border-zinc-800 px-4 py-2 text-xs text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 transition-colors"
           >
-            <Plus className="h-4 w-4" />
-            Crear mi primer proyecto
+            <Plus className="h-3.5 w-3.5" />
+            Crear primer proyecto
           </button>
         </div>
       )}
@@ -176,40 +144,38 @@ Ej: Quiero una plataforma de e-commerce con autenticación, catálogo de product
   );
 }
 
-function SessionCard({ session }: { session: DevSession }) {
+function SessionRow({ session }: { session: DevSession }) {
   const router = useRouter();
   const isActive = ['running', 'planning', 'awaiting_goals_approval'].includes(session.status);
 
   return (
     <button
       onClick={() => router.push(`/dev-studio/sessions/${session.id}`)}
-      className="w-full flex items-center gap-4 rounded-xl border border-slate-200 bg-white px-4 py-3 text-left hover:border-blue-300 hover:bg-blue-50/40 transition-colors group"
+      className="w-full flex items-center gap-3 rounded-md border border-zinc-800 bg-zinc-900/60 px-4 py-3 text-left hover:border-zinc-700 hover:bg-zinc-900 transition-colors group"
     >
-      {/* Pulse indicator */}
-      <div className="relative flex-shrink-0">
-        <div className={`h-2.5 w-2.5 rounded-full ${isActive ? 'bg-emerald-400' : 'bg-slate-200'}`} />
+      <div className="relative shrink-0">
+        <div className={`h-1.5 w-1.5 rounded-full ${isActive ? 'bg-cyan-400' : 'bg-zinc-700'}`} />
         {isActive && (
-          <div className="absolute inset-0 rounded-full bg-emerald-400 animate-ping opacity-60" />
+          <div className="absolute inset-0 rounded-full bg-cyan-400 animate-ping opacity-50" />
         )}
       </div>
 
-      {/* Info */}
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm font-medium text-slate-800 truncate">{session.title}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-zinc-200 truncate">{session.title}</span>
           <SessionStatusBadge status={session.status} />
         </div>
         {session.north_star && (
-          <p className="text-xs text-slate-500 truncate mt-0.5">"{session.north_star}"</p>
+          <p className="text-[11px] text-zinc-600 truncate mt-0.5 italic">"{session.north_star}"</p>
         )}
-        <p className="text-xs text-slate-400 mt-0.5">
-          {new Date(session.created_at).toLocaleDateString('es-MX', {
-            day: 'numeric', month: 'short', year: 'numeric',
-          })}
-        </p>
       </div>
 
-      <ChevronRight className="h-4 w-4 text-slate-300 group-hover:text-blue-500 flex-shrink-0 transition-colors" />
+      <div className="flex items-center gap-2 shrink-0">
+        <span className="text-[10px] text-zinc-700">
+          {new Date(session.created_at).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' })}
+        </span>
+        <ChevronRight className="h-3.5 w-3.5 text-zinc-700 group-hover:text-zinc-400 transition-colors" />
+      </div>
     </button>
   );
 }

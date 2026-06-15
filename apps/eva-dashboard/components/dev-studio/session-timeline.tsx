@@ -6,65 +6,72 @@ import type { DevEvent } from '@/lib/dev-studio-types';
 import { cn } from '@/lib/utils';
 
 const EVENT_ICON: Record<string, string> = {
-  'session.running': '🚀',
-  'session.goals_complete': '🎉',
-  'session.steered': '🎯',
-  'goals.awaiting_approval': '⏳',
-  'dev.goals.approved': '✅',
-  'iteration.started': '▶',
-  'iteration.completed': '✓',
-  'iteration.evaluated': '📊',
-  'tasks.created': '📋',
-  'task.started': '⚡',
-  'task.completed': '✓',
-  'task.failed': '✗',
-  'agent.blocked': '🚧',
-  'goal.ready_for_validation': '🔍',
-  'orchestrator.tick': '🔄',
+  'session.running':        '▶',
+  'session.goals_complete': '✦',
+  'session.steered':        '◎',
+  'goals.awaiting_approval':'◌',
+  'dev.goals.approved':     '✓',
+  'iteration.started':      '▷',
+  'iteration.completed':    '◆',
+  'iteration.evaluated':    '◈',
+  'tasks.created':          '⊞',
+  'task.started':           '⚡',
+  'task.completed':         '◉',
+  'task.failed':            '✗',
+  'agent.blocked':          '⊘',
+  'goal.ready_for_validation':'◎',
+  'orchestrator.tick':      '·',
 };
 
-function getEventColor(eventType: string): string {
-  if (eventType.includes('failed') || eventType.includes('blocked')) return 'text-red-500 bg-red-50';
-  if (eventType.includes('completed') || eventType.includes('verified') || eventType.includes('approved')) return 'text-emerald-600 bg-emerald-50';
-  if (eventType.includes('started') || eventType.includes('running')) return 'text-blue-600 bg-blue-50';
-  if (eventType.includes('human') || eventType.includes('awaiting') || eventType.includes('waiting')) return 'text-amber-600 bg-amber-50';
-  return 'text-slate-600 bg-slate-50';
+function eventColor(type: string): { dot: string; text: string } {
+  if (type.includes('failed') || type.includes('blocked') || type.includes('error'))
+    return { dot: 'bg-red-500', text: 'text-red-400' };
+  if (type.includes('completed') || type.includes('verified') || type.includes('approved'))
+    return { dot: 'bg-emerald-500', text: 'text-emerald-400' };
+  if (type.includes('started') || type.includes('running'))
+    return { dot: 'bg-cyan-500', text: 'text-cyan-400' };
+  if (type.includes('human') || type.includes('awaiting') || type.includes('waiting'))
+    return { dot: 'bg-orange-500', text: 'text-orange-400' };
+  return { dot: 'bg-zinc-700', text: 'text-zinc-500' };
 }
 
-interface SessionTimelineProps {
-  events: DevEvent[];
-}
-
-export function SessionTimeline({ events }: SessionTimelineProps) {
-  const sorted = [...events].reverse(); // chronological order
+export function SessionTimeline({ events }: { events: DevEvent[] }) {
+  const sorted = [...events].reverse();
 
   return (
-    <div className="space-y-1">
-      {sorted.map((event) => (
-        <div key={event.id} className="flex gap-3 items-start group">
-          <div className={cn(
-            'mt-0.5 flex-shrink-0 rounded-full w-6 h-6 flex items-center justify-center text-xs',
-            getEventColor(event.event_type),
-          )}>
-            {EVENT_ICON[event.event_type] ?? '·'}
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="text-xs font-mono text-slate-400">
-                {formatDistanceToNow(new Date(event.created_at), { addSuffix: true, locale: es })}
-              </span>
-              <span className="text-xs font-medium text-slate-500">{event.event_type}</span>
+    <div className="space-y-0">
+      {sorted.map((event, i) => {
+        const { dot, text } = eventColor(event.event_type);
+        const isLast = i === sorted.length - 1;
+        return (
+          <div key={event.id} className="flex gap-3 group">
+            {/* Spine */}
+            <div className="flex flex-col items-center shrink-0">
+              <div className={cn('w-1.5 h-1.5 rounded-full mt-1.5 shrink-0', dot)} />
+              {!isLast && <div className="w-px flex-1 bg-zinc-800 mt-1" />}
             </div>
-            {event.message && (
-              <p className="text-sm text-slate-700 mt-0.5 line-clamp-2 group-hover:line-clamp-none">
-                {event.message}
-              </p>
-            )}
+
+            {/* Content */}
+            <div className={cn('flex-1 min-w-0 pb-3', isLast ? '' : '')}>
+              <div className="flex items-baseline gap-2 flex-wrap">
+                <span className={cn('text-[10px] font-mono', text)}>
+                  {EVENT_ICON[event.event_type] ?? '·'} {event.event_type}
+                </span>
+                <span className="text-[10px] text-zinc-700 ml-auto shrink-0">
+                  {formatDistanceToNow(new Date(event.created_at), { addSuffix: true, locale: es })}
+                </span>
+              </div>
+              {event.message && (
+                <p className="text-xs text-zinc-500 mt-0.5 line-clamp-2 group-hover:line-clamp-none">
+                  {event.message}
+                </p>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
       {sorted.length === 0 && (
-        <p className="text-sm text-slate-400 text-center py-4">No hay eventos aún</p>
+        <p className="text-xs text-zinc-700 text-center py-8">Sin eventos aún</p>
       )}
     </div>
   );

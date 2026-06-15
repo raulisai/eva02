@@ -2,53 +2,77 @@
 
 import { cn } from '@/lib/utils';
 import type { DevSessionStatus, DevGoalStatus } from '@/lib/dev-studio-types';
-import { SESSION_STATUS_LABEL, GOAL_STATUS_LABEL } from '@/lib/dev-studio-types';
 
-const SESSION_STATUS_COLOR: Record<DevSessionStatus, string> = {
-  idea_intake: 'bg-slate-100 text-slate-700',
-  planning: 'bg-blue-100 text-blue-700',
-  awaiting_goals_approval: 'bg-amber-100 text-amber-700',
-  awaiting_architecture_approval: 'bg-amber-100 text-amber-700',
-  running: 'bg-emerald-100 text-emerald-700',
-  waiting_for_human_setup: 'bg-orange-100 text-orange-700',
-  waiting_for_human_secret: 'bg-orange-100 text-orange-700',
-  waiting_for_human_review: 'bg-orange-100 text-orange-700',
-  waiting_for_human_validation: 'bg-orange-100 text-orange-700',
-  paused: 'bg-slate-100 text-slate-600',
-  blocked: 'bg-red-100 text-red-700',
-  ready_for_release: 'bg-purple-100 text-purple-700',
-  ready_for_deploy: 'bg-purple-100 text-purple-700',
-  completed: 'bg-green-100 text-green-700',
-  failed: 'bg-red-100 text-red-700',
-  cancelled: 'bg-slate-100 text-slate-500',
+const SESSION_COLORS: Record<string, string> = {
+  idea_intake:                   'text-zinc-500 bg-zinc-900 border-zinc-800',
+  planning:                      'text-amber-400 bg-amber-500/10 border-amber-500/20',
+  awaiting_goals_approval:       'text-amber-400 bg-amber-500/10 border-amber-500/20',
+  awaiting_architecture_approval:'text-amber-400 bg-amber-500/10 border-amber-500/20',
+  running:                       'text-cyan-400 bg-cyan-500/10 border-cyan-500/20',
+  waiting_for_human_setup:       'text-orange-400 bg-orange-500/10 border-orange-500/20',
+  waiting_for_human_secret:      'text-orange-400 bg-orange-500/10 border-orange-500/20',
+  waiting_for_human_review:      'text-orange-400 bg-orange-500/10 border-orange-500/20',
+  waiting_for_human_validation:  'text-orange-400 bg-orange-500/10 border-orange-500/20',
+  paused:                        'text-zinc-400 bg-zinc-800/50 border-zinc-700',
+  ready_for_release:             'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+  completed:                     'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+  failed:                        'text-red-400 bg-red-500/10 border-red-500/20',
+  cancelled:                     'text-zinc-600 bg-zinc-900 border-zinc-800',
 };
 
-const GOAL_STATUS_COLOR: Record<DevGoalStatus, string> = {
-  proposed: 'bg-slate-100 text-slate-600',
-  approved: 'bg-blue-100 text-blue-700',
-  in_progress: 'bg-emerald-100 text-emerald-700',
-  blocked: 'bg-red-100 text-red-700',
-  needs_user_decision: 'bg-amber-100 text-amber-700',
-  ready_for_validation: 'bg-purple-100 text-purple-700',
-  validated: 'bg-blue-100 text-blue-700',
-  completed: 'bg-green-100 text-green-700',
-  paused: 'bg-slate-100 text-slate-600',
-  cancelled: 'bg-slate-100 text-slate-500',
+const SESSION_LABEL: Record<string, string> = {
+  idea_intake:                   'Idea',
+  planning:                      'Planificando',
+  awaiting_goals_approval:       'Aprobación goals',
+  awaiting_architecture_approval:'Aprobación arq.',
+  running:                       'Ejecutando',
+  waiting_for_human_setup:       'Setup pendiente',
+  waiting_for_human_secret:      'Credenciales',
+  waiting_for_human_review:      'Revisión',
+  waiting_for_human_validation:  'Validación',
+  paused:                        'Pausado',
+  ready_for_release:             'Para release',
+  completed:                     'Completado',
+  failed:                        'Fallido',
+  cancelled:                     'Cancelado',
 };
 
-export function SessionStatusBadge({ status }: { status: DevSessionStatus }) {
+const GOAL_COLORS: Record<string, string> = {
+  draft:       'text-zinc-500 bg-zinc-900 border-zinc-800',
+  approved:    'text-cyan-400 bg-cyan-500/10 border-cyan-500/20',
+  in_progress: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
+  completed:   'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+  validated:   'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+  failed:      'text-red-400 bg-red-500/10 border-red-500/20',
+};
+
+const GOAL_LABEL: Record<string, string> = {
+  draft:       'Borrador',
+  approved:    'Aprobado',
+  in_progress: 'En curso',
+  completed:   'Completado',
+  validated:   'Validado',
+  failed:      'Fallido',
+};
+
+export function SessionStatusBadge({ status }: { status: DevSessionStatus | string }) {
   return (
-    <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium', SESSION_STATUS_COLOR[status])}>
-      {status === 'running' && <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />}
-      {SESSION_STATUS_LABEL[status] ?? status}
+    <span className={cn(
+      'inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-mono',
+      SESSION_COLORS[status] ?? 'text-zinc-500 bg-zinc-900 border-zinc-800',
+    )}>
+      {SESSION_LABEL[status] ?? status}
     </span>
   );
 }
 
-export function GoalStatusBadge({ status }: { status: DevGoalStatus }) {
+export function GoalStatusBadge({ status }: { status: DevGoalStatus | string }) {
   return (
-    <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium', GOAL_STATUS_COLOR[status])}>
-      {GOAL_STATUS_LABEL[status] ?? status}
+    <span className={cn(
+      'inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-mono',
+      GOAL_COLORS[status] ?? 'text-zinc-500 bg-zinc-900 border-zinc-800',
+    )}>
+      {GOAL_LABEL[status] ?? status}
     </span>
   );
 }
