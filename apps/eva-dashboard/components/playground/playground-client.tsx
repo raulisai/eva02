@@ -693,11 +693,11 @@ function ThoughtBubble({ event, logs = [] }: { event: EvaEvent; logs?: EvaEvent[
     : `Ejecutando ${toolName}...`;
 
   return (
-    <div className="flex justify-start animate-slide-up my-1 w-full">
+    <div className="flex justify-start animate-slide-up my-1 w-full" onClick={(e) => e.stopPropagation()}>
       <div className={cn(
         "max-w-[90%] min-w-[250px] rounded-sm border px-3 py-2 transition-colors w-full bg-zinc-950/20",
         expanded ? "bg-zinc-900 border-zinc-700" : "bg-transparent border-transparent hover:bg-zinc-900/50 cursor-pointer text-zinc-500"
-      )} onClick={() => setExpanded(!expanded)}>
+      )} onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}>
         <div className="flex items-center justify-between select-none">
           <div className="flex items-center gap-2">
             {expanded ? <ChevronDown className="w-3.5 h-3.5 text-zinc-400" /> : <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />}

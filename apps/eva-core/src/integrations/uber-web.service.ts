@@ -989,6 +989,15 @@ export class UberWebService {
           .toLowerCase()
           .split(/[^\p{L}\p{N}]+/u)
           .filter((token) => token.length >= 4);
+        const genericPlaceTokens = new Set([
+          'ciudad', 'mexico', 'méxico', 'cdmx', 'estado', 'municipio',
+          'alcaldia', 'alcaldía', 'delegacion', 'delegación', 'colonia',
+          'calle', 'avenida', 'avda', 'norte', 'sur', 'este', 'oeste',
+          'mex', 'city',
+        ]);
+        const distinctiveTokens = (value: string) => tokenSet(value)
+          .filter((token) => !/^\d+$/.test(token))
+          .filter((token) => !genericPlaceTokens.has(token));
         const hasAddressSignal = (text: string, expected: string, kind: 'pickup' | 'dropoff') => {
           const clean = normalize(text);
           if (!clean) return false;
@@ -997,6 +1006,12 @@ export class UberWebService {
             : /\b(dropoff location|dropoff|destination|destino|where to|a d[oó]nde|ad[oó]nde|to)\b/i;
           if (placeholder.test(clean) && clean.length < 40) return false;
           const lower = clean.toLowerCase();
+          const important = distinctiveTokens(expected);
+          if (important.length > 0) {
+            const matches = important.filter((token) => lower.includes(token));
+            const needed = important.length === 1 ? 1 : Math.min(2, important.length);
+            return matches.length >= needed;
+          }
           const tokens = tokenSet(expected);
           return tokens.length === 0 ? clean.length > 2 : tokens.some((token) => lower.includes(token));
         };

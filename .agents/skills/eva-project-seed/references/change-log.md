@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-15 07:06Z
+C: uber-web: route form validation now requires distinctive pickup/dropoff tokens so generic city/CDMX-only destination text does not count as filled; files=apps/eva-core/src/integrations/uber-web.service.ts,apps/eva-core/src/integrations/__tests__/uber-web.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm test --workspace @eva/core -- src/integrations/__tests__/uber-web.service.spec.ts --runInBand; npm run build --workspace @eva/core; eslint changed uber files; npm run docs:check; git diff --check
+P: pending/improve -> run live Uber Web quote smoke for work/LA COCINA DE LUPITA and verify city-only dropoff is rejected, first relevant suggestion is selected, and prices appear
+
 ### 2026-06-15 06:55Z
 C: browser/uber: SmartNavigator now indexes autocomplete/listbox options and accepts press/scroll/back actions from model JSON; Uber autocomplete selection can click visible plain div suggestion rows near the focused address field when accessible roles are absent; files=apps/eva-core/src/browser/smart-navigator.service.ts,apps/eva-core/src/browser/__tests__/smart-navigator.service.spec.ts,apps/eva-core/src/integrations/uber-web.service.ts,apps/eva-core/src/integrations/__tests__/uber-web.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm test --workspace @eva/core -- src/browser/__tests__/smart-navigator.service.spec.ts --runInBand; npm test --workspace @eva/core -- src/integrations/__tests__/uber-web.service.spec.ts --runInBand; npm run build --workspace @eva/core; eslint changed browser/uber files; npm run docs:check
 P: pending/improve -> run a live Uber Web quote smoke on the captured state and verify selecting "Avenida Norte 209" advances to the destination field and then to visible prices

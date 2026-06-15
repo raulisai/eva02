@@ -281,6 +281,52 @@ describe('UberWebService', () => {
     }
   });
 
+  it('does not accept a generic city-only dropoff when the destination has distinctive place tokens', async () => {
+    const previousDocument = (global as any).document;
+    const previousWindow = (global as any).window;
+    const makeElement = (input: { id: string; text: string }) => ({
+      tagName: 'DIV',
+      textContent: input.text,
+      innerText: input.text,
+      offsetWidth: 420,
+      offsetHeight: 64,
+      getClientRects: () => [1],
+      getAttribute: (name: string) => {
+        if (name === 'id') return input.id;
+        if (name === 'aria-label') return input.id.includes('pickup') ? 'Pickup location' : 'Dropoff location';
+        return null;
+      },
+      closest: (_selector: string) => null,
+      parentElement: { textContent: input.text },
+    });
+    const pickup = makeElement({ id: 'rv-pudo-select-pickup', text: 'Agrícola Pantitlán' });
+    const dropoff = makeElement({ id: 'rv-pudo-select-drop0', text: 'n, 01219 Ciudad de México, CDMX, México' });
+    (global as any).document = {
+      body: { innerText: 'Agrícola Pantitlán\nn, 01219 Ciudad de México, CDMX, México' },
+      querySelectorAll: () => [pickup, dropoff],
+    };
+    (global as any).window = {
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    };
+    browser.evaluate.mockImplementation(async (_sessionId: string, _orgId: string, fn: any, arg?: unknown) => fn(arg));
+
+    try {
+      const status = await (service as any).inspectRouteFormStatus(
+        SESSION,
+        ORG,
+        'Agrícola Pantitlán',
+        'LA COCINA DE LUPITA, Av. 15 de Septiembre, Ciudad de México',
+      );
+
+      expect(status.pickupFilled).toBe(true);
+      expect(status.dropoffFilled).toBe(false);
+      expect(status.missing).toContain('dropoff');
+    } finally {
+      (global as any).document = previousDocument;
+      (global as any).window = previousWindow;
+    }
+  });
+
   it('uses the stored Google Web credential when Uber asks for Google login', async () => {
     googleWeb.hasCredential.mockResolvedValue(true);
     googleWeb.loginCurrentSession.mockResolvedValue({
