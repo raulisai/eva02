@@ -73,6 +73,7 @@ import { CommunicationModule } from '../communication/communication.module';
   ],
   controllers: [AgentFeedbackController, AgentMetricsController, SoulController, ProfileController],
   exports: [
+    AgentLoopService,
     AgentRunnerService,
     MediaService,
     SandboxService,
