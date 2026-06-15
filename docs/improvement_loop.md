@@ -35,7 +35,7 @@ If your change touched the database schema, folder layout, module relationships,
 - [architecture.md](file:///Users/djoker/code/eva02/docs/architecture.md) (if layers or wiring changed).
 - [process_flows.md](file:///Users/djoker/code/eva02/docs/process_flows.md) (if state machine, agent loops, or sequences changed).
 - [implementation_guide.md](file:///Users/djoker/code/eva02/docs/implementation_guide.md) (if new rules, RLS policies, env vars, or testing practices are introduced).
-- [project_sections.md](file:///Users/djoker/code/eva02/docs/project_sections.md) (if files/folders were created, deleted, or reassigned).
+- [project-map.md](file:///Users/djoker/code/eva02/.agents/skills/eva-project-seed/references/project-map.md) (if files/folders, migrations, or routes were created, deleted, or reassigned).
 
 ### 2. Update the Project Seed (`.agents/skills/eva-project-seed/`)
 - Update [project-map.md](file:///Users/djoker/code/eva02/.agents/skills/eva-project-seed/references/project-map.md) to reflect the new mapping state.

@@ -2,6 +2,14 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-15 06:40Z
+C: docs/seed: cleaned up deleted project_sections.md references across documentation and seed; files=docs/improvement_loop.md,.agents/skills/eva-project-seed/references/project-map.md; tests=node scripts/check-project-map-freshness.mjs
+P: pending/improve -> keep documentation and project-map.md updated with any new migration or core controller route added
+
+### 2026-06-15 06:37Z
+C: uber-web: verify pickup/dropoff route form before Search and retry destination autocomplete when Dropoff location remains empty; files=apps/eva-core/src/integrations/uber-web.service.ts,apps/eva-core/src/integrations/__tests__/uber-web.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm test --workspace @eva/core -- src/integrations/__tests__/uber-web.service.spec.ts --runInBand; npm test --workspace @eva/core -- src/browser/__tests__/browser.service.spec.ts src/integrations/__tests__/uber-web.service.spec.ts src/agent/__tests__/agent-runner.service.spec.ts --runInBand; npm run build --workspace @eva/core; eslint changed uber files
+P: pending/improve -> run live Uber quote smoke for "un uber a mi trabajo dame el costo" and verify both autocomplete fields are accepted before Search
+
 ### 2026-06-15 05:44Z
 C: browser-agent: upgraded SmartNavigator with task memory, enriched visual snapshots, failure diagnosis, progress verification, and per-site learning; files=apps/eva-core/src/browser/smart-navigator.service.ts,apps/eva-core/src/browser/__tests__/smart-navigator.service.spec.ts,apps/eva-core/src/agent/tool-catalog.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm test --workspace @eva/core -- src/browser/__tests__/smart-navigator.service.spec.ts --runInBand; npm test --workspace @eva/core -- src/agent/__tests__/agent-loop.service.spec.ts --runInBand; npm run build --workspace @eva/core; eslint changed core files
 P: pending/improve -> run live Smart Browser smoke on WhatsApp/Uber to verify browser_memory and browser:site learnings against real UI changes

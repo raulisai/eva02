@@ -83,6 +83,14 @@ interface UberPageSignals {
 
 type UberRouteEntryResult = 'dom_route_form' | 'smart_navigator' | null;
 
+interface UberRouteFormStatus {
+  pickupFilled: boolean;
+  dropoffFilled: boolean;
+  pickupText: string;
+  dropoffText: string;
+  missing: Array<'pickup' | 'dropoff'>;
+}
+
 export interface UberGoogleLoginResult {
   ok: boolean;
   reason: 'logged_in' | 'login_required' | 'google_credential_missing' | 'google_mfa_required' | 'google_blocked' | 'google_unknown';
@@ -784,8 +792,8 @@ export class UberWebService {
       await this.browser.wait(sessionId, orgId, 1000);
     }
 
-    const originFilled = await this.fillPlaceField(sessionId, orgId, this.originFieldSelectors(), origin);
-    const destinationFilled = await this.fillPlaceField(sessionId, orgId, this.destinationFieldSelectors(), destination);
+    let originFilled = await this.fillPlaceField(sessionId, orgId, this.originFieldSelectors(), origin);
+    let destinationFilled = await this.fillPlaceField(sessionId, orgId, this.destinationFieldSelectors(), destination);
     const jsFilled = originFilled && destinationFilled
       ? false
       : await this.fillRouteFieldsByDom(sessionId, orgId, {
@@ -798,6 +806,27 @@ export class UberWebService {
     }
 
     await this.browser.wait(sessionId, orgId, 1000);
+    let status = await this.inspectRouteFormStatus(sessionId, orgId, origin, destination);
+    if (!status.pickupFilled) {
+      this.logger.warn(`Uber route form pickup still missing after first pass: ${status.pickupText || '(empty)'}`);
+      originFilled = await this.fillPlaceField(sessionId, orgId, this.originFieldSelectors(), origin, { forceFirstSuggestion: true });
+      await this.browser.wait(sessionId, orgId, 800);
+      status = await this.inspectRouteFormStatus(sessionId, orgId, origin, destination);
+    }
+    if (!status.dropoffFilled) {
+      this.logger.warn(`Uber route form dropoff still missing after first pass: ${status.dropoffText || '(empty)'}`);
+      destinationFilled = await this.fillPlaceField(sessionId, orgId, this.destinationFieldSelectors(), destination, { forceFirstSuggestion: true });
+      if (!destinationFilled) {
+        await this.fillRouteFieldsByDom(sessionId, orgId, { origin: null, destination });
+      }
+      await this.browser.wait(sessionId, orgId, 800);
+      status = await this.inspectRouteFormStatus(sessionId, orgId, origin, destination);
+    }
+    if (!status.pickupFilled || !status.dropoffFilled) {
+      this.logger.warn(`Uber route form incomplete; pickup="${status.pickupText}" dropoff="${status.dropoffText}" missing=${status.missing.join(',')}`);
+      return false;
+    }
+
     // Dismiss cookie banner again in case it appeared after form interaction
     await this.dismissConsentBanner(sessionId, orgId);
     // JS click is the primary method — more reliable than Playwright's synthetic click on React SPAs.
@@ -903,7 +932,13 @@ export class UberWebService {
     ];
   }
 
-  private async fillPlaceField(sessionId: string, orgId: string, selectors: string[], value: string): Promise<boolean> {
+  private async fillPlaceField(
+    sessionId: string,
+    orgId: string,
+    selectors: string[],
+    value: string,
+    opts: { forceFirstSuggestion?: boolean } = {},
+  ): Promise<boolean> {
     for (const selector of selectors) {
       try {
         // Click to focus; .fill() (used by typeNow) doesn't trigger React autocomplete events
@@ -913,10 +948,11 @@ export class UberWebService {
         await this.browser.typeCharacters(sessionId, orgId, value, 50);
         // Wait for Uber's autocomplete suggestions to appear
         await this.browser.wait(sessionId, orgId, 1500);
-        const clickedSuggestion = await this.clickFirstMatchingPlaceSuggestion(sessionId, orgId, value);
+        const clickedSuggestion = await this.clickFirstMatchingPlaceSuggestion(sessionId, orgId, value, opts);
         if (clickedSuggestion) {
           await this.browser.wait(sessionId, orgId, 600); // wait for field to confirm selected address
         } else {
+          await this.browser.pressKey(sessionId, orgId, 'ArrowDown').catch(() => undefined);
           await this.browser.pressKey(sessionId, orgId, 'Enter').catch(() => undefined);
           await this.browser.wait(sessionId, orgId, 600);
         }
@@ -926,6 +962,91 @@ export class UberWebService {
       }
     }
     return false;
+  }
+
+  private async inspectRouteFormStatus(
+    sessionId: string,
+    orgId: string,
+    origin: string,
+    destination: string,
+  ): Promise<UberRouteFormStatus> {
+    const fallback = (): UberRouteFormStatus => ({
+      pickupFilled: false,
+      dropoffFilled: false,
+      pickupText: '',
+      dropoffText: '',
+      missing: ['pickup', 'dropoff'],
+    });
+    const result = await this.browser.evaluate<UberRouteFormStatus, { origin: string; destination: string }>(
+      sessionId,
+      orgId,
+      ({ origin, destination }) => {
+        const normalize = (value: string) => value
+          .replace(/\u00a0/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const tokenSet = (value: string) => normalize(value)
+          .toLowerCase()
+          .split(/[^\p{L}\p{N}]+/u)
+          .filter((token) => token.length >= 4);
+        const hasAddressSignal = (text: string, expected: string, kind: 'pickup' | 'dropoff') => {
+          const clean = normalize(text);
+          if (!clean) return false;
+          const placeholder = kind === 'pickup'
+            ? /\b(pickup location|pickup|recogida|origen|from|salida)\b/i
+            : /\b(dropoff location|dropoff|destination|destino|where to|a d[oó]nde|ad[oó]nde|to)\b/i;
+          if (placeholder.test(clean) && clean.length < 40) return false;
+          const lower = clean.toLowerCase();
+          const tokens = tokenSet(expected);
+          return tokens.length === 0 ? clean.length > 2 : tokens.some((token) => lower.includes(token));
+        };
+        const isVisible = (el: Element | null) => {
+          if (!el) return false;
+          const he = el as HTMLElement;
+          const s = window.getComputedStyle(he);
+          const hasSize = he.offsetWidth > 0 || he.offsetHeight > 0 || he.getClientRects().length > 0;
+          return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && hasSize;
+        };
+        const labelFor = (el: Element) => [
+          el.getAttribute('aria-label'),
+          el.getAttribute('placeholder'),
+          el.getAttribute('name'),
+          el.getAttribute('id'),
+          el.getAttribute('data-testid'),
+          el.closest('label')?.textContent,
+          el.parentElement?.textContent,
+        ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+        const valueFor = (el: Element) => {
+          const he = el as HTMLElement;
+          const inputValue = (el as HTMLInputElement).value;
+          return normalize([
+            typeof inputValue === 'string' ? inputValue : '',
+            he.innerText ?? '',
+            el.textContent ?? '',
+            el.getAttribute('aria-label') ?? '',
+            el.getAttribute('placeholder') ?? '',
+          ].filter(Boolean).join(' '));
+        };
+        const controls = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"], button, div[role="button"]'))
+          .filter(isVisible);
+        const pickupControls = controls.filter((el) => /\b(rv-pudo-select-pickup|pickup|recogida|origen|from|salida)\b/i.test(labelFor(el)));
+        const dropoffControls = controls.filter((el) => /\b(rv-pudo-select-drop0|dropoff|destination|destino|where to|a d[oó]nde|ad[oó]nde|to)\b/i.test(labelFor(el)));
+        const pickupText = normalize((pickupControls.map(valueFor).find((text) => hasAddressSignal(text, origin, 'pickup')) ?? pickupControls.map(valueFor).find(Boolean) ?? ''));
+        const dropoffText = normalize((dropoffControls.map(valueFor).find((text) => hasAddressSignal(text, destination, 'dropoff')) ?? dropoffControls.map(valueFor).find(Boolean) ?? ''));
+        const body = normalize(document.body?.innerText ?? '');
+        const pickupFilled = hasAddressSignal(pickupText, origin, 'pickup')
+          || (pickupControls.length === 0 && hasAddressSignal(body, origin, 'pickup'));
+        const dropoffFilled = hasAddressSignal(dropoffText, destination, 'dropoff')
+          || (dropoffControls.length === 0 && hasAddressSignal(body, destination, 'dropoff'));
+        const missing: Array<'pickup' | 'dropoff'> = [];
+        if (!pickupFilled) missing.push('pickup');
+        if (!dropoffFilled) missing.push('dropoff');
+        return { pickupFilled, dropoffFilled, pickupText, dropoffText, missing };
+      },
+      { origin, destination },
+    ).catch(() => fallback());
+    if (!result || typeof result !== 'object') return fallback();
+    return result;
   }
 
   private async clickFirst(
@@ -945,11 +1066,16 @@ export class UberWebService {
     return false;
   }
 
-  private async clickFirstMatchingPlaceSuggestion(sessionId: string, orgId: string, value: string): Promise<boolean> {
-    return this.browser.evaluate<boolean, { value: string }>(
+  private async clickFirstMatchingPlaceSuggestion(
+    sessionId: string,
+    orgId: string,
+    value: string,
+    opts: { forceFirstSuggestion?: boolean } = {},
+  ): Promise<boolean> {
+    return this.browser.evaluate<boolean, { value: string; forceFirstSuggestion: boolean }>(
       sessionId,
       orgId,
-      ({ value }) => {
+      ({ value, forceFirstSuggestion }) => {
         const normalize = (v: string) => v.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
         const tokens = normalize(value)
           .toLowerCase()
@@ -967,18 +1093,23 @@ export class UberWebService {
         };
         const guarded = /\b(request|pedir|solicitar|confirm|confirmar|pay|pagar)\b/i;
         const candidates = Array.from(document.querySelectorAll('[role="option"], li, button, a, div[role="button"]'));
-        const match = candidates.find((el) => {
+        const eligible = candidates.filter((el) => {
           if (!isVisible(el)) return false;
           const text = normalize(`${el.textContent ?? ''} ${el.getAttribute('aria-label') ?? ''}`);
           if (text.length < 4 || text.length > 240 || guarded.test(text)) return false;
+          if (/\b(pickup|dropoff|search|buscar|activity|for me|pickup now)\b/i.test(text) && text.length < 40) return false;
+          return true;
+        });
+        const match = eligible.find((el) => {
+          const text = normalize(`${el.textContent ?? ''} ${el.getAttribute('aria-label') ?? ''}`);
           const lower = text.toLowerCase();
           return tokens.some((token) => lower.includes(token));
-        });
+        }) ?? (forceFirstSuggestion ? eligible[0] : undefined);
         if (!match) return false;
         (match as HTMLElement).click();
         return true;
       },
-      { value },
+      { value, forceFirstSuggestion: opts.forceFirstSuggestion === true },
     ).catch(() => false);
   }
 

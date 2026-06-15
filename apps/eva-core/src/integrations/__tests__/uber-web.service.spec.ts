@@ -163,6 +163,7 @@ describe('UberWebService', () => {
       .mockResolvedValueOnce(noQuotes)     // inspectPage in inspectAfterSettled
       .mockResolvedValueOnce(false)        // clickFirstMatchingPlaceSuggestion (origin)
       .mockResolvedValueOnce(false)        // clickFirstMatchingPlaceSuggestion (destination)
+      .mockResolvedValueOnce({ pickupFilled: true, dropoffFilled: true, pickupText: 'Calle 1 31, Agrícola Pantitlán', dropoffText: 'El Zócalo, Ciudad de México', missing: [] }) // inspectRouteFormStatus
       .mockResolvedValueOnce(undefined)    // dismissConsentBanner (before "See prices")
       .mockResolvedValueOnce(true)         // JS click on "See prices" button
       .mockResolvedValueOnce(noQuotes)     // inspectAfterRouteEntry attempt 1 (still loading)
@@ -186,6 +187,34 @@ describe('UberWebService', () => {
     expect(browser.updateSessionMetadata).toHaveBeenCalledWith(SESSION, ORG, expect.objectContaining({
       route_entry: 'dom_route_form',
     }));
+  });
+
+  it('retries destination autocomplete and does not search while dropoff is still empty', async () => {
+    const noQuotes = { state: 'logged_in', googleLoginAvailable: false, quoteCandidates: [], textSample: 'Get a ride\nAgrícola Pantitlán\nDropoff location\nSearch', currentUrl: 'https://m.uber.com/go/home', title: 'Uber' };
+    const withQuotes = { state: 'quote_ready', googleLoginAvailable: false, quoteCandidates: [{ label: 'UberX', price: '$180', raw_lines: ['UberX', '$180'] }], textSample: 'UberX\n$180', currentUrl: 'https://m.uber.com/go/product-selection', title: 'Uber' };
+    browser.evaluate
+      .mockResolvedValueOnce(undefined)    // dismissConsentBanner
+      .mockResolvedValueOnce(noQuotes)     // inspectAfterSettled
+      .mockResolvedValueOnce(true)         // origin suggestion selected
+      .mockResolvedValueOnce(false)        // destination suggestion not selected first pass
+      .mockResolvedValueOnce({ pickupFilled: true, dropoffFilled: false, pickupText: 'Agrícola Pantitlán', dropoffText: 'Dropoff location', missing: ['dropoff'] }) // status: screenshot bug
+      .mockResolvedValueOnce(true)         // destination retry force-first suggestion
+      .mockResolvedValueOnce({ pickupFilled: true, dropoffFilled: true, pickupText: 'Agrícola Pantitlán', dropoffText: 'Trabajo, CDMX', missing: [] }) // status after retry
+      .mockResolvedValueOnce(undefined)    // dismiss before Search
+      .mockResolvedValueOnce(true)         // JS click Search/See prices
+      .mockResolvedValueOnce(withQuotes);  // quotes
+
+    const result = await service.estimateRide(ORG, {
+      origin: 'Agrícola Pantitlán',
+      destination: 'Trabajo, CDMX',
+      taskId: TASK,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(browser.clickNow).toHaveBeenCalledWith(SESSION, ORG, '#rv-pudo-select-drop0', { timeout: 1200 });
+    expect(browser.typeCharacters).toHaveBeenCalledWith(SESSION, ORG, 'Trabajo, CDMX, México', 50);
+    // Destination is typed once, verified missing, then typed again with force-first autocomplete.
+    expect(browser.typeCharacters.mock.calls.filter((call) => call[2] === 'Trabajo, CDMX, México')).toHaveLength(2);
   });
 
   it('uses the stored Google Web credential when Uber asks for Google login', async () => {
