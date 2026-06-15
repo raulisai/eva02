@@ -603,6 +603,92 @@ export class DevSessionService {
       .eq('org_id', orgId);
   }
 
+  /**
+   * Aggregate view of a single agent (role) for the flow diagram detail panel.
+   * Returns studio tasks for this role, their communications from dev_events,
+   * and the backing task id (if any is currently running).
+   */
+  async getAgentDetail(sessionId: string, orgId: string, role: string): Promise<Record<string, unknown>> {
+    const [tasksRes, eventsRes, backingRes] = await Promise.all([
+      this.db.admin
+        .from('dev_tasks')
+        .select('id, title, status, branch_name, created_at, updated_at, acceptance_criteria, iteration_id')
+        .eq('session_id', sessionId)
+        .eq('org_id', orgId)
+        .eq('role', role)
+        .order('created_at', { ascending: true }),
+      this.db.admin
+        .from('dev_events')
+        .select('id, event_type, message, actor, created_at, metadata')
+        .eq('session_id', sessionId)
+        .eq('org_id', orgId)
+        .or(`actor.eq.${role},metadata->>target_role.eq.${role}`)
+        .order('created_at', { ascending: false })
+        .limit(50),
+      // Find the active backing task (tasks table) for this role
+      this.db.admin
+        .from('tasks')
+        .select('id, status, title, created_at, updated_at, metadata')
+        .eq('org_id', orgId)
+        .filter('metadata->>session_id', 'eq', sessionId)
+        .filter('metadata->>role', 'eq', role)
+        .not('status', 'in', '("completed","failed","cancelled")')
+        .order('created_at', { ascending: false })
+        .limit(1),
+    ]);
+
+    const tasks = (tasksRes.data ?? []) as Record<string, unknown>[];
+    const events = (eventsRes.data ?? []) as Record<string, unknown>[];
+    const backing = ((backingRes.data ?? []) as Record<string, unknown>[])[0] ?? null;
+
+    // Completed backing tasks for history
+    const { data: allBacking } = await this.db.admin
+      .from('tasks')
+      .select('id, status, title, created_at, updated_at')
+      .eq('org_id', orgId)
+      .filter('metadata->>session_id', 'eq', sessionId)
+      .filter('metadata->>role', 'eq', role)
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    return {
+      role,
+      sessionId,
+      studioTasks: tasks,
+      events,
+      activeBackingTask: backing,
+      allBackingTasks: (allBacking ?? []) as Record<string, unknown>[],
+    };
+  }
+
+  /**
+   * Task events (step logs) for the most recent backing task of a given role.
+   */
+  async getAgentLogs(sessionId: string, orgId: string, role: string, limit = 100): Promise<Record<string, unknown>[]> {
+    // Get most recent backing task id for this role in this session
+    const { data: tasks } = await this.db.admin
+      .from('tasks')
+      .select('id')
+      .eq('org_id', orgId)
+      .filter('metadata->>session_id', 'eq', sessionId)
+      .filter('metadata->>role', 'eq', role)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const taskId = ((tasks ?? []) as { id: string }[])[0]?.id;
+    if (!taskId) return [];
+
+    const { data } = await this.db.admin
+      .from('task_events')
+      .select('id, step, type, content, created_at')
+      .eq('task_id', taskId)
+      .eq('org_id', orgId)
+      .order('created_at', { ascending: true })
+      .limit(limit);
+
+    return (data ?? []) as Record<string, unknown>[];
+  }
+
   private fail(scope: string, error: unknown): never {
     this.logger.error(scope, error as any);
     throw new InternalServerErrorException(`Dev Studio: failed at ${scope}`);

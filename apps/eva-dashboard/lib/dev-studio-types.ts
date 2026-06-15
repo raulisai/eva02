@@ -137,6 +137,10 @@ export interface DevEvent {
   created_at: string;
 }
 
+export type AgentRole =
+  | 'project_manager' | 'architect' | 'frontend' | 'backend'
+  | 'testing' | 'deployment' | 'reviewer' | 'human';
+
 export const SESSION_STATUS_LABEL: Record<DevSessionStatus, string> = {
   idea_intake: 'Idea',
   planning: 'Planificando',

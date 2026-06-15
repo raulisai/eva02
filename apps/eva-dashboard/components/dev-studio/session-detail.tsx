@@ -8,12 +8,14 @@ import type {
   DevMergeProposal, DevEvent, DevIteration,
 } from '@/lib/dev-studio-types';
 import { SESSION_STATUS_LABEL } from '@/lib/dev-studio-types';
+import { useAuthToken } from '@/hooks/use-auth-token';
 import { SessionStatusBadge } from './session-status-badge';
 import { GoalCard } from './goal-card';
 import { HumanTaskPanel } from './human-task-panel';
 import { AgentTeam } from './agent-team';
 import { SessionTimeline } from './session-timeline';
 import { MergeProposalPanel } from './merge-proposal-panel';
+import { AgentFlowDiagram } from './agent-flow-diagram';
 
 interface SessionDetailProps {
   session: DevSession;
@@ -28,7 +30,8 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
   const [proposals, setProposals] = useState<DevMergeProposal[]>([]);
   const [events, setEvents] = useState<DevEvent[]>([]);
   const [iterations, setIterations] = useState<DevIteration[]>([]);
-  const [tab, setTab] = useState<'overview' | 'timeline' | 'tasks'>('overview');
+  const [tab, setTab] = useState<'diagram' | 'overview' | 'timeline' | 'tasks'>('diagram');
+  const orgToken = useAuthToken();
   const [steerText, setSteerText] = useState('');
   const [loading, setLoading] = useState(false);
   const [selectedGoals, setSelectedGoals] = useState<Set<string>>(new Set());
@@ -176,7 +179,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
 
         {/* Tabs */}
         <div className="flex gap-1 mt-4 border-b border-slate-100">
-          {(['overview', 'timeline', 'tasks'] as const).map((t) => (
+          {(['diagram', 'overview', 'timeline', 'tasks'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -186,13 +189,13 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
                   : 'border-transparent text-slate-500 hover:text-slate-700'
               }`}
             >
-              {t === 'overview' ? 'Resumen' : t === 'timeline' ? 'Timeline' : 'Tareas'}
-              {t === 'overview' && pendingHumanTasks.length > 0 && (
+              {t === 'diagram' ? 'Equipo' : t === 'overview' ? 'Resumen' : t === 'timeline' ? 'Timeline' : 'Tareas'}
+              {(t === 'overview' || t === 'diagram') && pendingHumanTasks.length > 0 && (
                 <span className="ml-1.5 rounded-full bg-orange-500 text-white text-xs px-1.5">
                   {pendingHumanTasks.length}
                 </span>
               )}
-              {t === 'overview' && pendingMerges.length > 0 && (
+              {(t === 'overview' || t === 'diagram') && pendingMerges.length > 0 && (
                 <span className="ml-1.5 rounded-full bg-blue-500 text-white text-xs px-1.5">
                   {pendingMerges.length}
                 </span>
@@ -204,6 +207,15 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        {tab === 'diagram' && (
+          <AgentFlowDiagram
+            agents={agents}
+            sessionId={session.id}
+            orgToken={orgToken ?? ''}
+            sessionStatus={session.status}
+          />
+        )}
+
         {tab === 'overview' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Main column */}

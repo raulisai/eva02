@@ -455,6 +455,27 @@ export class SandboxService implements OnApplicationBootstrap, OnModuleDestroy {
     return this.sessions.has(taskId) || this.sessions.has(`${taskId}:net`);
   }
 
+  /**
+   * Attach a real-time listener to a session's shell PTY output.
+   * Returns { unsubscribe, initialBuffer } so the caller can paint history + stream.
+   * Returns null if the session/shell doesn't exist.
+   */
+  attachShellStream(taskId: string, shellNum = 0): {
+    initialBuffer: string;
+    subscribe: (cb: (chunk: string) => void) => () => void;
+    write: (data: string) => void;
+  } | null {
+    const session = this.sessions.get(taskId) ?? this.sessions.get(`${taskId}:net`);
+    if (!session) return null;
+    const shell = session.shells.get(shellNum);
+    if (!shell) return null;
+    return {
+      initialBuffer: shell.getBuffer(),
+      subscribe: (cb) => shell.subscribe(cb),
+      write: (data) => shell.writeRaw(data),
+    };
+  }
+
   /** Devuelve el hostDir de la sesión (preferring network session if it exists, for file access). */
   getHostDir(taskId: string): string | null {
     return this.sessions.get(`${taskId}:net`)?.hostDir

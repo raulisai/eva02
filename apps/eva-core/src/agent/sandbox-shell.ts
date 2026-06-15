@@ -83,6 +83,8 @@ export class PersistentShell {
   /** True while a command was sent and its completion marker hasn't returned. */
   private busy = false;
 
+  private readonly dataListeners = new Set<(chunk: string) => void>();
+
   constructor(private readonly proc: ShellProcess) {
     this.marker = `__EVA_END_${this.id}__`;
     this.markerRe = new RegExp(`${this.marker}:(-?\\d+)`);
@@ -91,7 +93,24 @@ export class PersistentShell {
       if (this.buffer.length > OUTPUT_CAP * 4) {
         this.buffer = this.buffer.slice(-OUTPUT_CAP * 2);
       }
+      for (const fn of this.dataListeners) fn(chunk);
     });
+  }
+
+  /** Subscribe to raw PTY output in real-time. Returns unsubscribe fn. */
+  subscribe(cb: (chunk: string) => void): () => void {
+    this.dataListeners.add(cb);
+    return () => this.dataListeners.delete(cb);
+  }
+
+  /** Write raw bytes to stdin (for terminal passthrough). */
+  writeRaw(data: string): void {
+    this.proc.write(data);
+  }
+
+  /** Snapshot of current buffer (for initial paint on attach). */
+  getBuffer(): string {
+    return this.buffer;
   }
 
   get isBusy(): boolean {

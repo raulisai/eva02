@@ -177,6 +177,34 @@ export class DevStudioController {
     return this.sessions.listAgents(id, req.user.orgId);
   }
 
+  /**
+   * Full agent detail: current task, history, backing task id, communications.
+   * Used by the flow diagram's agent detail panel.
+   */
+  @Get('sessions/:id/agents/:role/detail')
+  async getAgentDetail(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('role') role: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const { orgId } = req.user;
+    return this.sessions.getAgentDetail(id, orgId, role);
+  }
+
+  /**
+   * Logs for a specific agent's current/last backing task (task_events).
+   */
+  @Get('sessions/:id/agents/:role/logs')
+  async getAgentLogs(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('role') role: string,
+    @Query('limit') limit: string | undefined,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const { orgId } = req.user;
+    return this.sessions.getAgentLogs(id, orgId, role, limit ? parseInt(limit, 10) : 100);
+  }
+
   // ── Events (timeline) ─────────────────────────────────────────────────────
 
   @Get('sessions/:id/events')

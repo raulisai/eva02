@@ -81,6 +81,12 @@ export const devStudioApi = {
   listAgents: (sessionId: string) =>
     coreFetch<DevAgent[]>(`${BASE}/sessions/${sessionId}/agents`),
 
+  getAgentDetail: (sessionId: string, role: string) =>
+    coreFetch<Record<string, unknown>>(`${BASE}/sessions/${sessionId}/agents/${role}/detail`),
+
+  getAgentLogs: (sessionId: string, role: string, limit = 100) =>
+    coreFetch<Record<string, unknown>[]>(`${BASE}/sessions/${sessionId}/agents/${role}/logs?limit=${limit}`),
+
   // Events
   listEvents: (sessionId: string, limit?: number) => {
     const qs = limit ? `?limit=${limit}` : '';

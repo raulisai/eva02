@@ -8,10 +8,11 @@ import {
   MessageBody,
   ConnectedSocket,
 } from '@nestjs/websockets';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { EvaEvent } from '../events/event-bus.service';
 import { DatabaseService } from '../database/database.service';
+import { SandboxService } from '../agent/sandbox.service';
 
 @Injectable()
 @WebSocketGateway({
@@ -24,7 +25,12 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
   private readonly logger = new Logger(AppGateway.name);
 
-  constructor(private readonly db: DatabaseService) {}
+  private readonly sandboxSessions = new Map<string, () => void>(); // socketId → unsubscribe
+
+  constructor(
+    private readonly db: DatabaseService,
+    @Optional() private readonly sandbox?: SandboxService,
+  ) {}
 
   afterInit() {
     this.logger.log('WebSocket gateway initialised at namespace /eva');
@@ -83,6 +89,8 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
   handleDisconnect(client: Socket) {
     this.logger.debug(`Client ${client.id} disconnected`);
+    const unsub = this.sandboxSessions.get(client.id);
+    if (unsub) { unsub(); this.sandboxSessions.delete(client.id); }
   }
 
   /** Broadcast an EVA event to all members of an org room. */
@@ -103,5 +111,63 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   @SubscribeMessage('ping')
   handlePing(@ConnectedSocket() client: Socket, @MessageBody() _data: unknown) {
     client.emit('pong', { ts: Date.now() });
+  }
+
+  /**
+   * Attach to an agent's sandbox PTY.
+   * Client sends: { taskId: string, shellNum?: number }
+   * Server streams back: 'sandbox.output' events with { data: string }
+   */
+  @SubscribeMessage('sandbox.attach')
+  handleSandboxAttach(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { taskId: string; shellNum?: number },
+  ) {
+    if (!this.sandbox) {
+      client.emit('sandbox.error', { message: 'Sandbox no disponible' });
+      return;
+    }
+
+    // Detach any previous session
+    const prev = this.sandboxSessions.get(client.id);
+    if (prev) prev();
+
+    const stream = this.sandbox.attachShellStream(payload.taskId, payload.shellNum ?? 0);
+    if (!stream) {
+      client.emit('sandbox.error', { message: `No hay sesión de sandbox activa para task ${payload.taskId}` });
+      return;
+    }
+
+    // Send buffer snapshot immediately for initial paint
+    if (stream.initialBuffer) {
+      client.emit('sandbox.output', { data: stream.initialBuffer, initial: true });
+    }
+
+    // Stream live output
+    const unsub = stream.subscribe((chunk) => {
+      client.emit('sandbox.output', { data: chunk });
+    });
+
+    this.sandboxSessions.set(client.id, unsub);
+    client.emit('sandbox.attached', { taskId: payload.taskId });
+  }
+
+  /** Send raw input to the attached sandbox PTY. */
+  @SubscribeMessage('sandbox.input')
+  handleSandboxInput(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { taskId: string; data: string; shellNum?: number },
+  ) {
+    if (!this.sandbox) return;
+    const stream = this.sandbox.attachShellStream(payload.taskId, payload.shellNum ?? 0);
+    stream?.write(payload.data);
+  }
+
+  /** Detach from sandbox PTY. */
+  @SubscribeMessage('sandbox.detach')
+  handleSandboxDetach(@ConnectedSocket() client: Socket) {
+    const unsub = this.sandboxSessions.get(client.id);
+    if (unsub) { unsub(); this.sandboxSessions.delete(client.id); }
+    client.emit('sandbox.detached', {});
   }
 }
