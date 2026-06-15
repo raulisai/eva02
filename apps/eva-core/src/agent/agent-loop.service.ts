@@ -1,6 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import * as fs from 'node:fs/promises';
 import * as pathLib from 'node:path';
+import * as os from 'node:os';
 import { ApprovalsService } from '../approvals/approvals.service';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { MemoryAgentService } from '../memory/memory-agent.service';
@@ -587,7 +588,20 @@ export class AgentLoopService {
                 type: 'task.step',
                 orgId,
                 taskId,
-                payload: { thought: d.thought, tool: tool.name, args: d.args },
+                payload: {
+                  thought: d.thought,
+                  tool: tool.name,
+                  args: d.args,
+                  machineInfo: {
+                    hostname: os.hostname(),
+                    platform: os.platform(),
+                    arch: os.arch(),
+                    cpuCount: os.cpus().length,
+                    totalMemory: Math.round(os.totalmem() / (1024 * 1024)),
+                    nodeVersion: process.version,
+                    uptime: Math.round(process.uptime()),
+                  },
+                },
               });
             }
             try {
@@ -641,7 +655,20 @@ export class AgentLoopService {
           type: 'task.step',
           orgId,
           taskId,
-          payload: { thought: decision.thought, tool: spec.name, args: decision.args },
+          payload: {
+            thought: decision.thought,
+            tool: spec.name,
+            args: decision.args,
+            machineInfo: {
+              hostname: os.hostname(),
+              platform: os.platform(),
+              arch: os.arch(),
+              cpuCount: os.cpus().length,
+              totalMemory: Math.round(os.totalmem() / (1024 * 1024)),
+              nodeVersion: process.version,
+              uptime: Math.round(process.uptime()),
+            },
+          },
         });
       }
 

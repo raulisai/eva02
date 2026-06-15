@@ -529,7 +529,14 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
           );
         }
         if (event.type === 'task.step') {
-          return <ThoughtBubble key={`step-${index}`} event={event} />;
+          const stepIndex = timelineEvents.indexOf(event);
+          const nextStep = timelineEvents.slice(stepIndex + 1).find((e) => e.type === 'task.step');
+          const stepLogs = events.filter((e) =>
+            e.type === 'task.log' &&
+            e.ts >= event.ts &&
+            (!nextStep || e.ts < nextStep.ts)
+          );
+          return <ThoughtBubble key={`step-${index}`} event={event} logs={stepLogs} />;
         }
         if (event.type === 'task.media') {
           const payload = event.payload as { kind?: string; url?: string };
@@ -675,33 +682,111 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
   );
 }
 
-function ThoughtBubble({ event }: { event: EvaEvent }) {
+function ThoughtBubble({ event, logs = [] }: { event: EvaEvent; logs?: EvaEvent[] }) {
   const [expanded, setExpanded] = useState(false);
   const payload = event.payload as any;
+  const toolName = payload.tool || 'pensar';
+  
+  const isFinalAnswer = toolName === 'final_answer';
+  const labelText = isFinalAnswer
+    ? 'Generando respuesta...'
+    : `Ejecutando ${toolName}...`;
+
   return (
-    <div className="flex justify-start animate-slide-up my-1">
+    <div className="flex justify-start animate-slide-up my-1 w-full">
       <div className={cn(
-        "max-w-[85%] min-w-[200px] rounded-sm border px-3 py-2 transition-colors",
+        "max-w-[90%] min-w-[250px] rounded-sm border px-3 py-2 transition-colors w-full bg-zinc-950/20",
         expanded ? "bg-zinc-900 border-zinc-700" : "bg-transparent border-transparent hover:bg-zinc-900/50 cursor-pointer text-zinc-500"
       )} onClick={() => setExpanded(!expanded)}>
-        <div className="flex items-center gap-2 select-none">
-          {expanded ? <ChevronDown className="w-3.5 h-3.5 text-zinc-400" /> : <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />}
-          <span className={cn("font-mono text-[10px] uppercase tracking-widest", expanded ? "text-zinc-400" : "text-zinc-600")}>
-            {expanded ? "EVA thought process" : "Thinking..."}
-          </span>
+        <div className="flex items-center justify-between select-none">
+          <div className="flex items-center gap-2">
+            {expanded ? <ChevronDown className="w-3.5 h-3.5 text-zinc-400" /> : <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />}
+            <span className={cn("font-mono text-[10px] uppercase tracking-widest", expanded ? "text-cyan-400 font-bold" : "text-zinc-500")}>
+              {expanded ? `Ejecución de ${toolName}` : labelText}
+            </span>
+          </div>
+          {!expanded && logs.length > 0 && (
+            <span className="text-[9px] font-mono bg-zinc-800/40 text-zinc-500 px-1.5 py-0.5 rounded-full">
+              {logs.length} logs
+            </span>
+          )}
         </div>
+        
         {expanded && (
-          <div className="mt-3 space-y-3 border-t border-zinc-800 pt-3 cursor-text" onClick={e => e.stopPropagation()}>
-            <p className="text-xs text-zinc-300 whitespace-pre-wrap leading-relaxed">{payload.thought}</p>
+          <div className="mt-3 space-y-4 border-t border-zinc-800 pt-3 cursor-text" onClick={e => e.stopPropagation()}>
+            {payload.thought && (
+              <div className="space-y-1">
+                <span className="text-[9px] font-mono text-zinc-500 uppercase tracking-widest block font-bold">Razonamiento (Thinking)</span>
+                <p className="text-xs text-zinc-300 whitespace-pre-wrap leading-relaxed bg-zinc-950/40 p-2 rounded-sm border border-zinc-800/40">{payload.thought}</p>
+              </div>
+            )}
+
             <div className="bg-zinc-950 p-2.5 rounded-sm border border-zinc-800 shadow-inner">
               <span className="text-fuchsia-400 font-mono text-[10px] block mb-1.5 flex items-center gap-1.5">
                 <Cog className="w-3 h-3" />
-                {payload.tool}
+                Herramienta: {toolName}
               </span>
-              <pre className="text-zinc-400 font-mono text-[10px] overflow-x-auto whitespace-pre-wrap break-all leading-relaxed">
-                {payload.args && Object.keys(payload.args).length > 0 ? JSON.stringify(payload.args, null, 2) : '(no args)'}
+              <pre className="text-zinc-400 font-mono text-[10px] overflow-x-auto whitespace-pre-wrap break-all leading-relaxed bg-zinc-900/40 p-2 rounded border border-zinc-800/20">
+                {payload.args && Object.keys(payload.args).length > 0
+                  ? JSON.stringify(payload.args, null, 2)
+                  : '(sin argumentos)'}
               </pre>
             </div>
+
+            {payload.machineInfo && (
+              <div className="bg-zinc-950/80 p-2.5 rounded-sm border border-zinc-800/60 font-mono text-[10px] text-zinc-400 space-y-1">
+                <div className="text-zinc-500 uppercase tracking-widest text-[8px] mb-1 font-bold">Host / Servidor</div>
+                <div><span className="text-zinc-600">Hostname:</span> {payload.machineInfo.hostname}</div>
+                <div><span className="text-zinc-600">Sistema:</span> {payload.machineInfo.platform} ({payload.machineInfo.arch})</div>
+                <div><span className="text-zinc-600">Recursos:</span> {payload.machineInfo.cpuCount} CPUs · {payload.machineInfo.totalMemory} MB RAM</div>
+                <div><span className="text-zinc-600">Entorno:</span> Node {payload.machineInfo.nodeVersion} · Uptime: {payload.machineInfo.uptime}s</div>
+              </div>
+            )}
+
+            {logs.length > 0 && (
+              <div className="space-y-1.5">
+                <span className="text-[9px] font-mono text-zinc-500 uppercase tracking-widest block font-bold">Logs de Ejecución ({logs.length})</span>
+                <div className="border border-zinc-800 rounded-sm bg-zinc-950 max-h-60 overflow-y-auto font-mono text-[10px] divide-y divide-zinc-900/60">
+                  {logs.map((logEvent, logIdx) => {
+                    const logPayload = logEvent.payload as any;
+                    const isError = logPayload.level === 'error' || logPayload.message?.startsWith('ERROR');
+                    return (
+                      <div key={logIdx} className="p-2 flex items-start gap-2 hover:bg-zinc-900/20">
+                        <span className="text-zinc-600 flex-shrink-0">
+                          {new Date(logEvent.ts).toLocaleTimeString()}
+                        </span>
+                        {logPayload.scope && (
+                          <span className={cn(
+                            "flex-shrink-0 text-[8px] uppercase px-1 rounded-sm border",
+                            logPayload.scope === 'browser' ? "text-blue-400 border-blue-500/20 bg-blue-500/5" :
+                            logPayload.scope === 'sandbox' ? "text-amber-400 border-amber-500/20 bg-amber-500/5" :
+                            "text-zinc-400 border-zinc-700"
+                          )}>
+                            {logPayload.scope}
+                          </span>
+                        )}
+                        <div className="flex-1 break-all">
+                          <span className={isError ? "text-red-400" : "text-zinc-300"}>
+                            {logPayload.message}
+                          </span>
+                          {logPayload.url && logPayload.kind === 'image' && (
+                            <div className="mt-2">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img src={logPayload.url} alt="screenshot" className="max-h-40 rounded border border-zinc-800 bg-zinc-950" />
+                            </div>
+                          )}
+                          {logPayload.url && logPayload.kind !== 'image' && (
+                            <div className="text-[9px] text-cyan-400 underline mt-0.5">
+                              <a href={logPayload.url} target="_blank" rel="noopener noreferrer">{logPayload.url}</a>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
