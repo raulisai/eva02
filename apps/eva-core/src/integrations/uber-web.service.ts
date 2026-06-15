@@ -1082,7 +1082,7 @@ export class UberWebService {
           .split(/[^\p{L}\p{N}]+/u)
           .filter((token) => token.length >= 4)
           .slice(0, 5);
-        if (tokens.length === 0) return false;
+        if (tokens.length === 0 && !forceFirstSuggestion) return false;
 
         const isVisible = (el: Element | null) => {
           if (!el) return false;
@@ -1091,22 +1091,94 @@ export class UberWebService {
           const hasSize = he.offsetWidth > 0 || he.offsetHeight > 0 || he.getClientRects().length > 0;
           return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && hasSize;
         };
+        const rectFor = (el: Element) => (el as HTMLElement).getBoundingClientRect();
+        const activeRect = document.activeElement && isVisible(document.activeElement)
+          ? rectFor(document.activeElement)
+          : null;
+        const overlapsFocusedField = (el: Element) => {
+          if (!activeRect) return false;
+          const rect = rectFor(el);
+          const horizontalOverlap = Math.min(rect.right, activeRect.right + 80) - Math.max(rect.left, activeRect.left - 80);
+          const nearBelow = rect.top >= activeRect.top - 8 && rect.top <= activeRect.bottom + 560;
+          return nearBelow && horizontalOverlap > Math.min(rect.width, activeRect.width) * 0.25;
+        };
         const guarded = /\b(request|pedir|solicitar|confirm|confirmar|pay|pagar)\b/i;
-        const candidates = Array.from(document.querySelectorAll('[role="option"], li, button, a, div[role="button"]'));
+        const popupSelectors = [
+          '[role="listbox"]',
+          '[role="menu"]',
+          '[data-baseweb*="menu" i]',
+          '[data-baseweb*="popover" i]',
+          '[class*="suggest" i]',
+          '[class*="autocomplete" i]',
+          '[id*="suggest" i]',
+          '[id*="autocomplete" i]',
+        ].join(', ');
+        const popups = Array.from(document.querySelectorAll(popupSelectors)).filter(isVisible);
+        const inPopup = (el: Element) => popups.some((popup) => popup === el || popup.contains(el));
+        const explicit = Array.from(document.querySelectorAll([
+          '[role="option"]',
+          '[aria-selected]',
+          'li',
+          'button',
+          'a',
+          'div[role="button"]',
+          '[data-testid*="suggest" i]',
+          '[data-testid*="prediction" i]',
+          '[data-testid*="autocomplete" i]',
+        ].join(', ')));
+        const nearbyRows = Array.from(document.querySelectorAll('div, li, [role="option"], [aria-selected]'))
+          .filter((el) => {
+            if (!isVisible(el)) return false;
+            const rect = rectFor(el);
+            const text = normalize(el.textContent ?? '');
+            return text.length >= 4
+              && text.length <= 240
+              && rect.height >= 18
+              && rect.height <= 140
+              && (inPopup(el) || overlapsFocusedField(el));
+          });
+        const candidates = Array.from(new Set([...explicit, ...nearbyRows]));
         const eligible = candidates.filter((el) => {
           if (!isVisible(el)) return false;
+          if (el === document.activeElement || el.contains(document.activeElement)) return false;
+          const rect = rectFor(el);
+          if (rect.width < 24 || rect.height < 12) return false;
           const text = normalize(`${el.textContent ?? ''} ${el.getAttribute('aria-label') ?? ''}`);
           if (text.length < 4 || text.length > 240 || guarded.test(text)) return false;
           if (/\b(pickup|dropoff|search|buscar|activity|for me|pickup now)\b/i.test(text) && text.length < 40) return false;
+          const role = (el.getAttribute('role') ?? '').toLowerCase();
+          const optionLike = role === 'option'
+            || el.hasAttribute('aria-selected')
+            || el.tagName.toLowerCase() === 'li'
+            || inPopup(el)
+            || overlapsFocusedField(el);
+          if (!optionLike) return false;
           return true;
+        }).sort((a, b) => {
+          const ar = rectFor(a);
+          const br = rectFor(b);
+          return ar.top - br.top || ar.left - br.left || (ar.width * ar.height) - (br.width * br.height);
+        });
+        const withoutNestedDuplicates = eligible.filter((el, index, all) => {
+          const text = normalize(el.textContent ?? '');
+          return !all.some((other, otherIndex) => {
+            if (otherIndex >= index) return false;
+            if (!other.contains(el)) return false;
+            return normalize(other.textContent ?? '') === text;
+          });
         });
         const match = eligible.find((el) => {
           const text = normalize(`${el.textContent ?? ''} ${el.getAttribute('aria-label') ?? ''}`);
           const lower = text.toLowerCase();
           return tokens.some((token) => lower.includes(token));
-        }) ?? (forceFirstSuggestion ? eligible[0] : undefined);
+        }) ?? (forceFirstSuggestion ? withoutNestedDuplicates[0] : undefined);
         if (!match) return false;
-        (match as HTMLElement).click();
+        const clickTarget = (match.closest('button, a, [role="option"], [role="button"], li') as HTMLElement | null)
+          ?? (match as HTMLElement);
+        clickTarget.scrollIntoView({ block: 'center' });
+        clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        clickTarget.click();
         return true;
       },
       { value, forceFirstSuggestion: opts.forceFirstSuggestion === true },

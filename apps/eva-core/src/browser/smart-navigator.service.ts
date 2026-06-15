@@ -133,6 +133,8 @@ const SYSTEM_PROMPT = [
   '- Usa DOM hints, labels, roles, selectores y estilos para razonar dónde hacer click; no dependas solo del texto.',
   '- Usa MEMORY para no repetir acciones fallidas y para continuar desde donde te quedaste.',
   '- Usa SITE_LEARNINGS como pistas, no como verdad absoluta; verifica contra la página actual.',
+  '- Si un campo de búsqueda/dirección/autocomplete está enfocado o recién escrito y hay opciones/sugerencias visibles, selecciona la primera opción relevante antes de avanzar a otro campo o botón.',
+  '- Si un campo muestra texto parcial, truncado o mal formado y aparecen opciones visibles, corrígelo haciendo click en la opción más probable en vez de continuar.',
   '- "type" requiere target (índice de un input) y value (el texto a escribir).',
   '- "click" requiere target.',
   '- "scroll" usa value "up" o "down".',
@@ -153,6 +155,8 @@ const DIAGNOSE_PROMPT = [
   '{"current_state":"...","visible_findings":["..."],"failure_reason":"...","hypotheses":["..."],"next_strategy":"...","suggested_action":{"action":"click|type|scroll|press|back|wait|done|fail","target":0,"value":null,"reason":"..."},"confidence":0.0}',
   'Reglas:',
   '- Si ves badges, colores, modales, errores, carga, bloqueos, QR o estados visuales, menciónalos en visible_findings.',
+  '- Si ves un autocomplete/listbox abierto con opciones de dirección, búsqueda o contacto, diagnostica si falta seleccionar una opción y sugiere click en la mejor opción visible.',
+  '- Si un campo parece incompleto o mal geocodificado pero la opción correcta está visible, la siguiente estrategia es seleccionar esa opción, no pulsar el botón final.',
   '- Si el DOM y la imagen discrepan, prioriza la imagen pero usa selectores/labels del DOM para escoger target.',
   '- No sugieras pago/checkout/compra.',
   '- Si no hay acción segura, suggested_action debe ser fail o wait.',
@@ -340,11 +344,51 @@ export class SmartNavigatorService {
             he.innerText ? he.innerText.replace(/\s+/g, ' ').trim().slice(0, 60) : '',
           ].filter(Boolean).join(' ');
         };
-        const sel = 'input, textarea, select, button, a[href], [role="button"], [role="link"], [role="checkbox"], [role="tab"], [role="menuitem"]';
-        const all = Array.from(document.querySelectorAll(sel));
+        const interactiveSel = [
+          'input',
+          'textarea',
+          'select',
+          'button',
+          'a[href]',
+          '[role="button"]',
+          '[role="link"]',
+          '[role="checkbox"]',
+          '[role="tab"]',
+          '[role="menuitem"]',
+          '[role="option"]',
+          '[role="listitem"]',
+          'li',
+          '[aria-selected]',
+          '[data-testid*="suggest" i]',
+          '[data-testid*="prediction" i]',
+          '[data-testid*="autocomplete" i]',
+        ].join(', ');
+        const all = Array.from(document.querySelectorAll(interactiveSel));
+        const autocompleteContainers = Array.from(document.querySelectorAll([
+          '[role="listbox"]',
+          '[role="menu"]',
+          '[data-baseweb*="menu" i]',
+          '[data-baseweb*="popover" i]',
+          '[class*="suggest" i]',
+          '[class*="autocomplete" i]',
+          '[id*="suggest" i]',
+          '[id*="autocomplete" i]',
+        ].join(', '))).filter(isVisible);
+        for (const container of autocompleteContainers) {
+          const rows = Array.from(container.querySelectorAll('[role="option"], [aria-selected], li, button, a[href], div'))
+            .filter((el) => {
+              if (!isVisible(el)) return false;
+              const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+              const rect = (el as HTMLElement).getBoundingClientRect();
+              return text.length >= 2 && text.length <= 240 && rect.height >= 12;
+            })
+            .slice(0, 20);
+          all.push(...rows);
+        }
+        const unique = Array.from(new Set(all));
         const elements: Array<NavElement> = [];
         let idx = 0;
-        for (const el of all) {
+        for (const el of unique) {
           if (idx >= 100) break;
           if (!isVisible(el)) continue;
           el.setAttribute('data-eva-idx', String(idx));
@@ -354,7 +398,14 @@ export class SmartNavigatorService {
           const tag = el.tagName.toLowerCase();
           const type = (el.getAttribute('type') ?? '').toLowerCase();
           const role = (el.getAttribute('role') ?? '').toLowerCase();
-          const kind = tag === 'input' ? (type || 'text') : tag === 'a' ? 'link' : (role || tag);
+          const dataTest = (el.getAttribute('data-testid') ?? '').toLowerCase();
+          const className = typeof el.className === 'string' ? el.className.toLowerCase() : '';
+          const optionLike = role === 'option'
+            || role === 'listitem'
+            || tag === 'li'
+            || el.hasAttribute('aria-selected')
+            || /suggest|prediction|autocomplete/.test(`${dataTest} ${className}`);
+          const kind = optionLike ? 'option' : tag === 'input' ? (type || 'text') : tag === 'a' ? 'link' : (role || tag);
           const raw = el.getAttribute('aria-label')
             ?? el.getAttribute('placeholder')
             ?? el.getAttribute('name')
@@ -401,6 +452,7 @@ export class SmartNavigatorService {
         if (/captcha|verifica que eres humano|robot/.test(bodyText)) visualHints.push('possible captcha/human verification');
         if (/loading|cargando|please wait/.test(bodyText)) visualHints.push('possible loading state');
         if (/error|failed|fall[oó]|no se pudo/.test(bodyText)) visualHints.push('visible error text');
+        if (elements.some((el) => el.kind === 'option')) visualHints.push('autocomplete/listbox options visible');
         const domHints = elements.slice(0, 30).map((e) => `#${e.idx} ${e.kind} "${e.label || e.visibleText || '(sin label)'}" ${e.selector ?? ''}`.trim());
         const fingerprintSource = JSON.stringify({
           url: location.href,
@@ -514,7 +566,7 @@ export class SmartNavigatorService {
       return { action: 'fail', target: null, value: null, reason: 'unparseable model response' };
     }
     const action = String(obj['action'] ?? '').toLowerCase() as NavActionKind;
-    if (!['click', 'type', 'wait', 'done', 'fail'].includes(action)) {
+    if (!['click', 'type', 'scroll', 'press', 'back', 'wait', 'done', 'fail'].includes(action)) {
       return { action: 'fail', target: null, value: null, reason: `unknown action "${obj['action']}"` };
     }
     const targetRaw = obj['target'];

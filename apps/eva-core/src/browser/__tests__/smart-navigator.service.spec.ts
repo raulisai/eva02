@@ -184,6 +184,27 @@ describe('SmartNavigatorService', () => {
     expect(evaluateCalls).toHaveLength(0);
   });
 
+  it('accepts keyboard/navigation actions emitted by the model', async () => {
+    browser.evaluate.mockImplementation(async (_sid: string, _org: string, fn: any, arg?: unknown) => {
+      const fnStr = fn ? fn.toString() : '';
+      if (fnStr.includes('readyState') || fnStr.includes('spinner')) return;
+      if (arg === undefined) return emailForm;
+      return true;
+    });
+    models.generate.mockResolvedValueOnce({
+      text: JSON.stringify({ action: 'press', target: null, value: 'ArrowDown', reason: 'select first autocomplete option' }),
+      model: 'm',
+      backend: 'google',
+      usage: {},
+    });
+
+    await build();
+    const result = await service.navigate(ORG, SESSION, 'choose the first autocomplete result', { maxSteps: 1, settleMs: 300 });
+
+    expect(result.steps[0].action.action).toBe('press');
+    expect(browser.pressKey).toHaveBeenCalledWith(SESSION, ORG, 'ArrowDown');
+  });
+
   it('diagnoses visually and persists navigation memory when an action makes no progress', async () => {
     const samePage: PageSnapshot = {
       url: 'https://web.whatsapp.com/',

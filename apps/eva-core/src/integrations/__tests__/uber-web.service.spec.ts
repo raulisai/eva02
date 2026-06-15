@@ -217,6 +217,70 @@ describe('UberWebService', () => {
     expect(browser.typeCharacters.mock.calls.filter((call) => call[2] === 'Trabajo, CDMX, México')).toHaveLength(2);
   });
 
+  it('selects a visible plain-div autocomplete suggestion near the focused address field', async () => {
+    const previousDocument = (global as any).document;
+    const previousWindow = (global as any).window;
+    const previousMouseEvent = (global as any).MouseEvent;
+    const click = jest.fn();
+    const activeInput = {
+      tagName: 'INPUT',
+      textContent: '',
+      offsetWidth: 520,
+      offsetHeight: 54,
+      getClientRects: () => [1],
+      getBoundingClientRect: () => ({ left: 96, right: 624, top: 280, bottom: 334, width: 528, height: 54 }),
+    };
+    const row = {
+      tagName: 'DIV',
+      textContent: 'Avenida Norte 209 Agrícola Pantitlán, Pantitlán, 08100 Iztacalco, Mexico City',
+      offsetWidth: 520,
+      offsetHeight: 82,
+      getClientRects: () => [1],
+      getBoundingClientRect: () => ({ left: 96, right: 624, top: 452, bottom: 534, width: 528, height: 82 }),
+      getAttribute: (_name: string) => null,
+      hasAttribute: (_name: string) => false,
+      contains: (el: unknown) => el === row,
+      closest: () => row,
+      scrollIntoView: jest.fn(),
+      dispatchEvent: jest.fn(),
+      click,
+    };
+    (activeInput as any).contains = (el: unknown) => el === activeInput;
+    (activeInput as any).getAttribute = (_name: string) => null;
+    (activeInput as any).hasAttribute = (_name: string) => false;
+    (global as any).document = {
+      activeElement: activeInput,
+      querySelectorAll: (selector: string) => {
+        if (selector.includes('[role="listbox"]') || selector.includes('[role="menu"]')) return [];
+        if (selector === 'div, li, [role="option"], [aria-selected]') return [row];
+        return [];
+      },
+    };
+    (global as any).window = {
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    };
+    (global as any).MouseEvent = function MockMouseEvent() {
+      return {};
+    };
+    browser.evaluate.mockImplementation(async (_sessionId: string, _orgId: string, fn: any, arg?: unknown) => fn(arg));
+
+    try {
+      const selected = await (service as any).clickFirstMatchingPlaceSuggestion(
+        SESSION,
+        ORG,
+        'Agrícola Pantitlán Iztacalco',
+        { forceFirstSuggestion: true },
+      );
+
+      expect(selected).toBe(true);
+      expect(click).toHaveBeenCalled();
+    } finally {
+      (global as any).document = previousDocument;
+      (global as any).window = previousWindow;
+      (global as any).MouseEvent = previousMouseEvent;
+    }
+  });
+
   it('uses the stored Google Web credential when Uber asks for Google login', async () => {
     googleWeb.hasCredential.mockResolvedValue(true);
     googleWeb.loginCurrentSession.mockResolvedValue({
