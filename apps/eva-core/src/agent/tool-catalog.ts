@@ -35,6 +35,7 @@ import { RappiWebService } from '../integrations/rappi-web.service';
 import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
 import { AgentIntelligenceService } from './agent-intelligence.service';
 import { ResearchToolsService } from './research-tools.service';
+import { SmartNavigatorService } from '../browser/smart-navigator.service';
 
 const logger = new Logger('ToolCatalog');
 
@@ -56,6 +57,7 @@ export interface ToolCatalogDeps {
   uber: UberWebService;
   rappi: RappiWebService;
   scheduledJobs: ScheduledJobsService;
+  smartNavigator?: SmartNavigatorService;
   intelligence?: AgentIntelligenceService;
   approvals?: ApprovalsService;
   integrations?: IntegrationsService;
@@ -81,6 +83,7 @@ export function buildToolCatalog(deps: ToolCatalogDeps): ToolSpec[] {
   const {
     db, modelRouter, research, gmail, calendar, schedule, drive, memoryAgent,
     forge, sandbox, skillLibrary, skillDocs, whatsapp, uber, rappi, scheduledJobs,
+    smartNavigator,
     intelligence, approvals, integrations, telegram,
     formatSandboxResult, isBrittleRawPdfSkill, validateOutgoingArtifact,
     expandSkillInlineShell, saveArtifact,
@@ -550,6 +553,51 @@ export function buildToolCatalog(deps: ToolCatalogDeps): ToolSpec[] {
       },
     },
     {
+      name: 'browser_navigate',
+      usage: 'browser_navigate{"session_id","goal","max_steps"?}: navega una sesión de navegador ya abierta con ciclo visual observar→decidir→click/type/wait; usa DOM + captura de pantalla en cada paso.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          session_id: { type: 'string', description: 'ID de sesión de navegador existente (por ejemplo devuelto por una herramienta web/integración).' },
+          goal: { type: 'string', description: 'Objetivo visible y concreto a lograr en la página actual.' },
+          max_steps: { type: 'number', description: 'Máximo de pasos visuales (1-12, default 6).' },
+          context: {
+            type: 'object',
+            additionalProperties: { type: 'string' },
+            description: 'Datos breves para llenar formularios o desambiguar el objetivo.',
+          },
+        },
+        required: ['session_id', 'goal'],
+      },
+      execute: async (orgId, taskId, args) => {
+        if (!smartNavigator?.available) {
+          return 'ERROR: browser_navigate no disponible: falta SmartNavigatorService o un modelo de visión configurado.';
+        }
+        const sessionId = String(args.session_id ?? '').trim();
+        const goal = String(args.goal ?? '').trim();
+        if (!sessionId || !goal) return 'ERROR: browser_navigate requiere session_id y goal.';
+        const maxSteps = typeof args.max_steps === 'number' ? args.max_steps : undefined;
+        const rawContext = args.context && typeof args.context === 'object' && !Array.isArray(args.context)
+          ? args.context as Record<string, unknown>
+          : undefined;
+        const context = rawContext
+          ? Object.fromEntries(Object.entries(rawContext).map(([key, value]) => [key, String(value)]))
+          : undefined;
+        const result = await smartNavigator.navigate(orgId, sessionId, goal, { maxSteps, context, taskId });
+        const last = result.steps.at(-1);
+        const trace = result.steps
+          .slice(-4)
+          .map((step, idx) => `${idx + 1}. ${step.action.action}${step.action.target != null ? ` #${step.action.target}` : ''}: ${step.action.reason}`)
+          .join('\n');
+        return [
+          result.ok ? '✅ Navegación visual completada.' : `ERROR: navegación visual no completada: ${result.reason}`,
+          result.finalUrl ? `URL final: ${result.finalUrl}` : undefined,
+          last ? `Último estado: ${last.snapshot.title || '(sin título)'} — ${last.snapshot.url}` : undefined,
+          trace ? `Pasos recientes:\n${trace}` : undefined,
+        ].filter(Boolean).join('\n');
+      },
+    },
+    {
       name: 'sandbox_ls',
       usage: 'sandbox_ls{"path"?}: lista los archivos en /work del sandbox de la tarea (o en un subdirectorio). Usa esto para verificar que un archivo fue descargado antes de enviarlo.',
       inputSchema: {
@@ -692,9 +740,18 @@ export function buildToolCatalog(deps: ToolCatalogDeps): ToolSpec[] {
               : await whatsapp.fetchLatestMessage(orgId, taskId);
 
         let replyText = result.text;
-        if (result.session.screenshot?.image_base64 && (contact || !unansweredOnly)) {
+        if (result.session?.screenshot?.image_base64) {
           try {
-            const visionPrompt = `Aquí tienes la lista de mensajes extraídos por DOM:\n${('messages' in result && result.messages) ? result.messages.join('\n') : '(Ninguno extraído por DOM)'}\n\nAnaliza la captura de pantalla de WhatsApp Web provista para complementar la lista de mensajes si falta alguno.`;
+            const modeHint = unansweredOnly
+              ? [
+                  'El usuario quiere saber qué chats/mensajes están pendientes de respuesta.',
+                  'Usa la captura para detectar señales visuales de WhatsApp Web: badges, color/resaltado de chats no leídos, último mensaje entrante vs saliente, y cualquier contador visible.',
+                  'Si no puedes asegurar "sin responder" solo con lo visible, dilo con precisión y lista los chats candidatos que sí se ven.',
+                ].join('\n')
+              : unreadOnly
+                ? 'El usuario quiere mensajes/chats sin leer; usa color, badges y contadores visibles para complementar el DOM.'
+                : 'Complementa la lista de mensajes si falta alguno.';
+            const visionPrompt = `Aquí tienes la lista de mensajes extraídos por DOM:\n${('messages' in result && result.messages) ? result.messages.join('\n') : '(Ninguno extraído por DOM)'}\n\n${modeHint}\n\nResponde en español con los nombres/chats y evidencia visible breve.`;
             const visionRes = await modelRouter.generate(visionPrompt, {
               orgId, taskId,
               imageBase64: result.session.screenshot.image_base64,
@@ -1109,6 +1166,12 @@ export function buildZodSchemas(): Record<string, z.ZodSchema> {
     script_forge: z.object({ spec: z.string().min(1, 'El spec no puede estar vacío') }),
     delegate: z.object({ goal: z.string().min(1, 'El objetivo no puede estar vacío'), role: z.string().optional() }),
     image_analyze: z.object({ path: z.string().min(1, 'La ruta de la imagen no puede estar vacía'), prompt: z.string().optional() }),
+    browser_navigate: z.object({
+      session_id: z.string().min(1, 'La sesión no puede estar vacía'),
+      goal: z.string().min(1, 'El objetivo no puede estar vacío'),
+      max_steps: z.number().int().min(1).max(12).optional(),
+      context: z.record(z.string(), z.string()).optional(),
+    }),
     sandbox_ls: z.object({ path: z.string().optional() }),
     telegram_send_file: z.object({ file: z.string().min(1, 'El archivo no puede estar vacío'), caption: z.string().optional(), chat_id: z.string().optional() }),
     whatsapp_send: z.object({ contact: z.string().min(1, 'El contacto no puede estar vacío'), text: z.string().min(1, 'El texto no puede estar vacío') }),

@@ -21,6 +21,7 @@ import { RappiWebService } from '../../integrations/rappi-web.service';
 import { ScheduledJobsService } from '../../jobs/scheduled-jobs.service';
 import { SkillDocsService } from '../skill-docs.service';
 import { EventBusService } from '../../events/event-bus.service';
+import { SmartNavigatorService } from '../../browser/smart-navigator.service';
 
 const ORG = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const TASK = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -98,6 +99,7 @@ describe('AgentLoopService', () => {
   let uber: jest.Mocked<UberWebService>;
   let rappi: jest.Mocked<RappiWebService>;
   let scheduledJobs: jest.Mocked<ScheduledJobsService>;
+  let smartNavigator: jest.Mocked<SmartNavigatorService>;
   let database: { admin: { from: jest.Mock } };
   let events: jest.Mocked<EventBusService>;
 
@@ -260,6 +262,23 @@ describe('AgentLoopService', () => {
           },
         },
         {
+          provide: SmartNavigatorService,
+          useValue: {
+            available: true,
+            navigate: jest.fn().mockResolvedValue({
+              ok: true,
+              reason: 'goal reached',
+              finalUrl: 'https://web.whatsapp.com/',
+              steps: [
+                {
+                  snapshot: { title: 'WhatsApp', url: 'https://web.whatsapp.com/', elements: [], textSample: '' },
+                  action: { action: 'done', target: null, value: null, reason: 'done' },
+                },
+              ],
+            }),
+          },
+        },
+        {
           provide: EventBusService,
           useValue: {
             drainSteer: jest.fn().mockResolvedValue([]),
@@ -286,6 +305,7 @@ describe('AgentLoopService', () => {
     uber = module.get(UberWebService);
     rappi = module.get(RappiWebService);
     scheduledJobs = module.get(ScheduledJobsService);
+    smartNavigator = module.get(SmartNavigatorService);
     database = module.get(DatabaseService);
     events = module.get(EventBusService);
   });
@@ -301,6 +321,63 @@ describe('AgentLoopService', () => {
     expect(result.text).toBe('Hola, listo.');
     expect(result.steps).toHaveLength(0);
     expect(result.tokensUsed).toBe(40);
+  });
+
+  it('rejects false WhatsApp capability refusals and forces tool use', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"no puedo","tool":"final_answer","args":{"text":"No puedo acceder directamente a tus mensajes privados de WhatsApp; mi funcionalidad se limita a las herramientas disponibles."}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"uso la herramienta","tool":"whatsapp_read","args":{"unanswered_only":true}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"listo","tool":"final_answer","args":{"text":"Tienes 2 chats pendientes de respuesta: Ana y Luis."}}'));
+    whatsapp.fetchUnansweredMessages.mockResolvedValueOnce({
+      ok: true,
+      text: 'Pendientes: Ana, Luis',
+      session: { state: 'logged_in' },
+    } as any);
+
+    const result = await service.run(ORG, TASK, 'puedes ver cuales son los mensajes que tengo sin responder de WhatsApp', { maxSteps: 4 });
+
+    expect(result.ok).toBe(true);
+    expect(result.text).toContain('Ana');
+    expect(whatsapp.fetchUnansweredMessages).toHaveBeenCalledWith(ORG, TASK);
+    expect(result.steps[0].observation).toContain('VERIFICACIÓN FALLIDA');
+  });
+
+  it('exposes browser_navigate as a loop tool for visual navigation', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"navego visualmente","tool":"browser_navigate","args":{"session_id":"browser-session-1","goal":"identifica chats sin responder","max_steps":3}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"listo","tool":"final_answer","args":{"text":"Revisé la página visualmente."}}'));
+
+    const result = await service.run(ORG, TASK, 'revisa visualmente WhatsApp Web para ver mensajes pendientes', { maxSteps: 4 });
+
+    expect(result.ok).toBe(true);
+    expect(smartNavigator.navigate).toHaveBeenCalledWith(ORG, 'browser-session-1', 'identifica chats sin responder', expect.objectContaining({ maxSteps: 3, taskId: TASK }));
+    expect(result.toolsUsed).toContain('browser_navigate');
+  });
+
+  it('uses vision for whatsapp_read unanswered_only when a screenshot is available', async () => {
+    whatsapp.fetchUnansweredMessages.mockResolvedValueOnce({
+      ok: true,
+      text: 'DOM: sin datos concluyentes',
+      messages: [],
+      session: {
+        state: 'logged_in',
+        screenshot: { image_base64: 'base64-png', mime_type: 'image/png' },
+      },
+    } as any);
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"leo pendientes","tool":"whatsapp_read","args":{"unanswered_only":true}}'))
+      .mockResolvedValueOnce(modelReply('Visual: se ven chats resaltados de Ana y Luis.'))
+      .mockResolvedValueOnce(modelReply('{"thought":"listo","tool":"final_answer","args":{"text":"Se ven pendientes Ana y Luis."}}'));
+
+    const result = await service.run(ORG, TASK, 'mensajes sin responder de WhatsApp', { maxSteps: 4 });
+
+    expect(result.ok).toBe(true);
+    expect(modelRouter.generate.mock.calls[1][0]).toContain('pendientes de respuesta');
+    expect(modelRouter.generate.mock.calls[1][1]).toEqual(expect.objectContaining({
+      imageBase64: 'base64-png',
+      imageMimeType: 'image/png',
+    }));
+    expect(result.steps[0].observation).toContain('Ana y Luis');
   });
 
   it('executes a tool, feeds the observation back, and finishes', async () => {

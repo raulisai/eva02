@@ -29,6 +29,7 @@ import { ScheduledJobsService } from '../jobs/scheduled-jobs.service';
 import { SkillDocsService } from './skill-docs.service';
 import { BackgroundReviewService } from './background-review.service';
 import { MemoryRecallService } from './memory-recall.service';
+import { SmartNavigatorService } from '../browser/smart-navigator.service';
 import { tryParseDirty } from './json-repair';
 import {
   BudgetState,
@@ -137,6 +138,8 @@ const STALL_THRESHOLD = 2;
 const MAX_DOD_REJECTIONS = 2;
 /** Texto que indica reporte honesto de fallo — no aplicar DoD a respuestas honestas. */
 const HONEST_FAILURE_RE = /\b(no se pudo|no pude|no fue posible|bloqueado|error|falló|fall[oó]|no logr[eé]|no dispon|no encontr|no hay|no tengo acceso|requiere|pendiente de aprobaci[oó]n|sin [eé]xito)\b/i;
+const CAPABILITY_REFUSAL_RE = /\b(no puedo|no tengo acceso|no me es posible|no estoy autorizado|mi funcionalidad se limita|no incluye|no puedo acceder directamente)\b[\s\S]{0,180}\b(whatsapp|gmail|correo|calendar|calendario|drive|uber|rappi|mensajes?|aplicaciones? externas?|informaci[oó]n privada|datos personales)\b/i;
+const REAL_SETUP_BLOCK_RE = /\b(qr|iniciar sesi[oó]n|login|vinculaci[oó]n|vincular|conectar|credenciales?|token|autenticaci[oó]n|permiso|approval|aprobaci[oó]n)\b/i;
 /** Herramientas de solo lectura que se pueden ejecutar en paralelo sin carreras sobre /work. */
 const PARALLEL_READ_ONLY_TOOLS = new Set(['web_search', 'gmail_read', 'calendar_read', 'drive_read', 'memory_recall', 'sandbox_ls']);
 
@@ -190,6 +193,7 @@ export class AgentLoopService {
     @Optional() private readonly trajectories?: AgentTrajectoryService,
     @Optional() private readonly intelligence?: AgentIntelligenceService,
     @Optional() private readonly memoryRecall?: MemoryRecallService,
+    @Optional() private readonly smartNavigator?: SmartNavigatorService,
   ) {
     this.tools = buildToolCatalog({
       db: this.db,
@@ -208,6 +212,7 @@ export class AgentLoopService {
       uber: this.uber,
       rappi: this.rappi,
       scheduledJobs: this.scheduledJobs,
+      smartNavigator: this.smartNavigator,
       intelligence: this.intelligence,
       approvals: this.approvals,
       integrations: this.integrations,
@@ -886,6 +891,9 @@ export class AgentLoopService {
       ...(has('uber_quote')
         ? ['- Tarifas de Uber: usa uber_quote como fuente de verdad. NO uses web_search para estimar viajes de Uber; si uber_quote no muestra tarifa, reporta exactamente su estado/screenshot y pide el dato o login faltante.']
         : []),
+      ...(has('browser_navigate')
+        ? ['- Navegación web visual: si una página/app cambia, el DOM no basta, o necesitas decidir por colores/badges/estado visual, usa browser_navigate sobre una session_id existente. Reobserva cada paso; no adivines clicks.']
+        : []),
       '- Para código: aunque se sugiere dividir en pasos lógicos (inspeccionar→preparar→ejecutar→verificar), sé eficiente para no agotar tus pasos límite. Puedes escribir scripts completos que realicen múltiples acciones (como buscar, crear directorios y descargar) en una sola ejecución de code_execute. Los archivos en /work persisten entre pasos de esta tarea.',
       ...(has('code_execute') && has('telegram_send_file')
         ? ['- Para descargar medios/videos (YouTube, etc.): el sandbox tiene listo yt-dlp y ffmpeg. Escribe un script en code_execute (con "network": true) que use yt-dlp directamente. IMPORTANTE: yt-dlp puede buscar videos por ti sin que busques el enlace antes (ej: usar `yt-dlp --max-downloads 1 --format mp4 "ytsearch1:one piece quinto emperador"` busca y descarga el primer video de esa búsqueda). No malgastes pasos en web_search intentando encontrar enlaces exactos; ¡usa la búsqueda integrada de yt-dlp! Una vez descargado el archivo en /work, usa telegram_send_file para enviarlo de inmediato.']
@@ -1134,6 +1142,7 @@ export class AgentLoopService {
   }
 
   private async validateFinalAnswer(
+    goal: string,
     text: string,
     steps: AgentLoopStep[],
     criteria: string[],
@@ -1141,6 +1150,16 @@ export class AgentLoopService {
     taskId: string,
     deliveryRequirements: DeliveryRequirement[] = [],
   ): Promise<string | null> {
+    const usedTools = new Set(steps.map((step) => step.tool));
+    const goalHasPrivateApp = /\b(whatsapp|gmail|correo|calendar|calendario|drive|uber|rappi)\b/i.test(goal);
+    const usedPrivateAppTool = [...usedTools].some((tool) => /^(whatsapp|gmail|calendar|drive|uber|rappi)_/.test(tool));
+    if ((goalHasPrivateApp || usedPrivateAppTool) && CAPABILITY_REFUSAL_RE.test(text) && !REAL_SETUP_BLOCK_RE.test(text)) {
+      return [
+        'La respuesta niega una capacidad que sí está disponible por herramientas autorizadas.',
+        'No digas que no tienes acceso general a WhatsApp/Gmail/Drive/etc.; usa la herramienta disponible, reporta su observación real, o pide el bloqueo concreto (QR/login/permiso) si aplica.',
+      ].join(' ');
+    }
+
     // Honest failure reports bypass DoD — they are valid step-level outputs.
     // R1.3 path-enforcement runs at the synthesis/delivery level (synthesizeRecoveryOptions),
     // not here, to avoid a validation loop where the agent can't exit honestly mid-run.
@@ -1251,7 +1270,7 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     dodRejections: number,
   ): Promise<FinalEvaluation> {
     const dodViolation = dodRejections < MAX_DOD_REJECTIONS && depth === 0
-      ? await this.validateFinalAnswer(text, steps, dodCriteria, orgId, taskId, deliveryRequirements)
+      ? await this.validateFinalAnswer(goal, text, steps, dodCriteria, orgId, taskId, deliveryRequirements)
       : null;
     if (dodViolation) {
       return {
@@ -1339,7 +1358,7 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     // Tool groups
     const CORE = new Set([
       'scratchpad', 'code_execute', 'terminal_run', 'terminal_input', 'terminal_output',
-      'sandbox_ls', 'ask_user', 'image_analyze', 'memory_recall', 'skill_run', 'skill_view',
+      'sandbox_ls', 'ask_user', 'image_analyze', 'browser_navigate', 'memory_recall', 'skill_run', 'skill_view',
       'delegate', 'data_log',
     ]);
     const RESEARCH_GROUP = new Set(['web_search']);
