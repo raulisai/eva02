@@ -4,6 +4,21 @@ This backlog keeps only relevant, actionable improvements. Completed work moves 
 
 ---
 
+## 0a. Dev Studio — Observabilidad + Claude Code para agentes de código (shipped 2026-06-15)
+- [x] **Equipo dinámico**: el architect arma el equipo mínimo por complejidad; el orquestador registra en `dev_agents` solo los roles usados; `AgentFlowDiagram` renderiza topología dinámica (no 7 nodos fijos).
+- [x] **Logs reales**: `getAgentLogs` leía columnas inexistentes (`step/type/content`) de `task_events` (que tiene `event_type/payload`) — corregido y remapeado. Comms: `getAgentDetail` filtraba por columna `actor` inexistente en `dev_events` — ahora filtra por los `task_id` del rol.
+- [x] **Estado en vivo**: panel del agente muestra `status` real (de `dev_agents`) + último paso; tareas fallidas muestran `result_summary`.
+- [x] **Claude Code para roles de código** (backend/frontend/testing): imagen `eva-claude-sandbox` (`docker build -t eva-claude-sandbox docker/claude-sandbox`), `ClaudeCodeRunnerService` corre `claude` headless con el token inyectado por env (nunca en argv). Credencial en `org_integrations` (kind=`credential`, provider=`claude_code`) con `{ method, token }`. Provisioning vía human task `claude_code_auth` + UI `ClaudeCodeAuthPanel` (3 métodos: oauth/api_key/org; foco OAuth).
+
+### Pendiente (Claude Code)
+- [x] **Terminal en vivo del contenedor Claude Code**: `ClaudeCodeRunnerService` ahora crea un contenedor nombrado y persistente por tarea (`eva-claude-<taskId>`), corre `claude` vía `docker exec`, y expone `attachShellStream` (PersistentShell sobre `docker exec -i`). El gateway (`app.gateway.ts`) cae al runner si `SandboxService` no tiene sesión — el tab Terminal funciona transparente. Contenedor vive 5 min tras terminar (grace) para inspección.
+- [ ] **Validar token al guardar**: `saveClaudeCodeCredential` no verifica el token contra la API/CLI antes de aceptar; agregar un probe (`claude --version` headless o llamada ligera).
+- [ ] **Terminal post-run**: el tab Terminal se oculta cuando el backing task pasa a `completed` (la query de `activeBackingTask` lo excluye), aunque el contenedor siga vivo en el grace period. Exponer el último backing task id para inspección post-ejecución.
+- [ ] **Multi-CLI**: extender el provisioning a otros agentes de código (codex, OpenCloud) reusando el mismo flujo de `claude_code_auth`.
+- [ ] **Smoke real**: con imagen construida y token OAuth, correr un goal simple (Snake) y verificar que backend corre en Claude Code, stream de pasos en Logs y artefactos en `/work`.
+
+---
+
 ## 0. Reasoning & Agency (shipped 2026-06-14)
 - [x] **P1 Semantic trajectory replay**: migration 037, `goal_embedding vector(1536)`, `match_trajectories` RPC, embed on task complete, cosine fallback.
 - [x] **P2 Tool alternatives on first ERROR**: `tool-alternatives.ts` inverse-capability map, injected into error observation at step time (parallel + sequential paths).

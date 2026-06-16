@@ -13,6 +13,7 @@ import { Server, Socket } from 'socket.io';
 import { EvaEvent } from '../events/event-bus.service';
 import { DatabaseService } from '../database/database.service';
 import { SandboxService } from '../agent/sandbox.service';
+import { ClaudeCodeRunnerService } from '../dev-studio/claude-code-runner.service';
 
 @Injectable()
 @WebSocketGateway({
@@ -30,7 +31,20 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   constructor(
     private readonly db: DatabaseService,
     @Optional() private readonly sandbox?: SandboxService,
+    @Optional() private readonly claudeCode?: ClaudeCodeRunnerService,
   ) {}
+
+  /**
+   * Resolve a terminal stream for a task — prefers the regular sandbox session,
+   * falls back to the agent's Claude Code container (code agents).
+   */
+  private resolveShellStream(taskId: string, shellNum: number) {
+    return (
+      this.sandbox?.attachShellStream(taskId, shellNum) ??
+      this.claudeCode?.attachShellStream(taskId, shellNum) ??
+      null
+    );
+  }
 
   afterInit() {
     this.logger.log('WebSocket gateway initialised at namespace /eva');
@@ -123,7 +137,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { taskId: string; shellNum?: number },
   ) {
-    if (!this.sandbox) {
+    if (!this.sandbox && !this.claudeCode) {
       client.emit('sandbox.error', { message: 'Sandbox no disponible' });
       return;
     }
@@ -132,7 +146,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     const prev = this.sandboxSessions.get(client.id);
     if (prev) prev();
 
-    const stream = this.sandbox.attachShellStream(payload.taskId, payload.shellNum ?? 0);
+    const stream = this.resolveShellStream(payload.taskId, payload.shellNum ?? 0);
     if (!stream) {
       client.emit('sandbox.error', { message: `No hay sesión de sandbox activa para task ${payload.taskId}` });
       return;
@@ -158,8 +172,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { taskId: string; data: string; shellNum?: number },
   ) {
-    if (!this.sandbox) return;
-    const stream = this.sandbox.attachShellStream(payload.taskId, payload.shellNum ?? 0);
+    const stream = this.resolveShellStream(payload.taskId, payload.shellNum ?? 0);
     stream?.write(payload.data);
   }
 

@@ -54,6 +54,17 @@ docker build -t eva-sandbox docker/sandbox   # imagen python enriquecida (pandas
 - Secrets en código generado: alias `§§secret(provider)` (kind `credential`) — se sustituye al ejecutar y se enmascara en la salida; el modelo nunca ve el valor.
 - Smoke test real: `npx ts-node --transpile-only scripts/sandbox-smoke.ts` (requiere Docker).
 
+## Dev Studio — Claude Code para agentes de código
+Los roles de código del Dev Studio (`backend`/`frontend`/`testing`, `CODE_ROLES` en [dev-orchestrator.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/dev-orchestrator.service.ts)) corren sobre **Claude Code** dentro de una imagen pre-horneada, no sobre el agent-loop por API. PM/architect/reviewer siguen en la API (`ModelRouterService`).
+
+```bash
+docker build -t eva-claude-sandbox docker/claude-sandbox   # CLI claude + node + git
+```
+- `ClaudeCodeRunnerService` ([claude-code-runner.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/claude-code-runner.service.ts)) corre `claude -p … --output-format stream-json` en un contenedor por tarea (network bridge, `/work` montado). El token se inyecta vía `-e CLAUDE_CODE_OAUTH_TOKEN`/`-e ANTHROPIC_API_KEY` **sin valor en argv** (se pasa por el env del proceso docker) y nunca se loguea.
+- Credencial por org en `org_integrations` (kind=`credential`, provider=`claude_code`), secreto = `{ method: 'oauth'|'api_key'|'org', token }`. Foco: token de suscripción OAuth (`claude setup-token`).
+- Provisioning primera vez: el orquestador crea un human task `claude_code_auth` (instructions.kind) → la UI `ClaudeCodeAuthPanel` ofrece los 3 métodos; al guardar (`POST sessions/:id/claude-code/credential`) se verifica el human task y se reanuda el tick.
+- `EVA_CLAUDE_SANDBOX_IMAGE` — override de imagen.
+
 ## Task state machine
 ```
 pending → planning → running → completed

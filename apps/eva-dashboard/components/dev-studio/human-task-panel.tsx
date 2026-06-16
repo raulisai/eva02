@@ -5,6 +5,7 @@ import { AlertTriangle, CheckCircle, Eye, EyeOff, ChevronDown, ChevronRight } fr
 import { cn } from '@/lib/utils';
 import type { DevHumanTask } from '@/lib/dev-studio-types';
 import { devStudioApi } from '@/lib/dev-studio-api';
+import { ClaudeCodeAuthPanel } from './claude-code-auth-panel';
 
 interface HumanTaskPanelProps {
   tasks: DevHumanTask[];
@@ -24,9 +25,13 @@ export function HumanTaskPanel({ tasks, onUpdated }: HumanTaskPanelProps) {
           Tareas pendientes ({pending.length + submitted.length})
         </span>
       </div>
-      {[...pending, ...submitted].map((task) => (
-        <HumanTaskCard key={task.id} task={task} onUpdated={onUpdated} />
-      ))}
+      {[...pending, ...submitted].map((task) =>
+        task.instructions?.kind === 'claude_code_auth' ? (
+          <ClaudeCodeAuthPanel key={task.id} task={task} onUpdated={onUpdated} />
+        ) : (
+          <HumanTaskCard key={task.id} task={task} onUpdated={onUpdated} />
+        ),
+      )}
     </div>
   );
 }

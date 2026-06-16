@@ -7,6 +7,7 @@ import { DatabaseService } from '../database/database.service';
 import { DevSessionService } from './dev-session.service';
 import { DevProjectManagerService } from './dev-project-manager.service';
 import { DevArchitectService } from './dev-architect.service';
+import { ClaudeCodeRunnerService, CLAUDE_AUTH_OPTIONS } from './claude-code-runner.service';
 import { ApprovalsService } from '../approvals/approvals.service';
 import {
   DevSession, DevGoal, DevIteration, AGENT_SYSTEM_PROMPTS,
@@ -25,6 +26,9 @@ const AGENT_DISPLAY_NAMES: Record<string, string> = {
   deployment: 'Deployment Agent',
   reviewer: 'Reviewer Agent',
 };
+
+// Roles that run on Claude Code (in a pre-baked sandbox) instead of the API loop.
+const CODE_ROLES = new Set<string>(['backend', 'frontend', 'testing']);
 
 interface TickResult {
   action: 'none' | 'iteration_created' | 'tasks_dispatched' | 'human_task_created' | 'goals_complete' | 'waiting';
@@ -48,6 +52,7 @@ export class DevOrchestratorService implements OnModuleInit {
     private readonly pm: DevProjectManagerService,
     private readonly architect: DevArchitectService,
     private readonly approvals: ApprovalsService,
+    private readonly claudeCode: ClaudeCodeRunnerService,
   ) {}
 
   onModuleInit() {
@@ -447,6 +452,18 @@ export class DevOrchestratorService implements OnModuleInit {
     tasks: Array<{ title: string; prompt: string; role: string; dependsOn: string[]; acceptanceCriteria: any[]; branchName: string }>,
     taskIndexToId: Map<number, string>,
   ): Promise<void> {
+    // Gate: code roles run on Claude Code. If any code task is present and the org
+    // has no Claude Code credential, pause and ask the user to provision one.
+    const needsClaude = tasks.some((t) => CODE_ROLES.has(t.role));
+    if (needsClaude && !(await this.claudeCode.hasCredential(orgId))) {
+      // Leave the studio tasks queued so a later tick dispatches them once provisioned.
+      for (const id of taskIndexToId.values()) {
+        if (id) await this.sessionService.updateStudioTaskStatus(id, orgId, 'queued').catch(() => undefined);
+      }
+      await this.ensureClaudeCodeProvisioningTask(session, orgId, iteration);
+      return;
+    }
+
     // Map task index-based deps to actual task IDs
     const taskIds = Array.from({ length: tasks.length }, (_, i) => taskIndexToId.get(i) ?? '');
 
@@ -524,6 +541,44 @@ export class DevOrchestratorService implements OnModuleInit {
 
     // Trigger next tick
     await this.tickSafe(session.id, orgId);
+  }
+
+  /**
+   * Create a human task asking the user to provision Claude Code (choose an auth
+   * method + provide the token) the first time a code agent needs it. Idempotent:
+   * skips if a pending provisioning task already exists.
+   */
+  private async ensureClaudeCodeProvisioningTask(
+    session: DevSession,
+    orgId: string,
+    iteration: DevIteration,
+  ): Promise<void> {
+    const pending = await this.sessionService.listHumanTasks(session.id, orgId, 'pending');
+    const exists = pending.some((t) => (t.instructions as Record<string, unknown> | undefined)?.kind === 'claude_code_auth');
+    if (exists) return;
+
+    await this.sessionService.createHumanTask({
+      orgId,
+      sessionId: session.id,
+      iterationId: iteration.id,
+      title: 'Conectar Claude Code para los agentes de código',
+      description:
+        'Los agentes de código (backend/frontend/testing) corren sobre Claude Code en una máquina dedicada. ' +
+        'Elige cómo autenticar y pega el token correspondiente. Recomendado: token de suscripción (OAuth) de tu plan ya contratado.',
+      requiredOutput: 'Método de autenticación + token de Claude Code',
+      sensitive: true,
+      instructions: { kind: 'claude_code_auth', options: CLAUDE_AUTH_OPTIONS },
+    });
+
+    await this.sessionService.transition(session.id, orgId, 'waiting_for_human_setup');
+    await this.sessionService.logEvent({
+      orgId, sessionId: session.id, eventType: 'agent.blocked',
+      message: 'Esperando credenciales de Claude Code para los agentes de código.',
+      iterationId: iteration.id,
+    });
+    await this.emitToSession(orgId, session.id, 'dev.human_task.created', {
+      sessionId: session.id, kind: 'claude_code_auth',
+    });
   }
 
   private async runWaveFromQueued(session: DevSession, orgId: string, tasks: Record<string, unknown>[]): Promise<number> {
@@ -614,17 +669,45 @@ export class DevOrchestratorService implements OnModuleInit {
       await this.tasks.transition(backingTaskId, orgId, 'planning');
       await this.tasks.transition(backingTaskId, orgId, 'running');
 
-      const outcome = await this.agentLoop.run(orgId, backingTaskId, prompt, {
-        maxSteps: 12,
-        context: roleContext,
-        userId: session.user_id,
-        log: async (msg, scope) => {
-          await this.sessionService.logEvent({
-            orgId, sessionId: session.id, eventType: `agent.log.${scope}`,
-            message: msg, iterationId: iteration.id, taskId: studioTaskId,
-          });
-        },
-      });
+      // Code roles run on Claude Code (pre-baked sandbox); others use the API loop.
+      const useClaudeCode = CODE_ROLES.has(role) && (await this.claudeCode.hasCredential(orgId));
+      const runtimeLabel = useClaudeCode ? 'claude-code' : 'agent-loop';
+
+      let outcome: { ok: boolean; text?: string };
+      if (useClaudeCode) {
+        const result = await this.claudeCode.run({
+          orgId,
+          taskId: backingTaskId,
+          prompt,
+          context: roleContext,
+          onEvent: async (ev) => {
+            // Stream to task_events (Logs tab) and dev_events (timeline).
+            await this.events.publish({
+              type: 'task.step',
+              orgId,
+              taskId: backingTaskId,
+              payload: { tool: ev.type === 'tool_call' ? ev.text : undefined, thought: ev.type === 'text' ? ev.text : undefined, claude: true, kind: ev.type, text: ev.text },
+            }).catch(() => undefined);
+            await this.sessionService.logEvent({
+              orgId, sessionId: session.id, eventType: `claude.${ev.type}`,
+              message: ev.text.slice(0, 500), iterationId: iteration.id, taskId: studioTaskId,
+            });
+          },
+        });
+        outcome = { ok: result.ok, text: result.resultSummary ?? result.text ?? result.error ?? '' };
+      } else {
+        outcome = await this.agentLoop.run(orgId, backingTaskId, prompt, {
+          maxSteps: 12,
+          context: roleContext,
+          userId: session.user_id,
+          log: async (msg, scope) => {
+            await this.sessionService.logEvent({
+              orgId, sessionId: session.id, eventType: `agent.log.${scope}`,
+              message: msg, iterationId: iteration.id, taskId: studioTaskId,
+            });
+          },
+        });
+      }
 
       const success = outcome.ok;
       const resultSummary = outcome.text?.slice(0, 500) ?? '';
@@ -634,8 +717,8 @@ export class DevOrchestratorService implements OnModuleInit {
       });
 
       await this.tasks.transition(backingTaskId, orgId, success ? 'completed' : 'failed', {
-        result: success ? { text: resultSummary, model: 'agent-loop' } : undefined,
-        error: !success ? (outcome.text ?? 'Agent loop failed') : undefined,
+        result: success ? { text: resultSummary, model: runtimeLabel } : undefined,
+        error: !success ? (outcome.text ?? `${runtimeLabel} failed`) : undefined,
       });
 
       await this.sessionService.logEvent({

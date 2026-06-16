@@ -3,7 +3,7 @@
 import { coreFetch } from './core-api';
 import type {
   DevSession, DevGoal, DevIteration, DevAgent,
-  DevHumanTask, DevMergeProposal, DevEvent,
+  DevHumanTask, DevMergeProposal, DevEvent, ClaudeAuthOption,
 } from './dev-studio-types';
 
 const BASE = '/dev-studio';
@@ -86,6 +86,19 @@ export const devStudioApi = {
 
   getAgentLogs: (sessionId: string, role: string, limit = 100) =>
     coreFetch<Record<string, unknown>[]>(`${BASE}/sessions/${sessionId}/agents/${role}/logs?limit=${limit}`),
+
+  // Claude Code provisioning
+  getClaudeCodeOptions: () =>
+    coreFetch<{ options: ClaudeAuthOption[] }>(`${BASE}/claude-code/options`),
+
+  getClaudeCodeStatus: () =>
+    coreFetch<{ configured: boolean; imageReady: boolean }>(`${BASE}/claude-code/status`),
+
+  saveClaudeCodeCredential: (sessionId: string, method: string, token: string) =>
+    coreFetch<{ ok: boolean }>(`${BASE}/sessions/${sessionId}/claude-code/credential`, {
+      method: 'POST',
+      body: JSON.stringify({ method, token }),
+    }),
 
   // Events
   listEvents: (sessionId: string, limit?: number) => {

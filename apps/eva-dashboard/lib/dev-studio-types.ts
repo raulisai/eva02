@@ -141,6 +141,15 @@ export type AgentRole =
   | 'project_manager' | 'architect' | 'frontend' | 'backend'
   | 'testing' | 'deployment' | 'reviewer' | 'human';
 
+export interface ClaudeAuthOption {
+  method: 'oauth' | 'api_key' | 'org';
+  label: string;
+  description: string;
+  envVar: string;
+  recommended?: boolean;
+  hint: string;
+}
+
 export const SESSION_STATUS_LABEL: Record<DevSessionStatus, string> = {
   idea_intake: 'Idea',
   planning: 'Planificando',

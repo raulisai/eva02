@@ -5,6 +5,7 @@ import {
 import { AuthenticatedRequest } from '../common/types';
 import { DevSessionService } from './dev-session.service';
 import { DevOrchestratorService } from './dev-orchestrator.service';
+import { ClaudeCodeRunnerService, CLAUDE_AUTH_OPTIONS, ClaudeAuthMethod } from './claude-code-runner.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { ApproveGoalsDto } from './dto/approve-goals.dto';
 import { SubmitHumanTaskDto } from './dto/submit-human-task.dto';
@@ -16,6 +17,7 @@ export class DevStudioController {
   constructor(
     private readonly sessions: DevSessionService,
     private readonly orchestrator: DevOrchestratorService,
+    private readonly claudeCode: ClaudeCodeRunnerService,
   ) {}
 
   // ── Sessions ──────────────────────────────────────────────────────────────
@@ -203,6 +205,47 @@ export class DevStudioController {
   ) {
     const { orgId } = req.user;
     return this.sessions.getAgentLogs(id, orgId, role, limit ? parseInt(limit, 10) : 100);
+  }
+
+  // ── Claude Code provisioning ──────────────────────────────────────────────
+
+  /** The auth methods offered the first time a code agent needs Claude Code. */
+  @Get('claude-code/options')
+  claudeCodeOptions() {
+    return { options: CLAUDE_AUTH_OPTIONS };
+  }
+
+  /** Whether the org already has a Claude Code credential + image readiness. */
+  @Get('claude-code/status')
+  async claudeCodeStatus(@Req() req: AuthenticatedRequest) {
+    const [configured, imageReady] = await Promise.all([
+      this.claudeCode.hasCredential(req.user.orgId),
+      this.claudeCode.imageAvailable(),
+    ]);
+    return { configured, imageReady };
+  }
+
+  /** Save the chosen auth method + token, then resume any blocked session. */
+  @Post('sessions/:id/claude-code/credential')
+  @HttpCode(HttpStatus.OK)
+  async saveClaudeCodeCredential(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: { method: ClaudeAuthMethod; token: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const { orgId } = req.user;
+    await this.claudeCode.saveCredential(orgId, body.method, body.token);
+
+    // Verify any pending claude_code_auth human task for this session, then tick.
+    const pending = await this.sessions.listHumanTasks(id, orgId, 'pending');
+    for (const t of pending) {
+      if ((t.instructions as Record<string, unknown> | undefined)?.kind === 'claude_code_auth') {
+        await this.sessions.submitHumanTask(t.id, orgId, { method: body.method, configured: true });
+        await this.sessions.verifyHumanTask(t.id, orgId);
+      }
+    }
+    void this.orchestrator.tick(id, orgId);
+    return { ok: true };
   }
 
   // ── Events (timeline) ─────────────────────────────────────────────────────
