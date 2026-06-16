@@ -774,8 +774,20 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
                       <div className="mt-2 pl-3 border-l border-white/5 py-1 text-[9.5px] text-zinc-500 leading-normal animate-fade-in font-mono space-y-1">
                         {t.id && <p>Task ID: {t.id}</p>}
                         {t.created_at && <p>Creada: {new Date(t.created_at).toLocaleString()}</p>}
-                        {t.completed_at && <p>Completada: {new Date(t.completed_at).toLocaleString()}</p>}
-                        {t.error_message && <p className="text-red-400 font-sans">Error: {t.error_message}</p>}
+                        {t.updated_at && <p>Actualizada: {new Date(t.updated_at).toLocaleString()}</p>}
+                        {Array.isArray(t.acceptance_criteria) && t.acceptance_criteria.length > 0 && (
+                          <div className="pt-1 space-y-0.5">
+                            <p className="text-zinc-600">Criterios:</p>
+                            {t.acceptance_criteria.map((c: any, i: number) => (
+                              <p key={i} className="text-zinc-500 font-sans">· {typeof c === 'string' ? c : c.description}</p>
+                            ))}
+                          </div>
+                        )}
+                        {t.result_summary && (
+                          <p className={cn('font-sans pt-1', t.status === 'failed' ? 'text-red-400' : 'text-zinc-400')}>
+                            {t.status === 'failed' ? 'Error: ' : 'Resultado: '}{t.result_summary}
+                          </p>
+                        )}
                       </div>
                     )}
                   </div>

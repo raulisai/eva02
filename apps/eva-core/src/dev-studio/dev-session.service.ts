@@ -6,6 +6,22 @@ import {
   DevGoal, DevIteration, DevHumanTask, DevAgent, DevMergeProposal,
 } from './dev-studio.types';
 
+/**
+ * Map a raw EventBus event (persisted in task_events) to a UI log category.
+ * The agent loop publishes `task.step` with payload { thought, tool, args, ... }.
+ */
+function mapEventToLogType(eventType: string, payload?: Record<string, unknown>): string {
+  const t = (eventType ?? '').toLowerCase();
+  if (t.includes('error') || t.includes('failed')) return 'error';
+  if (t.includes('final') || t.includes('completed') || t.includes('done')) return 'final';
+  if (t.includes('steer')) return 'steer';
+  if (t.includes('input') || t.includes('approval') || t.includes('await')) return 'input';
+  if (t.includes('result') || t.includes('observation')) return 'tool_result';
+  if (payload && typeof payload.tool === 'string') return 'tool_call';
+  if (payload && (payload.thought !== undefined)) return 'thought';
+  return 'event';
+}
+
 @Injectable()
 export class DevSessionService {
   private readonly logger = new Logger(DevSessionService.name);
@@ -626,22 +642,14 @@ export class DevSessionService {
    * and the backing task id (if any is currently running).
    */
   async getAgentDetail(sessionId: string, orgId: string, role: string): Promise<Record<string, unknown>> {
-    const [tasksRes, eventsRes, backingRes] = await Promise.all([
+    const [tasksRes, backingRes, agentRes] = await Promise.all([
       this.db.admin
         .from('dev_tasks')
-        .select('id, title, status, branch_name, created_at, updated_at, acceptance_criteria, iteration_id')
+        .select('id, title, status, branch_name, created_at, updated_at, acceptance_criteria, iteration_id, result_summary, priority')
         .eq('session_id', sessionId)
         .eq('org_id', orgId)
         .eq('role', role)
         .order('created_at', { ascending: true }),
-      this.db.admin
-        .from('dev_events')
-        .select('id, event_type, message, actor, created_at, metadata')
-        .eq('session_id', sessionId)
-        .eq('org_id', orgId)
-        .or(`actor.eq.${role},metadata->>target_role.eq.${role}`)
-        .order('created_at', { ascending: false })
-        .limit(50),
       // Find the active backing task (tasks table) for this role
       this.db.admin
         .from('tasks')
@@ -652,11 +660,35 @@ export class DevSessionService {
         .not('status', 'in', '("completed","failed","cancelled")')
         .order('created_at', { ascending: false })
         .limit(1),
+      // Agent registry row (status, current task, heartbeat)
+      this.db.admin
+        .from('dev_agents')
+        .select('id, role, name, status, current_task_id, last_heartbeat_at, branch_name')
+        .eq('session_id', sessionId)
+        .eq('org_id', orgId)
+        .eq('role', role)
+        .maybeSingle(),
     ]);
 
     const tasks = (tasksRes.data ?? []) as Record<string, unknown>[];
-    const events = (eventsRes.data ?? []) as Record<string, unknown>[];
     const backing = ((backingRes.data ?? []) as Record<string, unknown>[])[0] ?? null;
+    const agent = (agentRes.data ?? null) as Record<string, unknown> | null;
+
+    // Events for this role — filter by the role's studio task IDs (dev_events has
+    // no `actor` column; events are tagged with the studio task_id they belong to).
+    const studioTaskIds = tasks.map((t) => t.id as string).filter(Boolean);
+    let events: Record<string, unknown>[] = [];
+    if (studioTaskIds.length > 0) {
+      const { data: evData } = await this.db.admin
+        .from('dev_events')
+        .select('id, event_type, message, payload, created_at, task_id, iteration_id')
+        .eq('session_id', sessionId)
+        .eq('org_id', orgId)
+        .in('task_id', studioTaskIds)
+        .order('created_at', { ascending: false })
+        .limit(80);
+      events = ((evData ?? []) as Record<string, unknown>[]).map((e) => ({ ...e, actor: role }));
+    }
 
     // Completed backing tasks for history
     const { data: allBacking } = await this.db.admin
@@ -671,6 +703,7 @@ export class DevSessionService {
     return {
       role,
       sessionId,
+      agent,
       studioTasks: tasks,
       events,
       activeBackingTask: backing,
@@ -681,7 +714,7 @@ export class DevSessionService {
   /**
    * Task events (step logs) for the most recent backing task of a given role.
    */
-  async getAgentLogs(sessionId: string, orgId: string, role: string, limit = 100): Promise<Record<string, unknown>[]> {
+  async getAgentLogs(sessionId: string, orgId: string, role: string, limit = 200): Promise<Record<string, unknown>[]> {
     // Get most recent backing task id for this role in this session
     const { data: tasks } = await this.db.admin
       .from('tasks')
@@ -695,15 +728,25 @@ export class DevSessionService {
     const taskId = ((tasks ?? []) as { id: string }[])[0]?.id;
     if (!taskId) return [];
 
+    // task_events columns: id, event_type, payload, created_at (NOT step/type/content).
+    // Reshape into the { step, type, content } shape the UI renders.
     const { data } = await this.db.admin
       .from('task_events')
-      .select('id, step, type, content, created_at')
+      .select('id, event_type, payload, created_at')
       .eq('task_id', taskId)
       .eq('org_id', orgId)
       .order('created_at', { ascending: true })
       .limit(limit);
 
-    return (data ?? []) as Record<string, unknown>[];
+    return ((data ?? []) as Array<{ id: string; event_type: string; payload: Record<string, unknown>; created_at: string }>)
+      .map((e, i) => ({
+        id: e.id,
+        step: (e.payload?.step as number) ?? i + 1,
+        type: mapEventToLogType(e.event_type, e.payload),
+        event_type: e.event_type,
+        content: e.payload ?? {},
+        created_at: e.created_at,
+      }));
   }
 
   private fail(scope: string, error: unknown): never {
