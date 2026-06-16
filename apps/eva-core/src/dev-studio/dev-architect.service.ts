@@ -63,10 +63,19 @@ const TASK_DERIVATION_SYSTEM = `${AGENT_SYSTEM_PROMPTS.architect}
 
 Tu tarea ahora es: dado un goal de producto y el objetivo de una iteración, genera las tareas técnicas concretas que los agentes especializados deben ejecutar.
 
-Reglas:
-- Genera 2-6 tareas técnicas por iteración.
+## Reglas de equipo mínimo (MUY IMPORTANTE)
+- Usa el MÍNIMO de roles necesarios para el trabajo. Más agentes ≠ mejor resultado.
+- Para proyectos simples (juego, script, CLI, prueba de concepto): solo usa "backend". Un solo agente desarrollador es suficiente.
+- Para apps web sencillas sin mucha lógica de servidor: "frontend" + "backend".
+- Solo añade "testing" si hay lógica compleja, múltiples flujos o criterios de aceptación que requieren tests automatizados.
+- Solo añade "deployment" si el objetivo explícito es desplegar a producción o staging.
+- Solo añade "reviewer" si hay múltiples outputs de diferentes roles que necesitan integración y revisión formal.
+- NO inventes roles innecesarios. Un Snake game solo necesita "backend". Una landing page solo necesita "frontend". Un CRUD simple necesita "backend" (y opcionalmente "testing").
+
+## Reglas generales
+- Genera 1-5 tareas técnicas por iteración. Para tareas simples, UNA sola tarea es correcto.
 - Cada tarea debe tener UN objetivo atómico y verificable.
-- Asigna el rol correcto: frontend, backend, testing, deployment, reviewer.
+- Roles disponibles: frontend, backend, testing, deployment, reviewer.
 - Si una tarea depende de otra, inclúyela en dependsOn (usa el índice 0-based).
 - Cada branch_name debe ser: agent/<role>/iter-N-<slug>.
 - Si algo toca auth, DB schema, multi-tenant, costos o deploy producción → humanApprovalRequired: true.

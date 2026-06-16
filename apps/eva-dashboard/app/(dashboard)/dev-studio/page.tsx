@@ -166,7 +166,7 @@ function SessionRow({ session }: { session: DevSession }) {
           <SessionStatusBadge status={session.status} />
         </div>
         {session.north_star && (
-          <p className="text-[11px] text-zinc-600 truncate mt-0.5 italic">"{session.north_star}"</p>
+          <p className="text-[11px] text-zinc-600 truncate mt-0.5 italic">&quot;{session.north_star}&quot;</p>
         )}
       </div>
 

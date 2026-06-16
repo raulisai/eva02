@@ -2,6 +2,14 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-16 04:22Z
+C: dev-studio: allow session transition from awaiting_goals_approval to running in backend types; files=apps/eva-core/src/dev-studio/dev-studio.types.ts; tests=npm run build -w apps/eva-core && npm run lint -w apps/eva-core
+P: pending/improve -> verify RLS policies for organizations and users tables under high concurrency
+
+### 2026-06-16 04:15Z
+C: dashboard: revamp Dev Studio session detail UI to Liquid Glass style; files=apps/eva-dashboard/components/dev-studio/agent-flow-diagram.tsx,apps/eva-dashboard/components/dev-studio/session-detail.tsx,apps/eva-dashboard/app/(dashboard)/dev-studio/page.tsx; tests=npm run build -w apps/eva-dashboard && npm run lint -w apps/eva-dashboard
+P: pending/improve -> implement visual transitions and animations for the bottom panel view switcher
+
 ### 2026-06-15 07:06Z
 C: uber-web: route form validation now requires distinctive pickup/dropoff tokens so generic city/CDMX-only destination text does not count as filled; files=apps/eva-core/src/integrations/uber-web.service.ts,apps/eva-core/src/integrations/__tests__/uber-web.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm test --workspace @eva/core -- src/integrations/__tests__/uber-web.service.spec.ts --runInBand; npm run build --workspace @eva/core; eslint changed uber files; npm run docs:check; git diff --check
 P: pending/improve -> run live Uber Web quote smoke for work/LA COCINA DE LUPITA and verify city-only dropoff is rejected, first relevant suggestion is selected, and prices appear

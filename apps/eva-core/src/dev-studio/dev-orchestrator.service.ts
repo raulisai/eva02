@@ -16,6 +16,16 @@ import {
 // Max iterations per goal before stopping and asking user
 const MAX_ITERATIONS_PER_GOAL = 10;
 
+const AGENT_DISPLAY_NAMES: Record<string, string> = {
+  project_manager: 'PM Agent',
+  architect: 'Architect Agent',
+  backend: 'Backend Agent',
+  frontend: 'Frontend Agent',
+  testing: 'Testing Agent',
+  deployment: 'Deployment Agent',
+  reviewer: 'Reviewer Agent',
+};
+
 interface TickResult {
   action: 'none' | 'iteration_created' | 'tasks_dispatched' | 'human_task_created' | 'goals_complete' | 'waiting';
   message: string;
@@ -360,6 +370,14 @@ export class DevOrchestratorService implements OnModuleInit {
       };
     }
 
+    // Register only the agents actually needed for these tasks
+    await this.sessionService.ensureAgent({ orgId, sessionId: session.id, role: 'project_manager', name: AGENT_DISPLAY_NAMES.project_manager });
+    await this.sessionService.ensureAgent({ orgId, sessionId: session.id, role: 'architect', name: AGENT_DISPLAY_NAMES.architect });
+    const neededRoles = [...new Set(architectPlan.tasks.map((t) => t.role))];
+    for (const role of neededRoles) {
+      await this.sessionService.ensureAgent({ orgId, sessionId: session.id, role, name: AGENT_DISPLAY_NAMES[role] ?? `${role} Agent` });
+    }
+
     // Create studio tasks for each technical task
     const createdTaskIds: string[] = [];
     const taskIndexToId: Map<number, string> = new Map();
@@ -576,6 +594,12 @@ export class DevOrchestratorService implements OnModuleInit {
     const backingTaskId = (backingTask as { id: string }).id;
     await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'running');
 
+    // Update agent status to running
+    const agentRecord = await this.sessionService.getAgent(session.id, orgId, role);
+    if (agentRecord) {
+      await this.sessionService.updateAgentStatus(agentRecord.id, orgId, 'running', { current_task_id: studioTaskId });
+    }
+
     await this.sessionService.logEvent({
       orgId, sessionId: session.id, eventType: 'task.started',
       message: `[${role}] Iniciando: ${prompt.slice(0, 80)}`,
@@ -624,11 +648,18 @@ export class DevOrchestratorService implements OnModuleInit {
         sessionId: session.id, studioTaskId, role, success, resultSummary,
       });
 
+      if (agentRecord) {
+        await this.sessionService.updateAgentStatus(agentRecord.id, orgId, success ? 'completed' : 'failed', { current_task_id: null });
+      }
+
       return success;
     } catch (err) {
       const errMsg = (err as Error).message;
       await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'failed', { result_summary: errMsg });
       await this.tasks.transition(backingTaskId, orgId, 'failed', { error: errMsg }).catch(() => undefined);
+      if (agentRecord) {
+        await this.sessionService.updateAgentStatus(agentRecord.id, orgId, 'failed', { current_task_id: null });
+      }
       return false;
     }
   }

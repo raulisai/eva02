@@ -432,6 +432,23 @@ export class DevSessionService {
     return (data ?? []) as DevAgent[];
   }
 
+  async getAgent(sessionId: string, orgId: string, role: string): Promise<DevAgent | null> {
+    const { data } = await this.db.admin
+      .from('dev_agents')
+      .select('*')
+      .eq('session_id', sessionId)
+      .eq('org_id', orgId)
+      .eq('role', role)
+      .maybeSingle();
+    return data as DevAgent | null;
+  }
+
+  async ensureAgent(input: { orgId: string; sessionId: string; role: string; name: string }): Promise<DevAgent> {
+    const existing = await this.getAgent(input.sessionId, input.orgId, input.role);
+    if (existing) return existing;
+    return this.registerAgent(input);
+  }
+
   async updateAgentStatus(agentId: string, orgId: string, status: string, extras: Record<string, unknown> = {}): Promise<void> {
     await this.db.admin
       .from('dev_agents')

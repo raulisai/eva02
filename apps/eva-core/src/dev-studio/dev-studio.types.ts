@@ -213,7 +213,7 @@ export interface DevModeClassification {
 export const DEV_SESSION_TRANSITIONS: Record<DevSessionStatus, DevSessionStatus[]> = {
   idea_intake: ['planning', 'cancelled'],
   planning: ['awaiting_goals_approval', 'cancelled'],
-  awaiting_goals_approval: ['awaiting_architecture_approval', 'planning', 'cancelled'],
+  awaiting_goals_approval: ['awaiting_architecture_approval', 'running', 'planning', 'cancelled'],
   awaiting_architecture_approval: ['running', 'planning', 'cancelled'],
   running: [
     'waiting_for_human_setup',
