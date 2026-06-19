@@ -1,11 +1,12 @@
 import {
   Body, Controller, Get, HttpCode, HttpStatus, Param,
-  ParseUUIDPipe, Post, Req, Query,
+  ParseUUIDPipe, Post, Req, Query, BadRequestException,
 } from '@nestjs/common';
 import { AuthenticatedRequest } from '../common/types';
 import { DevSessionService } from './dev-session.service';
 import { DevOrchestratorService } from './dev-orchestrator.service';
 import { ClaudeCodeRunnerService, CLAUDE_AUTH_OPTIONS, ClaudeAuthMethod } from './claude-code-runner.service';
+import { machineSpecForRole } from './agent-machines';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { ApproveGoalsDto } from './dto/approve-goals.dto';
 import { SubmitHumanTaskDto } from './dto/submit-human-task.dto';
@@ -67,8 +68,10 @@ export class DevStudioController {
   }
 
   @Post('sessions/:id/cancel')
-  cancelSession(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthenticatedRequest) {
-    return this.sessions.cancel(id, req.user.orgId);
+  async cancelSession(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthenticatedRequest) {
+    const result = await this.sessions.cancel(id, req.user.orgId);
+    void this.orchestrator.shutdownSessionMachines(id, req.user.orgId);
+    return result;
   }
 
   @Post('sessions/:id/steer')
@@ -180,6 +183,15 @@ export class DevStudioController {
   }
 
   /**
+   * Live flow state for the diagram: per-agent current task + stuck timing, the
+   * last instruction on each communication edge, and a "where is it stuck" hint.
+   */
+  @Get('sessions/:id/flow')
+  getFlowState(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthenticatedRequest) {
+    return this.sessions.getFlowState(id, req.user.orgId);
+  }
+
+  /**
    * Full agent detail: current task, history, backing task id, communications.
    * Used by the flow diagram's agent detail panel.
    */
@@ -190,7 +202,47 @@ export class DevStudioController {
     @Req() req: AuthenticatedRequest,
   ) {
     const { orgId } = req.user;
-    return this.sessions.getAgentDetail(id, orgId, role);
+    const detail = await this.sessions.getAgentDetail(id, orgId, role);
+    // Enrich with live machine state (image, container, whether it's up right now).
+    const agent = detail.agent as { id?: string; runtime?: string; metadata?: Record<string, unknown> } | null;
+    const live = agent?.id ? this.claudeCode.machineInfo(agent.id) : null;
+    const spec = machineSpecForRole(role);
+    const machineMeta = (agent?.metadata?.machine ?? {}) as { authOk?: boolean | null; authError?: string };
+    detail.machine = {
+      key: agent?.id ?? null,
+      image: live?.image ?? null,
+      defaultImage: spec.image,
+      tooling: spec.toolingLabel,
+      containerName: live?.containerName ?? null,
+      up: Boolean(live),
+      runtime: agent?.runtime ?? null,
+      // null = not a code role / not checked; true = logged in; false = bad token.
+      authOk: machineMeta.authOk ?? null,
+      authError: machineMeta.authError ?? null,
+    };
+    return detail;
+  }
+
+  /** Manually (re)boot an agent's machine — lets the user spin it up on demand. */
+  @Post('sessions/:id/agents/:role/machine/boot')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async bootAgentMachine(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('role') role: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const { orgId } = req.user;
+    const agent = await this.sessions.ensureAgent({
+      orgId, sessionId: id, role, name: `${role} Agent`,
+    });
+    const result = await this.claudeCode.bootMachine({ orgId, key: agent.id, role });
+    if (result.ok) {
+      await this.sessions.updateAgentStatus(agent.id, orgId, agent.status ?? 'idle', {
+        runtime: result.image ? `docker:${result.image}` : 'docker',
+        container_id: result.containerName ?? null,
+      });
+    }
+    return { agentId: agent.id, ...result };
   }
 
   /**
@@ -218,11 +270,11 @@ export class DevStudioController {
   /** Whether the org already has a Claude Code credential + image readiness. */
   @Get('claude-code/status')
   async claudeCodeStatus(@Req() req: AuthenticatedRequest) {
-    const [configured, imageReady] = await Promise.all([
+    const [configured, baseImage] = await Promise.all([
       this.claudeCode.hasCredential(req.user.orgId),
-      this.claudeCode.imageAvailable(),
+      this.claudeCode.resolveImage('project_manager'),
     ]);
-    return { configured, imageReady };
+    return { configured, imageReady: Boolean(baseImage), baseImage };
   }
 
   /** Save the chosen auth method + token, then resume any blocked session. */
@@ -234,6 +286,14 @@ export class DevStudioController {
     @Req() req: AuthenticatedRequest,
   ) {
     const { orgId } = req.user;
+
+    // Validate the token before storing it — a clearly-invalid/expired token is
+    // rejected with a reason; infra-only failures (no docker/image) don't block.
+    const check = await this.claudeCode.verifyToken(body.method, body.token);
+    if (check.authFailed) {
+      throw new BadRequestException(`Token de Claude Code inválido: ${check.error ?? 'rechazado por la API'}`);
+    }
+
     await this.claudeCode.saveCredential(orgId, body.method, body.token);
 
     // Verify any pending claude_code_auth human task for this session, then tick.

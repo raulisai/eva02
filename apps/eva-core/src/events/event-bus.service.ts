@@ -42,6 +42,7 @@ export type EvaEventType =
   | 'dev.human_task.submitted'
   | 'dev.human_task.verified'
   | 'dev.merge.proposed'
+  | 'dev.agent.machine'
   | 'browser.screenshot.created'
   | 'communication.message.received'
   | 'communication.message.sent'
@@ -102,6 +103,24 @@ export class EventBusService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Publish an event to the stream. Fire-and-forget safe — logs on error. */
+  /**
+   * Best-effort distributed lock (Redis SET NX PX). Returns true if acquired.
+   * Fail-OPEN: if Redis errors, returns true so callers aren't blocked — the
+   * caller's own in-process guard still prevents same-node races.
+   */
+  async tryLock(key: string, ttlMs: number): Promise<boolean> {
+    try {
+      const res = await this.publisher.set(`lock:${key}`, String(process.pid), 'PX', ttlMs, 'NX');
+      return res === 'OK';
+    } catch {
+      return true;
+    }
+  }
+
+  async releaseLock(key: string): Promise<void> {
+    try { await this.publisher.del(`lock:${key}`); } catch { /* ignore */ }
+  }
+
   async publish(event: Omit<EvaEvent, 'ts' | 'id'>): Promise<string | null> {
     try {
       const ts = Date.now();

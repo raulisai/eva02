@@ -4,6 +4,51 @@ This backlog keeps only relevant, actionable improvements. Completed work moves 
 
 ---
 
+## 0aa. Dev Studio — Robustez de flujo + login Claude Code verificable (shipped 2026-06-19)
+**Anti-atasco (P0):**
+- [x] **Heartbeat + reconciliación**: `DevOrchestratorService` corre un barrido cada 2 min (`recoverAndSweep`) + uno al boot. Boot: re-encola tareas huérfanas de iteraciones `running` viejas (>15 min) tras crash/reinicio. Heartbeat: re-tickea sesiones `running` sin avance (>3 min). Idempotente (guard + _tick cortocircuitan si hay trabajo vivo). `listStaleRunningSessions/Iterations` + `requeueOrphanedTasks` en `dev-session.service`.
+- [x] **`dispatchTaskWaves` con try/finally**: un throw a mitad de wave ya no deja la iteración colgada en `running` — el finally siempre cierra la iteración y re-tickea.
+- [x] **Evaluación con outputs reales**: `buildIterationOutputs()` agrega `[role] título → result_summary (branch)` de cada task terminada; reemplaza el `"Wave N completed"` genérico que dejaba al PM ciego y causaba bucles hasta MAX_ITERATIONS.
+- [x] **Fix handler muerto**: `updateIterationStatus` ahora publica `sessionId` en `dev.iteration.updated` (el handler del orquestador lo exigía → nunca disparaba).
+
+**Login Claude Code (P1):**
+- [x] **Validación de token al guardar**: `verifyToken()` corre `claude -p` 1-turn en contenedor efímero; `POST .../claude-code/credential` rechaza con 400 si el token es claramente inválido (no bloquea por fallos de infra).
+- [x] **`verifyAuth()` por máquina**: tras bootear una máquina de código, el orquestador verifica login dentro del contenedor y guarda `metadata.machine.authOk` + emite `dev.agent.machine{auth_ok|auth_failed}`. UI: chip "🔑 logueado / token inválido" en el panel del agente.
+- [x] **AUTH_FAILED tipado**: `run()` detecta errores de auth (regex) y los marca; el orquestador reabre el provisioning `claude_code_auth` y re-encola la task en vez de un blocker genérico; `handleAgentFailure` es idempotente respecto al provisioning.
+
+**Debuggability (P2):**
+- [x] **`claude.exit` inspeccionable**: cada run de Claude Code emite a `dev_events` su exit (ok/auth_failed/error) con image, container y cola del stderr.
+- [x] **IDOR de terminal cerrado**: `sandbox.attach` valida que el key (taskId/agentId) pertenezca al org del socket; `sandbox.input` solo escribe al key ya adjuntado.
+
+**Eficiencia (P3):**
+- [x] **Lock distribuido de tick**: `EventBusService.tryLock/releaseLock` (Redis SET NX PX, fail-open) evita doble tick entre instancias.
+- [x] **Push por WebSocket**: `events-bridge` ahora difunde los `dev.*` clave; `session-detail` se suscribe y refresca en vivo (poll de respaldo bajado a 15s).
+- [x] **Aviso de fallback de imagen**: `bootMachine` emite `fallback` cuando el rol cae a la imagen base por no estar construida la especializada.
+
+### Pendiente
+- [ ] **Timeout de pared por iteración en vivo**: hoy solo se recuperan iteraciones colgadas al boot (>15 min); una iteración viva genuinamente colgada se acota por timeouts per-task (claude 10 min). Evaluar un tope duro por iteración.
+- [ ] **verifyAuth periódico**: hoy se chequea login al bootear; añadir re-check cuando un run devuelve AUTH_FAILED a mitad de sesión.
+
+## 0b. Dev Studio — Diagrama de flujo vivo + rol full_stack (shipped 2026-06-19)
+- [x] **Topología no lineal**: `computeEdges(visible, assigner)` arma un grafo de comunicación (PM↔architect bidireccional con arista "reporta" dashed; el `assigner` = architect, o PM si no hay architect, reparte a los devs; devs→reviewer/human; reviewer→PM loop). Ya no es una pirámide fija.
+- [x] **Estado vivo por agente**: endpoint `GET sessions/:id/flow` → `getFlowState()` devuelve por agente la tarea actual (`currentTaskTitle/Status`), `stuckMs` (tiempo sin avance), los `handoffs` (última instrucción por arista from→to con timestamp) y un `stuck` (dónde está atascado: agente bloqueado/fallido → esperando humano → agente sin avance >90s). El diagrama (poll 3s) muestra la tarea en cada nodo, la última instrucción como etiqueta de cada flecha (+ "hace Xm", full text en `<title>`), banner de atasco arriba y resalta en ámbar el nodo atascado con ⏱.
+- [x] **Rol `full_stack`**: nuevo rol de código end-to-end (types, `AGENT_SYSTEM_PROMPTS`, `CODE_ROLES`, display name, imagen `eva-agent-backend`, vocabulario + guía del architect: proyecto sencillo con server+UI → un solo full_stack; backend puro → backend; frontend puro → frontend). UI: emoji 🧰, label, tema teal, tier 2.
+
+### Pendiente (diagrama)
+- [ ] **Handoffs reverse reales**: hoy la arista architect→PM "reporta" es estructural (no lleva instrucción real). Cuando exista un canal de mensajes agente→agente, alimentar también las aristas de retorno con su último mensaje.
+- [ ] **Imagen full_stack dedicada**: hoy reusa `eva-agent-backend` (tiene node+python+php+go pero no pnpm/next cache); crear `eva-agent-fullstack` si se nota lento en proyectos con build de frontend pesado.
+
+## 0. Dev Studio — Máquina dedicada por agente (shipped 2026-06-19)
+- [x] **Imagen Docker por rol**: imágenes pre-horneadas bajo `docker/agents/` — `eva-agent-base` (claude·git·ripgrep·jq, usada por architect/PM/reviewer/deployment) y las especializadas `eva-agent-backend` (python·php·go·postgres-client), `eva-agent-frontend` (pnpm·yarn·next·vite·ts), `eva-agent-testing` (playwright+browsers·vitest·jest·pytest). Build ordenado: `./docker/agents/build.sh` (la base primero, las demás `FROM eva-agent-base`).
+- [x] **Registry de imágenes**: `agent-machines.ts` mapea rol → `{ image, memory, cpus, toolingLabel }` con overrides `EVA_AGENT_IMAGE_<ROL>` / `EVA_AGENT_BASE_IMAGE`; `imageCandidates()` resuelve rol → base → legacy (`eva-claude-sandbox`).
+- [x] **Boot eager por agente**: el orquestador (`ensureAgentAndMachine`) levanta la máquina del agente al registrarlo en la iteración; `ClaudeCodeRunnerService.bootMachine()` crea un contenedor persistente por agente (keyed por `dev_agents.id`, no por tarea), inyecta la credencial si existe, graba `runtime`/`container_id`/`metadata.machine` y emite `dev.agent.machine` (booting→ready/failed). `run()` ejecuta `claude` dentro de la máquina del agente (machineKey) y reusa su toolchain + `/work` entre tareas del rol.
+- [x] **Visible en el UI**: `agent-detail-panel` muestra fila de máquina (imagen + indicador up/apagada + tooling) y el tab Terminal se conecta a la máquina del agente aunque no haya tarea activa, con botón "Levantar máquina ahora" (`POST sessions/:id/agents/:role/machine/boot`). Teardown en cancel (`shutdownSessionMachines`).
+
+### Pendiente (máquinas por agente)
+- [ ] **Smoke real multi-imagen**: con `./docker/agents/build.sh` corrido, arrancar un goal y verificar que backend/frontend/testing levantan sus imágenes respectivas (no la base) y que el tab Terminal abre cada máquina viva.
+- [ ] **Imágenes devops/preview dedicadas**: hoy caen en `eva-agent-base`; crear `eva-agent-devops` (docker·terraform·kubectl·helm) y `eva-agent-preview` (serve·playwright headless) cuando se necesiten.
+- [ ] **Lifecycle de recursos**: las máquinas viven toda la sesión; evaluar idle-reap o límite de máquinas concurrentes por org para no saturar el host.
+
 ## 0a. Dev Studio — Observabilidad + Claude Code para agentes de código (shipped 2026-06-15)
 - [x] **Equipo dinámico**: el architect arma el equipo mínimo por complejidad; el orquestador registra en `dev_agents` solo los roles usados; `AgentFlowDiagram` renderiza topología dinámica (no 7 nodos fijos).
 - [x] **Logs reales**: `getAgentLogs` leía columnas inexistentes (`step/type/content`) de `task_events` (que tiene `event_type/payload`) — corregido y remapeado. Comms: `getAgentDetail` filtraba por columna `actor` inexistente en `dev_events` — ahora filtra por los `task_id` del rol.
@@ -12,7 +57,7 @@ This backlog keeps only relevant, actionable improvements. Completed work moves 
 
 ### Pendiente (Claude Code)
 - [x] **Terminal en vivo del contenedor Claude Code**: `ClaudeCodeRunnerService` ahora crea un contenedor nombrado y persistente por tarea (`eva-claude-<taskId>`), corre `claude` vía `docker exec`, y expone `attachShellStream` (PersistentShell sobre `docker exec -i`). El gateway (`app.gateway.ts`) cae al runner si `SandboxService` no tiene sesión — el tab Terminal funciona transparente. Contenedor vive 5 min tras terminar (grace) para inspección.
-- [ ] **Validar token al guardar**: `saveClaudeCodeCredential` no verifica el token contra la API/CLI antes de aceptar; agregar un probe (`claude --version` headless o llamada ligera).
+- [x] **Validar token al guardar** (shipped 2026-06-19): `verifyToken()` corre `claude -p` 1-turn en contenedor efímero y el endpoint rechaza tokens inválidos con 400. Ver §0aa.
 - [ ] **Terminal post-run**: el tab Terminal se oculta cuando el backing task pasa a `completed` (la query de `activeBackingTask` lo excluye), aunque el contenedor siga vivo en el grace period. Exponer el último backing task id para inspección post-ejecución.
 - [ ] **Multi-CLI**: extender el provisioning a otros agentes de código (codex, OpenCloud) reusando el mismo flujo de `claude_code_auth`.
 - [ ] **Smoke real**: con imagen construida y token OAuth, correr un goal simple (Snake) y verificar que backend corre en Claude Code, stream de pasos en Logs y artefactos en `/work`.

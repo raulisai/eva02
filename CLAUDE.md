@@ -54,16 +54,29 @@ docker build -t eva-sandbox docker/sandbox   # imagen python enriquecida (pandas
 - Secrets en código generado: alias `§§secret(provider)` (kind `credential`) — se sustituye al ejecutar y se enmascara en la salida; el modelo nunca ve el valor.
 - Smoke test real: `npx ts-node --transpile-only scripts/sandbox-smoke.ts` (requiere Docker).
 
-## Dev Studio — Claude Code para agentes de código
-Los roles de código del Dev Studio (`backend`/`frontend`/`testing`, `CODE_ROLES` en [dev-orchestrator.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/dev-orchestrator.service.ts)) corren sobre **Claude Code** dentro de una imagen pre-horneada, no sobre el agent-loop por API. PM/architect/reviewer siguen en la API (`ModelRouterService`).
+## Dev Studio — máquina Docker dedicada por agente
+Cada agente del Dev Studio levanta **su propia máquina Docker** con una imagen pre-horneada según su rol. Los roles de código (`backend`/`frontend`/`testing`, `CODE_ROLES` en [dev-orchestrator.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/dev-orchestrator.service.ts)) corren **Claude Code** dentro de su máquina; PM/architect/reviewer siguen razonando en la API (`ModelRouterService`) pero también bootean una máquina base liviana (inspeccionable por terminal).
+
+**Imágenes por rol** ([agent-machines.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/agent-machines.ts), Dockerfiles en `docker/agents/`):
+
+| Imagen | Rol(es) | Tooling pre-horneado |
+|---|---|---|
+| `eva-agent-base` | architect, project_manager, reviewer, deployment | claude · git · ripgrep · jq |
+| `eva-agent-backend` | backend | base + python · php · go · postgres-client |
+| `eva-agent-frontend` | frontend | base + pnpm · yarn · next · vite · typescript |
+| `eva-agent-testing` | testing | base + playwright(+browsers) · vitest · jest · pytest |
 
 ```bash
-docker build -t eva-claude-sandbox docker/claude-sandbox   # CLI claude + node + git
+./docker/agents/build.sh            # base PRIMERO, luego backend/frontend/testing (FROM base)
+./docker/agents/build.sh backend    # solo base + backend
 ```
-- `ClaudeCodeRunnerService` ([claude-code-runner.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/claude-code-runner.service.ts)) corre `claude -p … --output-format stream-json` en un contenedor por tarea (network bridge, `/work` montado). El token se inyecta vía `-e CLAUDE_CODE_OAUTH_TOKEN`/`-e ANTHROPIC_API_KEY` **sin valor en argv** (se pasa por el env del proceso docker) y nunca se loguea.
+- Resolución de imagen: `EVA_AGENT_IMAGE_<ROL>` → imagen del rol → `EVA_AGENT_BASE_IMAGE`/`eva-agent-base` → legacy `eva-claude-sandbox` (primera que exista localmente). Sin ninguna, el boot reporta error pidiendo construirla.
+- **Boot eager**: al registrar un agente en la iteración, `ensureAgentAndMachine` (orquestador) llama `ClaudeCodeRunnerService.bootMachine()` → contenedor persistente **por agente** (keyed por `dev_agents.id`), credencial inyectada por env si existe, graba `runtime`/`container_id`/`metadata.machine` y emite `dev.agent.machine` (booting→ready/failed). La máquina vive toda la sesión; se destruye en cancel (`shutdownSessionMachines`).
+- `ClaudeCodeRunnerService` ([claude-code-runner.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/claude-code-runner.service.ts)) corre `claude -p … --output-format stream-json` vía `docker exec` **dentro de la máquina del agente** (`machineKey`), reusando su toolchain y `/work` entre tareas del rol. El token se inyecta vía `-e CLAUDE_CODE_OAUTH_TOKEN`/`-e ANTHROPIC_API_KEY` **sin valor en argv** y nunca se loguea.
+- UI: `agent-detail-panel` muestra la máquina (imagen + up/apagada + tooling) y el tab Terminal abre la máquina viva aunque no haya tarea activa; botón "Levantar máquina ahora" → `POST sessions/:id/agents/:role/machine/boot`.
 - Credencial por org en `org_integrations` (kind=`credential`, provider=`claude_code`), secreto = `{ method: 'oauth'|'api_key'|'org', token }`. Foco: token de suscripción OAuth (`claude setup-token`).
 - Provisioning primera vez: el orquestador crea un human task `claude_code_auth` (instructions.kind) → la UI `ClaudeCodeAuthPanel` ofrece los 3 métodos; al guardar (`POST sessions/:id/claude-code/credential`) se verifica el human task y se reanuda el tick.
-- `EVA_CLAUDE_SANDBOX_IMAGE` — override de imagen.
+- `EVA_CLAUDE_SANDBOX_IMAGE` — override de la imagen legacy de fallback.
 
 ## Task state machine
 ```

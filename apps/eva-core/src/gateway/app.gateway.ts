@@ -46,6 +46,25 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     );
   }
 
+  /**
+   * Authorize a terminal key against the socket's org: the key is either a
+   * backing taskId (tasks table) or an agent machine key (dev_agents.id). Without
+   * this any authenticated socket could attach to another org's container.
+   */
+  private async keyBelongsToOrg(key: string, orgId: string): Promise<boolean> {
+    try {
+      const { data: t } = await this.db.admin
+        .from('tasks').select('id').eq('id', key).eq('org_id', orgId).maybeSingle();
+      if (t) return true;
+      const { data: a } = await this.db.admin
+        .from('dev_agents').select('id').eq('id', key).eq('org_id', orgId).maybeSingle();
+      return !!a;
+    } catch {
+      // Malformed key (e.g. not a uuid) → treat as not authorized.
+      return false;
+    }
+  }
+
   afterInit() {
     this.logger.log('WebSocket gateway initialised at namespace /eva');
   }
@@ -133,12 +152,19 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
    * Server streams back: 'sandbox.output' events with { data: string }
    */
   @SubscribeMessage('sandbox.attach')
-  handleSandboxAttach(
+  async handleSandboxAttach(
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { taskId: string; shellNum?: number },
   ) {
     if (!this.sandbox && !this.claudeCode) {
       client.emit('sandbox.error', { message: 'Sandbox no disponible' });
+      return;
+    }
+
+    // Authorize: the key must belong to the socket's org.
+    const orgId = (client.data as { orgId?: string }).orgId;
+    if (!orgId || !(await this.keyBelongsToOrg(payload.taskId, orgId))) {
+      client.emit('sandbox.error', { message: 'No autorizado para esta terminal' });
       return;
     }
 
@@ -163,6 +189,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     });
 
     this.sandboxSessions.set(client.id, unsub);
+    (client.data as { attachedKey?: string }).attachedKey = payload.taskId;
     client.emit('sandbox.attached', { taskId: payload.taskId });
   }
 
@@ -172,6 +199,9 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { taskId: string; data: string; shellNum?: number },
   ) {
+    // Only the key this socket already attached to (and was authorized for) may
+    // receive input — prevents writing into another org's PTY by key-guessing.
+    if ((client.data as { attachedKey?: string }).attachedKey !== payload.taskId) return;
     const stream = this.resolveShellStream(payload.taskId, payload.shellNum ?? 0);
     stream?.write(payload.data);
   }
@@ -181,6 +211,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   handleSandboxDetach(@ConnectedSocket() client: Socket) {
     const unsub = this.sandboxSessions.get(client.id);
     if (unsub) { unsub(); this.sandboxSessions.delete(client.id); }
+    (client.data as { attachedKey?: string }).attachedKey = undefined;
     client.emit('sandbox.detached', {});
   }
 }

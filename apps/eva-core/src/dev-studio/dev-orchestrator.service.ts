@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { EventBusService } from '../events/event-bus.service';
 import { AgentLoopService } from '../agent/agent-loop.service';
 import { ModelRouterService } from '../model-router/model-router.service';
@@ -22,13 +22,14 @@ const AGENT_DISPLAY_NAMES: Record<string, string> = {
   architect: 'Architect Agent',
   backend: 'Backend Agent',
   frontend: 'Frontend Agent',
+  full_stack: 'Full Stack Agent',
   testing: 'Testing Agent',
   deployment: 'Deployment Agent',
   reviewer: 'Reviewer Agent',
 };
 
 // Roles that run on Claude Code (in a pre-baked sandbox) instead of the API loop.
-const CODE_ROLES = new Set<string>(['backend', 'frontend', 'testing']);
+const CODE_ROLES = new Set<string>(['backend', 'frontend', 'full_stack', 'testing']);
 
 interface TickResult {
   action: 'none' | 'iteration_created' | 'tasks_dispatched' | 'human_task_created' | 'goals_complete' | 'waiting';
@@ -36,11 +37,18 @@ interface TickResult {
   iterationId?: string;
 }
 
+// Heartbeat: how often to sweep for stranded sessions, and the staleness
+// thresholds that mark a session/iteration as "abandoned" and safe to nudge.
+const HEARTBEAT_MS = 2 * 60 * 1000;
+const SESSION_STALE_MS = 3 * 60 * 1000;
+const ITERATION_STALE_MS = 15 * 60 * 1000;
+
 @Injectable()
-export class DevOrchestratorService implements OnModuleInit {
+export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DevOrchestratorService.name);
   // Track in-flight ticks to avoid concurrent ticks on same session
   private readonly activeTicks = new Set<string>();
+  private heartbeatTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly events: EventBusService,
@@ -87,6 +95,63 @@ export class DevOrchestratorService implements OnModuleInit {
     });
 
     this.logger.log('DevOrchestrator subscribed to iteration.updated + human_task.verified + session.created(autoStart)');
+
+    // Anti-abandonment: recover crashed in-flight work on boot, then sweep
+    // periodically so a session never strands in `running` with no re-tick.
+    void this.recoverAndSweep('boot').catch((err) =>
+      this.logger.error(`Boot reconciliation failed: ${(err as Error).message}`),
+    );
+    this.heartbeatTimer = setInterval(() => {
+      void this.recoverAndSweep('heartbeat').catch((err) =>
+        this.logger.error(`Heartbeat sweep failed: ${(err as Error).message}`),
+      );
+    }, HEARTBEAT_MS);
+    // Don't keep the event loop alive just for the heartbeat.
+    this.heartbeatTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+  }
+
+  /**
+   * Reconcile stranded Dev Studio work:
+   *  - iterations stuck in `running` past the stale threshold (their tasks were
+   *    orphaned by a crash) → requeue the orphaned tasks so a tick re-dispatches;
+   *  - sessions in `running` with no recent progress → nudge with a tick.
+   * Idempotent: the per-session tick guard + _tick's own checks make extra ticks
+   * harmless (they short-circuit when work is genuinely in flight).
+   */
+  private async recoverAndSweep(reason: 'boot' | 'heartbeat'): Promise<void> {
+    // 1. Recover orphaned iterations — ONLY on boot, where nothing is in-flight.
+    // Doing this on the periodic heartbeat could requeue tasks of a live wave and
+    // duplicate work; per-task timeouts bound genuinely-hung live iterations.
+    let recovered = 0;
+    if (reason === 'boot') {
+      const staleIters = await this.sessionService.listStaleRunningIterations(ITERATION_STALE_MS).catch(() => []);
+      recovered = staleIters.length;
+      for (const it of staleIters) {
+        const requeued = await this.sessionService.requeueOrphanedTasks(it.id, it.org_id).catch(() => 0);
+        if (requeued > 0) {
+          await this.sessionService.logEvent({
+            orgId: it.org_id, sessionId: it.session_id, eventType: 'iteration.recovered',
+            message: `Reconciliación (${reason}): ${requeued} tarea(s) huérfana(s) re-encoladas tras posible reinicio/cuelgue.`,
+            iterationId: it.id,
+          }).catch(() => undefined);
+        }
+        await this.tickSafe(it.session_id, it.org_id);
+      }
+    }
+
+    // 2. Nudge stale running sessions (idempotent — _tick short-circuits if busy).
+    const staleSessions = await this.sessionService.listStaleRunningSessions(SESSION_STALE_MS).catch(() => []);
+    for (const s of staleSessions) {
+      await this.tickSafe(s.id, s.org_id);
+    }
+
+    if (recovered || staleSessions.length) {
+      this.logger.log(`Sweep (${reason}): ${recovered} stale iteration(s) recovered, ${staleSessions.length} stale session(s) nudged`);
+    }
   }
 
   private async tickSafe(sessionId: string, orgId: string): Promise<void> {
@@ -106,16 +171,31 @@ export class DevOrchestratorService implements OnModuleInit {
    * - Never when the session is paused/cancelled/completed/failed
    */
   async tick(sessionId: string, orgId: string): Promise<TickResult> {
+    // In-process guard (fast) — prevents same-node concurrent ticks.
     if (this.activeTicks.has(sessionId)) {
       this.logger.log(`Tick skipped — already in progress for session ${sessionId}`);
       return { action: 'none', message: 'Tick already in progress' };
     }
     this.activeTicks.add(sessionId);
 
+    // Cross-instance guard (Redis) — prevents two nodes ticking the same session
+    // and duplicating iterations/tasks. Fail-open if Redis is unavailable.
+    const lockKey = `devtick:${sessionId}`;
+    const locked = typeof this.events.tryLock === 'function'
+      ? await this.events.tryLock(lockKey, 60_000)
+      : true;
+    if (!locked) {
+      this.activeTicks.delete(sessionId);
+      return { action: 'none', message: 'Tick locked by another instance' };
+    }
+
     try {
       return await this._tick(sessionId, orgId);
     } finally {
       this.activeTicks.delete(sessionId);
+      if (typeof this.events.releaseLock === 'function') {
+        await this.events.releaseLock(lockKey).catch(() => undefined);
+      }
     }
   }
 
@@ -375,12 +455,15 @@ export class DevOrchestratorService implements OnModuleInit {
       };
     }
 
-    // Register only the agents actually needed for these tasks
-    await this.sessionService.ensureAgent({ orgId, sessionId: session.id, role: 'project_manager', name: AGENT_DISPLAY_NAMES.project_manager });
-    await this.sessionService.ensureAgent({ orgId, sessionId: session.id, role: 'architect', name: AGENT_DISPLAY_NAMES.architect });
-    const neededRoles = [...new Set(architectPlan.tasks.map((t) => t.role))];
-    for (const role of neededRoles) {
-      await this.sessionService.ensureAgent({ orgId, sessionId: session.id, role, name: AGENT_DISPLAY_NAMES[role] ?? `${role} Agent` });
+    // Register only the agents actually needed for these tasks, and boot each
+    // one's dedicated machine eagerly so the user can watch it come up.
+    const neededRoles = [
+      'project_manager',
+      'architect',
+      ...new Set(architectPlan.tasks.map((t) => t.role)),
+    ];
+    for (const role of [...new Set(neededRoles)]) {
+      await this.ensureAgentAndMachine(session, orgId, role, iteration);
     }
 
     // Create studio tasks for each technical task
@@ -484,63 +567,76 @@ export class DevOrchestratorService implements OnModuleInit {
     }
 
     let wave = 0;
-    while (Object.values(status).some((s) => s === 'pending')) {
-      const ready = taskIds.filter((id) => {
-        if (!id || status[id] !== 'pending') return false;
-        return (depsById[id] ?? []).every((dep) => status[dep] === 'completed');
-      });
+    // try/finally: a throw mid-wave must NOT leave the iteration stuck in
+    // `running` forever — the finally always closes it and re-ticks.
+    let threw: unknown = null;
+    try {
+      while (Object.values(status).some((s) => s === 'pending')) {
+        const ready = taskIds.filter((id) => {
+          if (!id || status[id] !== 'pending') return false;
+          return (depsById[id] ?? []).every((dep) => status[dep] === 'completed');
+        });
 
-      if (ready.length === 0) {
-        // Unresolvable deps
-        for (const id of taskIds) {
-          if (status[id] === 'pending') {
-            status[id] = 'skipped';
-            await this.sessionService.updateStudioTaskStatus(id, orgId, 'failed');
+        if (ready.length === 0) {
+          // Unresolvable deps
+          for (const id of taskIds) {
+            if (status[id] === 'pending') {
+              status[id] = 'skipped';
+              await this.sessionService.updateStudioTaskStatus(id, orgId, 'failed').catch(() => undefined);
+            }
           }
+          break;
         }
-        break;
+
+        wave++;
+        await Promise.all(ready.map(async (taskId) => {
+          status[taskId] = 'running';
+          await this.sessionService.updateStudioTaskStatus(taskId, orgId, 'assigned');
+
+          const taskDef = tasks[taskIds.indexOf(taskId)];
+          const agentRole = (taskDef?.role ?? 'backend') as AgentRole;
+
+          try {
+            const success = await this.runAgentTask(session, orgId, taskId, taskDef?.prompt ?? taskDef?.title ?? '', agentRole, iteration);
+            status[taskId] = success ? 'completed' : 'failed';
+
+            if (!success) {
+              // Detect blocker and create human task if needed
+              await this.handleAgentFailure(session, orgId, taskId, iteration, null, 'Task execution failed');
+            }
+          } catch (err) {
+            status[taskId] = 'failed';
+            await this.handleAgentFailure(session, orgId, taskId, iteration, null, (err as Error).message);
+          }
+        }));
       }
+    } catch (err) {
+      threw = err;
+      this.logger.error(`dispatchTaskWaves error (session ${session.id}, iter ${iteration.id}): ${(err as Error).message}`);
+    } finally {
+      // Evaluate iteration when all tasks done — judge by REAL task outputs, not
+      // a generic "Wave N completed" string, so the PM can actually assess progress.
+      const allFailed = Object.values(status).every((s) => s === 'failed' || s === 'skipped');
+      const anyCompleted = Object.values(status).some((s) => s === 'completed');
+      const outputs = await this.sessionService.buildIterationOutputs(iteration.id, orgId).catch(() => [] as string[]);
 
-      wave++;
-      await Promise.all(ready.map(async (taskId) => {
-        status[taskId] = 'running';
-        await this.sessionService.updateStudioTaskStatus(taskId, orgId, 'assigned');
+      await this.sessionService.updateIterationStatus(
+        iteration.id, orgId,
+        allFailed || threw ? 'needs_more_work' : 'completed',
+        { completed_at: new Date().toISOString(), completed_outputs: outputs },
+      ).catch((e) => this.logger.error(`updateIterationStatus failed: ${(e as Error).message}`));
 
-        const taskDef = tasks[taskIds.indexOf(taskId)];
-        const agentRole = (taskDef?.role ?? 'backend') as AgentRole;
+      await this.sessionService.logEvent({
+        orgId, sessionId: session.id, eventType: threw ? 'iteration.error' : 'iteration.completed',
+        message: threw
+          ? `Iteración "${iteration.title}" terminó con error: ${(threw as Error).message}`
+          : `Iteración "${iteration.title}" finalizada. Wave ${wave}. ${anyCompleted ? `${outputs.length} output(s)` : 'Todos fallaron'}`,
+        iterationId: iteration.id,
+      }).catch(() => undefined);
 
-        try {
-          const success = await this.runAgentTask(session, orgId, taskId, taskDef?.prompt ?? taskDef?.title ?? '', agentRole, iteration);
-          status[taskId] = success ? 'completed' : 'failed';
-
-          if (!success) {
-            // Detect blocker and create human task if needed
-            await this.handleAgentFailure(session, orgId, taskId, iteration, null, 'Task execution failed');
-          }
-        } catch (err) {
-          status[taskId] = 'failed';
-          await this.handleAgentFailure(session, orgId, taskId, iteration, null, (err as Error).message);
-        }
-      }));
+      // Always re-tick so the loop continues (or closes) — never strand the session.
+      await this.tickSafe(session.id, orgId);
     }
-
-    // Evaluate iteration when all tasks done
-    const allFailed = Object.values(status).every((s) => s === 'failed' || s === 'skipped');
-    const anyCompleted = Object.values(status).some((s) => s === 'completed');
-
-    await this.sessionService.updateIterationStatus(iteration.id, orgId, allFailed ? 'needs_more_work' : 'completed', {
-      completed_at: new Date().toISOString(),
-      completed_outputs: anyCompleted ? [`Wave ${wave} completed`] : [],
-    });
-
-    await this.sessionService.logEvent({
-      orgId, sessionId: session.id, eventType: 'iteration.completed',
-      message: `Iteración "${iteration.title}" finalizada. Wave ${wave}. ${anyCompleted ? 'Algunos tasks OK' : 'Todos fallaron'}`,
-      iterationId: iteration.id,
-    });
-
-    // Trigger next tick
-    await this.tickSafe(session.id, orgId);
   }
 
   /**
@@ -603,6 +699,77 @@ export class DevOrchestratorService implements OnModuleInit {
       dispatched++;
     }));
     return dispatched;
+  }
+
+  /**
+   * Register an agent for a role (if needed) and eagerly boot its dedicated
+   * Docker machine, recording the container + image on the dev_agents row and
+   * streaming boot events to the UI (booting → ready/failed). Best-effort: a
+   * machine boot failure never blocks the iteration — the task may still run
+   * on the API loop or report a missing-image blocker later.
+   */
+  private async ensureAgentAndMachine(
+    session: DevSession,
+    orgId: string,
+    role: string,
+    iteration: DevIteration,
+  ): Promise<void> {
+    const agent = await this.sessionService.ensureAgent({
+      orgId, sessionId: session.id, role,
+      name: AGENT_DISPLAY_NAMES[role] ?? `${role} Agent`,
+    });
+
+    // Already booted (container_id set and machine still live) → nothing to do.
+    if (agent.container_id && this.claudeCode.hasContainer(agent.id)) return;
+
+    const result = await this.claudeCode.bootMachine({
+      orgId,
+      key: agent.id,
+      role,
+      onEvent: async (ev) => {
+        await this.sessionService.logEvent({
+          orgId, sessionId: session.id, eventType: `agent.machine.${ev.type}`,
+          message: `[${role}] ${ev.text}`, iterationId: iteration.id,
+        });
+        await this.emitToSession(orgId, session.id, 'dev.agent.machine', {
+          sessionId: session.id, agentId: agent.id, role, status: ev.type, message: ev.text,
+        });
+      },
+    });
+
+    // For code roles, confirm the machine is actually logged in to Claude Code so
+    // the user can SEE auth status per machine (green = logged in / red = bad token).
+    let authOk: boolean | null = null;
+    let authError: string | undefined;
+    if (result.ok && CODE_ROLES.has(role)) {
+      const check = await this.claudeCode.verifyAuth(orgId, agent.id).catch(() => ({ ok: false, error: 'probe error' }));
+      authOk = check.ok;
+      authError = check.error;
+      await this.sessionService.logEvent({
+        orgId, sessionId: session.id, eventType: `agent.machine.${check.ok ? 'auth_ok' : 'auth_failed'}`,
+        message: `[${role}] ${check.ok ? 'Claude Code logueado correctamente' : `Login falló: ${check.error ?? 'desconocido'}`}`,
+        iterationId: iteration.id,
+      });
+      await this.emitToSession(orgId, session.id, 'dev.agent.machine', {
+        sessionId: session.id, agentId: agent.id, role,
+        status: check.ok ? 'auth_ok' : 'auth_failed', message: check.error ?? '',
+      });
+    }
+
+    await this.sessionService.updateAgentStatus(agent.id, orgId, agent.status ?? 'idle', {
+      runtime: result.image ? `docker:${result.image}` : 'docker',
+      container_id: result.containerName ?? null,
+      metadata: {
+        ...(agent.metadata ?? {}),
+        machine: { image: result.image, ok: result.ok, error: result.error, authOk, authError },
+      },
+    });
+  }
+
+  /** Tear down all booted machines for a session (called on terminal states). */
+  async shutdownSessionMachines(sessionId: string, orgId: string): Promise<void> {
+    const agents = await this.sessionService.listAgents(sessionId, orgId).catch(() => []);
+    await Promise.all(agents.map((a) => this.claudeCode.destroyMachine(a.id).catch(() => undefined)));
   }
 
   private async runAgentTask(
@@ -673,13 +840,17 @@ export class DevOrchestratorService implements OnModuleInit {
       const useClaudeCode = CODE_ROLES.has(role) && (await this.claudeCode.hasCredential(orgId));
       const runtimeLabel = useClaudeCode ? 'claude-code' : 'agent-loop';
 
-      let outcome: { ok: boolean; text?: string };
+      let outcome: { ok: boolean; text?: string; authFailed?: boolean };
       if (useClaudeCode) {
         const result = await this.claudeCode.run({
           orgId,
           taskId: backingTaskId,
           prompt,
           context: roleContext,
+          // Run inside the agent's persistent machine so the pre-baked toolchain
+          // and /work state carry across this agent's tasks.
+          machineKey: agentRecord?.id,
+          role,
           onEvent: async (ev) => {
             // Stream to task_events (Logs tab) and dev_events (timeline).
             await this.events.publish({
@@ -694,7 +865,30 @@ export class DevOrchestratorService implements OnModuleInit {
             });
           },
         });
-        outcome = { ok: result.ok, text: result.resultSummary ?? result.text ?? result.error ?? '' };
+        outcome = { ok: result.ok, text: result.resultSummary ?? result.text ?? result.error ?? '', authFailed: result.authFailed };
+
+        // Persist an inspectable exit record (image, container, ok/error tail).
+        const machine = agentRecord ? this.claudeCode.machineInfo(agentRecord.id) : null;
+        await this.sessionService.logEvent({
+          orgId, sessionId: session.id, eventType: result.ok ? 'claude.exit' : 'claude.exit_error',
+          message: [
+            `exit=${result.ok ? 'ok' : (result.authFailed ? 'auth_failed' : 'error')}`,
+            machine?.image ? `image=${machine.image}` : '',
+            machine?.containerName ? `container=${machine.containerName}` : '',
+            result.error ? `err=${result.error.slice(0, 240)}` : '',
+          ].filter(Boolean).join(' · '),
+          iterationId: iteration.id, taskId: studioTaskId,
+        }).catch(() => undefined);
+
+        // Auth problem → reopen provisioning and requeue the task so it resumes
+        // automatically once the user supplies a valid token (instead of a dead-end fail).
+        if (result.authFailed) {
+          await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'queued', { result_summary: result.error ?? 'AUTH_FAILED' });
+          await this.tasks.transition(backingTaskId, orgId, 'failed', { error: result.error ?? 'AUTH_FAILED' }).catch(() => undefined);
+          if (agentRecord) await this.sessionService.updateAgentStatus(agentRecord.id, orgId, 'blocked', { current_task_id: null });
+          await this.ensureClaudeCodeProvisioningTask(session, orgId, iteration);
+          return false;
+        }
       } else {
         outcome = await this.agentLoop.run(orgId, backingTaskId, prompt, {
           maxSteps: 12,
@@ -755,6 +949,13 @@ export class DevOrchestratorService implements OnModuleInit {
     goal: DevGoal | null,
     errorContext: string,
   ): Promise<void> {
+    // If a Claude Code auth provisioning task is already pending, the failure is
+    // already surfaced there — don't pile on a duplicate generic blocker.
+    const pending = await this.sessionService.listHumanTasks(session.id, orgId, 'pending').catch(() => []);
+    if (pending.some((t) => (t.instructions as Record<string, unknown> | undefined)?.kind === 'claude_code_auth')) {
+      return;
+    }
+
     const blocker = await this.pm.detectBlocker(errorContext);
     const requiresHuman = ['missing_credentials', 'missing_account', 'missing_permission', 'quota_exhausted'].includes(blocker.type);
 

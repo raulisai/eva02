@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import { io, type Socket } from 'socket.io-client';
 import {
   Play,
   Pause,
@@ -98,13 +99,47 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
     }
   }, [session.id, onUpdate]);
 
+  // Slow poll as a fallback; real-time updates come from the WebSocket below.
   useEffect(() => {
     refresh();
     const isActive = ['running', 'planning', 'awaiting_goals_approval', 'awaiting_architecture_approval'].includes(session.status);
     if (!isActive) return;
-    const interval = setInterval(refresh, 8000);
+    const interval = setInterval(refresh, 15000);
     return () => clearInterval(interval);
   }, [refresh, session.status]);
+
+  // Push: refresh on dev.* events for this session instead of relying on polling.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  useEffect(() => {
+    if (!orgToken) return;
+    const coreUrl = process.env.NEXT_PUBLIC_CORE_URL ?? 'http://localhost:3000';
+    const socket: Socket = io(`${coreUrl}/eva`, { auth: { token: orgToken }, transports: ['websocket'] });
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const debouncedRefresh = () => {
+      if (timer) return;
+      timer = setTimeout(() => { timer = null; void refreshRef.current(); }, 300);
+    };
+
+    const DEV_EVENTS = [
+      'dev.session.updated', 'dev.iteration.updated', 'dev.tasks.created',
+      'dev.task.started', 'dev.task.completed', 'dev.task.failed',
+      'dev.agent.machine', 'dev.human_task.created', 'dev.human_task.verified',
+      'dev.goal.ready_for_validation', 'dev.goals_complete',
+    ];
+    const onEvent = (msg: { payload?: { sessionId?: string } }) => {
+      // Only react to events for this session (events are org-scoped, multi-session).
+      if (!msg?.payload?.sessionId || msg.payload.sessionId === session.id) debouncedRefresh();
+    };
+    DEV_EVENTS.forEach((t) => socket.on(t, onEvent));
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      DEV_EVENTS.forEach((t) => socket.off(t, onEvent));
+      socket.disconnect();
+    };
+  }, [orgToken, session.id]);
 
   async function handleAction(action: 'start' | 'pause' | 'resume' | 'cancel') {
     setLoading(true);

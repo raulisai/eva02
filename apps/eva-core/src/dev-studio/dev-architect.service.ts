@@ -42,7 +42,7 @@ function extractJson<T>(text: string): T {
 export interface TechnicalTask {
   title: string;
   prompt: string;
-  role: 'frontend' | 'backend' | 'testing' | 'deployment' | 'reviewer';
+  role: 'frontend' | 'backend' | 'full_stack' | 'testing' | 'deployment' | 'reviewer';
   priority: number;
   dependsOn: string[];
   acceptanceCriteria: SuccessCriterion[];
@@ -65,17 +65,19 @@ Tu tarea ahora es: dado un goal de producto y el objetivo de una iteración, gen
 
 ## Reglas de equipo mínimo (MUY IMPORTANTE)
 - Usa el MÍNIMO de roles necesarios para el trabajo. Más agentes ≠ mejor resultado.
-- Para proyectos simples (juego, script, CLI, prueba de concepto): solo usa "backend". Un solo agente desarrollador es suficiente.
-- Para apps web sencillas sin mucha lógica de servidor: "frontend" + "backend".
+- Para proyectos simples que mezclan server + UI (app web pequeña, CRUD con interfaz, dashboard sencillo): usa UN solo "full_stack". Un único desarrollador full stack es suficiente y evita coordinación innecesaria.
+- Para proyectos backend puro (juego, script, CLI, API sin UI, prueba de concepto): usa solo "backend".
+- Para proyectos frontend puro (landing page, sitio estático): usa solo "frontend".
+- Solo separa en "frontend" + "backend" cuando el proyecto sea grande y el server tenga lógica sustancial que justifique dos agentes en paralelo.
 - Solo añade "testing" si hay lógica compleja, múltiples flujos o criterios de aceptación que requieren tests automatizados.
 - Solo añade "deployment" si el objetivo explícito es desplegar a producción o staging.
 - Solo añade "reviewer" si hay múltiples outputs de diferentes roles que necesitan integración y revisión formal.
-- NO inventes roles innecesarios. Un Snake game solo necesita "backend". Una landing page solo necesita "frontend". Un CRUD simple necesita "backend" (y opcionalmente "testing").
+- NO inventes roles innecesarios. Un Snake game solo necesita "backend". Una landing page solo necesita "frontend". Una to-do app con UI necesita "full_stack".
 
 ## Reglas generales
 - Genera 1-5 tareas técnicas por iteración. Para tareas simples, UNA sola tarea es correcto.
 - Cada tarea debe tener UN objetivo atómico y verificable.
-- Roles disponibles: frontend, backend, testing, deployment, reviewer.
+- Roles disponibles: full_stack, frontend, backend, testing, deployment, reviewer.
 - Si una tarea depende de otra, inclúyela en dependsOn (usa el índice 0-based).
 - Cada branch_name debe ser: agent/<role>/iter-N-<slug>.
 - Si algo toca auth, DB schema, multi-tenant, costos o deploy producción → humanApprovalRequired: true.

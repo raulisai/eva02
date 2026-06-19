@@ -19,6 +19,7 @@ const ROLE_LABEL: Record<string, string> = {
   architect: 'Architect',
   frontend: 'Frontend Agent',
   backend: 'Backend Agent',
+  full_stack: 'Full Stack Agent',
   testing: 'Testing Agent',
   deployment: 'Deployment Agent',
   reviewer: 'Reviewer / Integrator',
@@ -61,6 +62,7 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
   const [logs, setLogs] = useState<Record<string, unknown>[]>([]);
   const [tab, setTab] = useState<Tab>('tasks');
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
+  const [booting, setBooting] = useState(false);
 
   // Poll detail every 4s so status/tasks stay live
   useEffect(() => {
@@ -85,6 +87,11 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
   const events = (detail?.events as Record<string, unknown>[] | undefined) ?? [];
   const activeTask = detail?.activeBackingTask as Record<string, unknown> | null | undefined;
   const allBacking = (detail?.allBackingTasks as Record<string, unknown>[] | undefined) ?? [];
+  const machine = detail?.machine as {
+    key: string | null; image: string | null; defaultImage: string | null;
+    tooling: string | null; containerName: string | null; up: boolean; runtime: string | null;
+    authOk: boolean | null; authError: string | null;
+  } | undefined;
 
   const done = studioTasks.filter((t) => ['approved', 'merged', 'completed'].includes(t.status as string));
   const failed = studioTasks.filter((t) => ['failed', 'cancelled'].includes(t.status as string));
@@ -152,6 +159,35 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
           <Stat label="Fallidas" value={failed.length} color="text-red-400" />
           <Stat label="Ejecuciones" value={allBacking.length} color="text-purple-400" />
         </div>
+
+        {/* Machine — dedicated Docker image per agent + Claude Code login state */}
+        {machine && (
+          <div className="mt-3 flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5">
+            <span className={cn(
+              'w-1.5 h-1.5 rounded-full shrink-0',
+              machine.up ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600',
+            )} />
+            <span className="text-[10px] font-mono text-zinc-400 shrink-0">
+              {machine.up ? 'máquina' : 'apagada'}
+            </span>
+            <span className="text-[11px] font-mono text-cyan-300 truncate" title={machine.tooling ?? undefined}>
+              {machine.image ?? machine.defaultImage ?? 'eva-agent-base'}
+            </span>
+            {machine.authOk !== null && (
+              <span
+                className={cn(
+                  'ml-auto shrink-0 text-[9px] font-mono px-1.5 py-0.5 rounded border',
+                  machine.authOk
+                    ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/5'
+                    : 'border-red-500/30 text-red-400 bg-red-500/5',
+                )}
+                title={machine.authError ?? undefined}
+              >
+                {machine.authOk ? '🔑 logueado' : '🔑 token inválido'}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Tabs */}
@@ -279,35 +315,57 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
           </div>
         )}
 
-        {/* Terminal tab */}
-        {tab === 'terminal' && (
-          <div className="p-4">
-            {!activeBackingId && (
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-6 text-center">
-                <Terminal className="h-8 w-8 text-zinc-700 mx-auto mb-3" />
-                <p className="text-sm text-zinc-500">No hay sandbox activo para este agente ahora mismo.</p>
-                <p className="text-xs text-zinc-600 mt-1">El sandbox se crea cuando el agente ejecuta una tarea.</p>
-              </div>
-            )}
-            {activeBackingId && (
-              <Suspense fallback={
-                <div className="h-80 rounded-lg border border-zinc-800 bg-zinc-900 flex items-center justify-center text-zinc-500 text-sm">
-                  Cargando terminal…
+        {/* Terminal tab — prefer the agent's persistent machine, fall back to the
+            active task's sandbox. */}
+        {tab === 'terminal' && (() => {
+          const terminalTarget = activeBackingId ?? (machine?.up ? machine.key : null);
+          return (
+            <div className="p-4">
+              {!terminalTarget && (
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-6 text-center">
+                  <Terminal className="h-8 w-8 text-zinc-700 mx-auto mb-3" />
+                  <p className="text-sm text-zinc-500">La máquina de este agente todavía no está levantada.</p>
+                  <p className="text-xs text-zinc-600 mt-1 mb-3">Se levanta automáticamente cuando el agente se registra en la iteración.</p>
+                  <button
+                    onClick={() => {
+                      setBooting(true);
+                      devStudioApi.bootAgentMachine(sessionId, role)
+                        .catch(() => {})
+                        .finally(() => {
+                          setBooting(false);
+                          devStudioApi.getAgentDetail(sessionId, role).then(setDetail).catch(() => {});
+                        });
+                    }}
+                    disabled={booting}
+                    className="text-xs px-3 py-1.5 rounded-md border border-cyan-500/30 text-cyan-300 bg-cyan-500/5 hover:bg-cyan-500/10 disabled:opacity-50"
+                  >
+                    {booting ? 'Levantando…' : 'Levantar máquina ahora'}
+                  </button>
                 </div>
-              }>
-                <AgentTerminal taskId={activeBackingId} orgToken={orgToken} />
-              </Suspense>
-            )}
-            <div className="mt-3 space-y-1">
-              <p className="text-xs text-zinc-600 font-mono">
-                task_id: <span className="text-zinc-400">{activeBackingId ?? 'ninguno'}</span>
-              </p>
-              <p className="text-xs text-zinc-600">
-                Conectado al sandbox Docker del agente. Acceso completo a <code className="text-cyan-400">/work</code>.
-              </p>
+              )}
+              {terminalTarget && (
+                <Suspense fallback={
+                  <div className="h-80 rounded-lg border border-zinc-800 bg-zinc-900 flex items-center justify-center text-zinc-500 text-sm">
+                    Cargando terminal…
+                  </div>
+                }>
+                  <AgentTerminal taskId={terminalTarget} orgToken={orgToken} />
+                </Suspense>
+              )}
+              <div className="mt-3 space-y-1">
+                <p className="text-xs text-zinc-600 font-mono">
+                  imagen: <span className="text-cyan-400">{machine?.image ?? machine?.defaultImage ?? '—'}</span>
+                </p>
+                <p className="text-xs text-zinc-600 font-mono">
+                  contenedor: <span className="text-zinc-400">{machine?.containerName ?? 'ninguno'}</span>
+                </p>
+                <p className="text-xs text-zinc-600">
+                  Conectado a la máquina Docker dedicada del agente. Acceso completo a <code className="text-cyan-400">/work</code>.
+                </p>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
 
       {/* Footer — execution history */}

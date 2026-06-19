@@ -6,13 +6,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { PersistentShell, ShellProcess } from '../agent/sandbox-shell';
+import { imageCandidates, machineSpecForRole } from './agent-machines';
 
 const execFileAsync = promisify(execFile);
 
-/** How long a task's container survives after the run finishes, for inspection. */
+/** How long a task-scoped container survives after the run finishes, for inspection. */
 const CONTAINER_GRACE_MS = 5 * 60 * 1000;
 
-const CLAUDE_IMAGE = process.env.EVA_CLAUDE_SANDBOX_IMAGE || 'eva-claude-sandbox';
 const CREDENTIAL_PROVIDER = 'claude_code';
 
 /** Auth methods the user can choose the first time a code agent needs Claude Code. */
@@ -66,6 +66,16 @@ export interface ClaudeRunResult {
   /** Final result summary as reported by Claude Code, if any. */
   resultSummary?: string;
   error?: string;
+  /** True when the failure looks like an auth/login problem (bad/expired token). */
+  authFailed?: boolean;
+}
+
+export interface AuthCheckResult {
+  ok: boolean;
+  /** Human-readable reason when not ok. */
+  error?: string;
+  /** True when the failure is specifically an auth/login error (vs infra). */
+  authFailed?: boolean;
 }
 
 export interface ClaudeRunOptions {
@@ -76,8 +86,34 @@ export interface ClaudeRunOptions {
   context?: string;
   maxTurns?: number;
   timeoutMs?: number;
+  /**
+   * Stable key of the agent's persistent machine to exec into (typically the
+   * dev_agents.id). When set, the task runs inside the agent's already-booted
+   * container instead of a throwaway per-task one.
+   */
+  machineKey?: string;
+  /** Agent role — selects the pre-baked image when a machine must be created. */
+  role?: string;
   /** Streamed, human-readable log lines (thoughts, tool calls, text). */
   onEvent?: (ev: { type: string; text: string; raw?: unknown }) => void | Promise<void>;
+}
+
+export interface BootMachineOptions {
+  orgId: string;
+  /** Stable machine key (typically the dev_agents.id). */
+  key: string;
+  role: string;
+  /** Streamed boot events (booting/ready/failed). */
+  onEvent?: (ev: { type: string; text: string }) => void | Promise<void>;
+}
+
+export interface BootMachineResult {
+  ok: boolean;
+  /** Container name (`docker ps`). */
+  containerName?: string;
+  /** Resolved image actually used. */
+  image?: string;
+  error?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
@@ -92,6 +128,12 @@ const DEFAULT_MAX_TURNS = 40;
 interface ClaudeContainer {
   name: string;
   hostDir: string;
+  image: string;
+  role?: string;
+  /** True when the auth token was injected at create time (claude can run). */
+  hasToken: boolean;
+  /** Session-scoped machines live until explicitly destroyed; task-scoped ones reap. */
+  sessionScoped: boolean;
   shells: Map<number, PersistentShell>;
   reapTimer?: NodeJS.Timeout;
 }
@@ -101,8 +143,15 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
   private readonly logger = new Logger(ClaudeCodeRunnerService.name);
   private dockerOk: boolean | null = null;
 
-  /** Live per-task containers (named, persistent) for streaming + terminal access. */
+  /**
+   * Live named containers, keyed either by a stable machine key (dev_agents.id,
+   * session-scoped) or by a backing taskId (task-scoped). Used for streaming +
+   * terminal access.
+   */
   private readonly containers = new Map<string, ClaudeContainer>();
+
+  /** Cache of `docker image inspect` results per image tag. */
+  private readonly imageCache = new Map<string, boolean>();
 
   constructor(@Optional() private readonly integrations?: IntegrationsService) {}
 
@@ -149,6 +198,60 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     return method === 'api_key' ? 'ANTHROPIC_API_KEY' : 'CLAUDE_CODE_OAUTH_TOKEN';
   }
 
+  /** Heuristic: does this output/stderr look like a Claude auth/login failure? */
+  private static readonly AUTH_ERR_RE =
+    /authentication|invalid api key|invalid x-api-key|unauthorized|\b401\b|oauth|token (?:expired|invalid)|not logged in|please run.*login|credit balance/i;
+
+  private isAuthError(text: string | undefined): boolean {
+    return !!text && ClaudeCodeRunnerService.AUTH_ERR_RE.test(text);
+  }
+
+  // ── Auth verification ───────────────────────────────────────────────────────
+
+  /**
+   * Validate a token BEFORE storing it: run a 1-turn `claude -p` in an ephemeral
+   * container. Returns `authFailed:true` only when the error is clearly an auth
+   * problem; infra issues (no docker / no image) resolve `ok:true` so they never
+   * block saving a credential the user can't otherwise verify.
+   */
+  async verifyToken(method: ClaudeAuthMethod, token: string): Promise<AuthCheckResult> {
+    if (!(await this.dockerAvailable())) return { ok: true, error: 'docker-unavailable: no verificado' };
+    const image = await this.resolveImage('project_manager'); // base image is enough
+    if (!image) return { ok: true, error: 'image-unavailable: no verificado' };
+    const envVar = this.envVarFor(method);
+    return this.probe(
+      ['run', '--rm', '--network', 'bridge', '-e', envVar, image],
+      { ...process.env, [envVar]: token.trim() },
+    );
+  }
+
+  /** Verify the credential works inside an already-booted machine (by key). */
+  async verifyAuth(orgId: string, key: string): Promise<AuthCheckResult> {
+    const c = this.containers.get(key);
+    if (!c) return { ok: false, error: 'NO_MACHINE' };
+    if (!c.hasToken) return { ok: false, authFailed: true, error: 'NO_TOKEN: la máquina se levantó sin credencial' };
+    return this.probe(['exec', c.name], process.env);
+  }
+
+  /**
+   * Shared probe: append the headless 1-turn claude command and classify the
+   * outcome. `prefix` is everything up to (but excluding) the image/container.
+   */
+  private async probe(prefix: string[], env: NodeJS.ProcessEnv): Promise<AuthCheckResult> {
+    const claudeArgs = ['claude', '-p', 'Responde únicamente: OK', '--max-turns', '1', '--output-format', 'json'];
+    try {
+      const { stdout } = await execFileAsync('docker', [...prefix, ...claudeArgs], { timeout: 90_000, env });
+      if (this.isAuthError(stdout)) return { ok: false, authFailed: true, error: 'Token rechazado por la API de Anthropic' };
+      return { ok: true };
+    } catch (err) {
+      const e = err as { stderr?: string; stdout?: string; message?: string };
+      const text = `${e.stderr ?? ''}\n${e.stdout ?? ''}\n${e.message ?? ''}`;
+      if (this.isAuthError(text)) return { ok: false, authFailed: true, error: 'Token inválido o expirado' };
+      // Inconclusive (timeout, network, etc.) — don't claim an auth failure.
+      return { ok: false, error: (e.message ?? 'probe failed').slice(0, 200) };
+    }
+  }
+
   // ── Docker availability ────────────────────────────────────────────────────
 
   private async dockerAvailable(): Promise<boolean> {
@@ -159,10 +262,85 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     return this.dockerOk;
   }
 
-  async imageAvailable(): Promise<boolean> {
-    return execFileAsync('docker', ['image', 'inspect', CLAUDE_IMAGE, '--format', '{{.Id}}'], { timeout: 5000 })
+  async imageAvailable(image: string): Promise<boolean> {
+    const cached = this.imageCache.get(image);
+    if (cached !== undefined) return cached;
+    const ok = await execFileAsync('docker', ['image', 'inspect', image, '--format', '{{.Id}}'], { timeout: 5000 })
       .then(() => true)
       .catch(() => false);
+    this.imageCache.set(image, ok);
+    return ok;
+  }
+
+  /**
+   * First locally-available image for a role: role image → base → legacy.
+   * Returns null when none of the candidates is built.
+   */
+  async resolveImage(role: string): Promise<string | null> {
+    for (const candidate of imageCandidates(role)) {
+      if (await this.imageAvailable(candidate)) return candidate;
+    }
+    return null;
+  }
+
+  // ── Machine lifecycle ───────────────────────────────────────────────────────
+
+  /**
+   * Eagerly boot the agent's persistent machine (called when the agent registers
+   * for a session). Picks the role's pre-baked image, injects the org credential
+   * if available, and keeps the container alive for the whole session so the user
+   * can watch it come up and open a terminal into it — even before any task runs.
+   */
+  async bootMachine(opts: BootMachineOptions): Promise<BootMachineResult> {
+    const emit = (type: string, text: string) => { void opts.onEvent?.({ type, text }); };
+
+    if (!(await this.dockerAvailable())) {
+      emit('failed', 'Docker no disponible en este nodo');
+      return { ok: false, error: 'Docker no disponible en este nodo' };
+    }
+
+    const existing = this.containers.get(opts.key);
+    if (existing) {
+      emit('ready', `Máquina ya activa (${existing.image})`);
+      return { ok: true, containerName: existing.name, image: existing.image };
+    }
+
+    const image = await this.resolveImage(opts.role);
+    if (!image) {
+      const spec = machineSpecForRole(opts.role);
+      const err = `Imagen ${spec.image} ausente — construye con "./docker/agents/build.sh"`;
+      emit('failed', err);
+      return { ok: false, error: err };
+    }
+
+    // Notice when we fell back off the role's dedicated image (its toolchain is
+    // missing) so the user knows why a backend agent lacks python, etc.
+    const preferred = machineSpecForRole(opts.role).image;
+    if (image !== preferred) {
+      emit('fallback', `Imagen ${preferred} no construida — usando ${image} (sin toolchain especializado)`);
+    }
+
+    emit('booting', `Levantando máquina (${image})…`);
+    const credential = await this.resolveCredential(opts.orgId);
+    const container = await this.createContainer({
+      key: opts.key,
+      image,
+      role: opts.role,
+      sessionScoped: true,
+      credential,
+    });
+    if (!container) {
+      emit('failed', 'No se pudo crear el contenedor');
+      return { ok: false, error: 'No se pudo crear el contenedor', image };
+    }
+
+    emit('ready', `Máquina lista (${image})`);
+    return { ok: true, containerName: container.name, image };
+  }
+
+  /** Destroy an agent's persistent machine (e.g. when the session ends). */
+  async destroyMachine(key: string): Promise<void> {
+    await this.destroyContainer(key);
   }
 
   // ── Run ────────────────────────────────────────────────────────────────────
@@ -171,25 +349,40 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     if (!(await this.dockerAvailable())) {
       return { ok: false, text: '', error: 'Docker no disponible en este nodo' };
     }
-    if (!(await this.imageAvailable())) {
-      return {
-        ok: false,
-        text: '',
-        error: `Imagen ${CLAUDE_IMAGE} ausente — construye "docker build -t eva-claude-sandbox docker/claude-sandbox"`,
-      };
-    }
 
     const credential = await this.resolveCredential(opts.orgId);
     if (!credential) {
       return { ok: false, text: '', error: 'NO_CREDENTIAL: el org no tiene credencial de Claude Code configurada' };
     }
 
-    const envVar = this.envVarFor(credential.method);
+    const role = opts.role ?? 'backend';
+    const image = await this.resolveImage(role);
+    if (!image) {
+      const spec = machineSpecForRole(role);
+      return {
+        ok: false,
+        text: '',
+        error: `Imagen ${spec.image} ausente — construye con "./docker/agents/build.sh"`,
+      };
+    }
+
     const fullPrompt = opts.context ? `${opts.context}\n\n---\n\n${opts.prompt}` : opts.prompt;
 
-    // Named, persistent container so a live terminal can `docker exec` into the
-    // same /work while/after the agent runs. Token injected at create time.
-    const container = await this.createContainer(opts.taskId, envVar, credential.token);
+    // Prefer the agent's persistent machine (machineKey); fall back to a
+    // throwaway per-task container keyed by taskId.
+    const key = opts.machineKey ?? opts.taskId;
+    const sessionScoped = Boolean(opts.machineKey);
+
+    let container = this.containers.get(key);
+    // A session machine booted before the credential existed has no token — the
+    // claude CLI can't authenticate. Recreate it now that we have a credential.
+    if (container && !container.hasToken) {
+      await this.destroyContainer(key);
+      container = undefined;
+    }
+    if (!container) {
+      container = (await this.createContainer({ key, image, role, sessionScoped, credential })) ?? undefined;
+    }
     if (!container) {
       return { ok: false, text: '', error: 'No se pudo crear el contenedor de Claude Code' };
     }
@@ -207,62 +400,85 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     ];
 
     const result = await this.spawnAndStream(execArgs, process.env, opts);
-    // Keep the container around briefly so the user can still inspect it.
-    this.scheduleReap(opts.taskId);
+    // Surface auth failures distinctly so the orchestrator can reopen provisioning
+    // instead of treating an expired token as a generic task failure.
+    if (!result.ok && this.isAuthError(result.error)) {
+      result.authFailed = true;
+      result.error = `AUTH_FAILED: ${result.error ?? 'credencial de Claude Code rechazada'}`;
+    }
+    // Task-scoped containers reap after a grace period; session machines persist
+    // until the session ends (destroyMachine) or the process exits.
+    if (!container.sessionScoped) this.scheduleReap(key);
     return result;
   }
 
-  /** Create a long-lived named container with the token baked into its env. */
-  private async createContainer(taskId: string, envVar: string, token: string): Promise<ClaudeContainer | null> {
-    const existing = this.containers.get(taskId);
+  /** Create a long-lived named container with the role's image + optional token. */
+  private async createContainer(input: {
+    key: string;
+    image: string;
+    role?: string;
+    sessionScoped: boolean;
+    credential: StoredClaudeCredential | null;
+  }): Promise<ClaudeContainer | null> {
+    const { key, image, role, sessionScoped, credential } = input;
+    const existing = this.containers.get(key);
     if (existing) {
       if (existing.reapTimer) { clearTimeout(existing.reapTimer); existing.reapTimer = undefined; }
       return existing;
     }
 
-    const name = `eva-claude-${taskId.slice(0, 8)}-${Date.now().toString(36)}`;
-    const hostDir = await mkdtemp(join(tmpdir(), 'eva-claude-'));
+    const spec = machineSpecForRole(role ?? 'backend');
+    const name = `eva-agent-${(role ?? 'agent').slice(0, 10)}-${key.slice(0, 8)}-${Date.now().toString(36)}`;
+    const hostDir = await mkdtemp(join(tmpdir(), 'eva-agent-'));
+
+    const envVar = credential ? this.envVarFor(credential.method) : null;
+    const runArgs = [
+      'run', '-d', '--name', name,
+      '--network', 'bridge',
+      '--memory', spec.memory,
+      '--cpus', spec.cpus,
+      '-v', `${hostDir}:/work`,
+      '-w', '/work',
+      '-e', 'CI',
+    ];
+    if (envVar) runArgs.push('-e', envVar);
+    runArgs.push(image, 'tail', '-f', '/dev/null');
+
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, CI: '1' };
+    if (envVar && credential) childEnv[envVar] = credential.token;
+
     try {
-      await execFileAsync('docker', [
-        'run', '-d', '--name', name,
-        '--network', 'bridge',
-        '--memory', '2g',
-        '--cpus', '2',
-        '-v', `${hostDir}:/work`,
-        '-w', '/work',
-        '-e', envVar,
-        '-e', 'CI',
-        CLAUDE_IMAGE,
-        'tail', '-f', '/dev/null',
-      ], { timeout: 60_000, env: { ...process.env, [envVar]: token, CI: '1' } });
+      await execFileAsync('docker', runArgs, { timeout: 120_000, env: childEnv });
     } catch (err) {
       await rm(hostDir, { recursive: true, force: true }).catch(() => undefined);
-      this.logger.warn(`claude container create failed for task ${taskId}: ${(err as Error).message.slice(0, 200)}`);
+      this.logger.warn(`agent container create failed for ${key}: ${(err as Error).message.slice(0, 200)}`);
       return null;
     }
 
-    const container: ClaudeContainer = { name, hostDir, shells: new Map() };
-    this.containers.set(taskId, container);
-    this.logger.log(`claude container ${name} ready for task ${taskId}`);
+    const container: ClaudeContainer = {
+      name, hostDir, image, role, hasToken: Boolean(envVar), sessionScoped, shells: new Map(),
+    };
+    this.containers.set(key, container);
+    this.logger.log(`agent container ${name} (${image}) ready for ${key}`);
     return container;
   }
 
-  private scheduleReap(taskId: string): void {
-    const container = this.containers.get(taskId);
+  private scheduleReap(key: string): void {
+    const container = this.containers.get(key);
     if (!container) return;
     if (container.reapTimer) clearTimeout(container.reapTimer);
-    container.reapTimer = setTimeout(() => { void this.destroyContainer(taskId); }, CONTAINER_GRACE_MS);
+    container.reapTimer = setTimeout(() => { void this.destroyContainer(key); }, CONTAINER_GRACE_MS);
   }
 
-  private async destroyContainer(taskId: string): Promise<void> {
-    const container = this.containers.get(taskId);
+  private async destroyContainer(key: string): Promise<void> {
+    const container = this.containers.get(key);
     if (!container) return;
-    this.containers.delete(taskId);
+    this.containers.delete(key);
     if (container.reapTimer) clearTimeout(container.reapTimer);
     for (const shell of container.shells.values()) shell.close();
     await execFileAsync('docker', ['rm', '-f', container.name], { timeout: 20_000 }).catch(() => undefined);
     await rm(container.hostDir, { recursive: true, force: true }).catch(() => undefined);
-    this.logger.log(`claude container for task ${taskId} destroyed`);
+    this.logger.log(`agent container for ${key} destroyed`);
   }
 
   // ── Live terminal access ────────────────────────────────────────────────────
@@ -271,12 +487,12 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
    * Attach to a live shell inside the agent's Claude Code container. Mirrors
    * SandboxService.attachShellStream so the gateway can use either transparently.
    */
-  attachShellStream(taskId: string, shellNum = 0): {
+  attachShellStream(key: string, shellNum = 0): {
     initialBuffer: string;
     subscribe: (cb: (chunk: string) => void) => () => void;
     write: (data: string) => void;
   } | null {
-    const container = this.containers.get(taskId);
+    const container = this.containers.get(key);
     if (!container) return null;
     let shell = container.shells.get(shellNum);
     if (!shell) {
@@ -291,9 +507,15 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     };
   }
 
-  /** Whether a live container exists for this task (for the terminal UI gating). */
-  hasContainer(taskId: string): boolean {
-    return this.containers.has(taskId);
+  /** Whether a live container exists for this key (for the terminal UI gating). */
+  hasContainer(key: string): boolean {
+    return this.containers.has(key);
+  }
+
+  /** Live machine info for a key (image + container name), or null if not booted. */
+  machineInfo(key: string): { containerName: string; image: string; role?: string } | null {
+    const c = this.containers.get(key);
+    return c ? { containerName: c.name, image: c.image, role: c.role } : null;
   }
 
   private createShellProcess(containerName: string): ShellProcess {

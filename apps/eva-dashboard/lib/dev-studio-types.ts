@@ -138,8 +138,37 @@ export interface DevEvent {
 }
 
 export type AgentRole =
-  | 'project_manager' | 'architect' | 'frontend' | 'backend'
+  | 'project_manager' | 'architect' | 'frontend' | 'backend' | 'full_stack'
   | 'testing' | 'deployment' | 'reviewer' | 'human';
+
+/** Live flow state powering the agent diagram (GET sessions/:id/flow). */
+export interface FlowAgentState {
+  role: string;
+  status: string;
+  name: string;
+  currentTaskId: string | null;
+  currentTaskTitle: string | null;
+  currentTaskStatus: string | null;
+  lastUpdateAt: string | null;
+  stuckMs: number | null;
+}
+
+export interface FlowHandoff {
+  from: string;
+  to: string;
+  instruction: string;
+  at: string | null;
+  taskId: string | null;
+  status: string;
+}
+
+export interface FlowState {
+  assigner: string;
+  iterationObjective: string | null;
+  agents: FlowAgentState[];
+  handoffs: FlowHandoff[];
+  stuck: { role: string; reason: string; sinceMs: number | null; taskTitle: string | null } | null;
+}
 
 export interface ClaudeAuthOption {
   method: 'oauth' | 'api_key' | 'org';
@@ -187,6 +216,7 @@ export const AGENT_ROLE_EMOJI: Record<string, string> = {
   architect: '🏗️',
   frontend: '🎨',
   backend: '⚙️',
+  full_stack: '🧰',
   testing: '🧪',
   deployment: '🚀',
   reviewer: '🔍',
