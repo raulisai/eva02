@@ -2,6 +2,42 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-21 08:17Z
+C: whatsapp/runtime: route explicit WhatsApp screenshots/reads/sends deterministically, classify screenshots as immediate and sends as approval, block WhatsApp public-research fallback, and enforce adaptive tool subsets for JSON decisions; files=apps/eva-core/src/agent/tier.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- --runInBand src/agent/__tests__/agent-runner.service.spec.ts src/agent/__tests__/agent-loop.service.spec.ts src/integrations/__tests__/whatsapp-web.service.spec.ts (177 passed); npm run build; npm run lint
+P: pending/improve -> run the live WhatsApp screenshot/read/send smoke with the persistent local profile and confirm the action log contains no agent-loop, skills, browser_navigate, or web_search entries
+
+### 2026-06-21 08:05Z
+C: diagnosis/whatsapp: traced screenshot refusal to generic-loop precedence, missing screenshot tool/delivery proof, absent logged-in screenshot on unread/unanswered reads, over-broad long-tier routing, and public-research exposure; files=docs/backlog.md,.agents/skills/eva-project-seed/references/change-log.md; tests=cd apps/eva-core && npm test -- --runInBand src/agent/__tests__/agent-runner.service.spec.ts -t "sends a WhatsApp Web screenshot|misspelled screenshot|false WhatsApp capability"
+P: pending/improve -> implement deterministic WhatsApp routing before the loop and add an integration test where a successful-but-wrong loop answer cannot suppress screenshot/media delivery
+
+### 2026-06-21 08:05Z
+C: agent/tools: restrict browser_navigate in WhatsApp/Services tasks unless explicitly requested; files=apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts; tests=npm test
+P: pending/improve -> Implement visual verification rules in AgentLoopService to handle dynamic element loading without full browser_navigate loops.
+
+### 2026-06-21 08:00Z
+C: database/approvals: fix memory embeddings schema drift and gracefully handle expired approvals in chat confirmations; files=supabase/migrations/040_add_memory_embeddings_model.sql,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts; tests=npm test
+P: pending/improve -> Ensure the PostgREST cache reload is fully propagated under high load or multi-node container environments.
+
+### 2026-06-21 07:48Z
+C: agent/context: fix task state machine hangs in chat approvals and ensure conversation history includes pending question context; files=apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts; tests=npm test
+P: pending/improve -> Monitor user reply intents that are complex corrections to verify LLM transitions pending approvals correctly.
+
+### 2026-06-21 07:12Z
+C: agent/terminal_run: add network parameter support to run terminal commands with internet access; files=apps/eva-core/src/agent/tool-catalog.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts; tests=npm test
+P: pending/improve -> Ensure terminal_run with network behaves correctly under docker-level network latency or packet drop conditions.
+
+### 2026-06-21 07:05Z
+C: events: safe Redis disconnect onModuleDestroy; files=apps/eva-core/src/events/event-bus.service.ts; tests=npm test
+P: pending/improve -> ensure other modules that use lazy connections clean up without throwing unhandled rejections
+
+### 2026-06-20 02:22Z
+C: dashboard: horizontal agent layout, arrow connections on borders, active edge particle animations, card pulse rect animations; files=apps/eva-dashboard/components/dev-studio/agent-flow-diagram.tsx; tests=npm run build -w apps/eva-dashboard && npm run lint -w apps/eva-dashboard
+P: pending/improve -> add canvas zoom/pan support for very large agent teams in Dev Studio
+
+### 2026-06-19 22:11Z
+C: dev-studio diagnosis: documented Docker runtime/image provisioning gap, sticky negative Docker cache, queued-wave finalization bug, heartbeat tick spam, and missing org scoping; files=docs/backlog.md; tests=cd apps/eva-core && npm test -- --runInBand src/dev-studio/__tests__/agent-machines.spec.ts src/dev-studio/__tests__/claude-code-runner.image.spec.ts src/dev-studio/__tests__/dev-robustness.spec.ts
+P: pending/improve -> implement and integration-test the Dev Studio Docker/queued-wave recovery fixes before retrying the Snake session
+
 ### 2026-06-16 04:22Z
 C: dev-studio: allow session transition from awaiting_goals_approval to running in backend types; files=apps/eva-core/src/dev-studio/dev-studio.types.ts; tests=npm run build -w apps/eva-core && npm run lint -w apps/eva-core
 P: pending/improve -> verify RLS policies for organizations and users tables under high concurrency

@@ -28,6 +28,21 @@ export interface TaskHorizonDecision extends TierDecision {
   summary: string;
 }
 
+const WHATSAPP_SIGNALS = /\b(whatsapp|whatsap|watsapp|watsap|whats app|guasap|guasapp|wa\b)\b/i;
+const WHATSAPP_SCREENSHOT_OR_READ_SIGNALS = /\b(captura(?:me)?|pantallazo|screenshot|screen\s*shot|screenshoot|conversaciones?|chats?|mensajes?|sin leer|sin responder|revisa|revisar|lee|leer|muestra|mu[eé]strame|[uú]ltim[oa]s?)\b/i;
+const WHATSAPP_SEND_SIGNALS = /\b(responde|responder|contesta|contestar|env[ií](?:a|e|o|ar|alo|ala|ame|eme|amelo|amela|aselo|asela|eselo|esela)|m[aá]nd(?:a|e|o|ar|alo|ala|ame|eme|amelo|amela|aselo|asela|eselo|esela)|escribe|escribir|escr[ií]bele|dile)\b/i;
+
+const isWhatsAppScreenshotOrRead = (input: string): boolean =>
+  WHATSAPP_SIGNALS.test(input) && WHATSAPP_SCREENSHOT_OR_READ_SIGNALS.test(input);
+
+const isWhatsAppMessageSend = (input: string): boolean =>
+  WHATSAPP_SIGNALS.test(input)
+  && WHATSAPP_SEND_SIGNALS.test(input)
+  && !WHATSAPP_SCREENSHOT_OR_READ_SIGNALS.test(input);
+
+const isDeterministicWhatsAppTask = (input: string): boolean =>
+  isWhatsAppScreenshotOrRead(input) || isWhatsAppMessageSend(input);
+
 const LONG_SIGNALS = /\b(script|c[oó]digo|programa|automatiz|bot\b|scrap|docker|deploy|desplieg|proyect|integr|monitor|cron\b|cada (hora|d[ií]a|semana)|paso a paso|varios pasos|informe completo|reporte completo|migr|refactoriz|descarg(?:a|ar|ue|uen|ando|ad[ao]s?)?(?:melo|mela|noslo|nosla|selo|sela|lo|la|me|nos)?|download|youtube|youtu\.be|platzi|udemy|vimeo|video|v[ií]deo|mp3|mp4|yt-dlp|m[aá]nd(?:a|e|o|ar|alo|ala|ame|eme|amelo|amela|aselo|asela|eselo|esela)|env[ií](?:a|e|o|ar|alo|ala|ame|eme|amelo|amela|aselo|asela|eselo|esela)|comprim|convert|extra[eí])/i;
 
 // Medium signals indicate tasks requiring reasoning, multi-day/range queries,
@@ -54,6 +69,9 @@ const SELF_IMPROVEMENT_SIGNALS =
 export function classifyTier(text: string): TierDecision {
   const input = text.trim();
 
+  if (isDeterministicWhatsAppTask(input)) {
+    return { tier: 'quick', estimateSec: 15, reason: 'deterministic WhatsApp integration' };
+  }
   if (LONG_SIGNALS.test(input) || input.length > 280) {
     return { tier: 'long', estimateSec: 120, reason: LONG_SIGNALS.test(input) ? 'automation/code signals' : 'long order' };
   }
@@ -76,8 +94,9 @@ export function decideTaskHorizon(text: string, tierDecision: TierDecision = cla
   const input = text.trim();
   const scheduled = SCHEDULE_HORIZON_SIGNALS.test(input);
   const standby = STANDBY_HORIZON_SIGNALS.test(input);
-  const approval = SENSITIVE.test(input);
-  const codeOrProcedural = LONG_SIGNALS.test(input) || SELF_IMPROVEMENT_SIGNALS.test(input);
+  const deterministicWhatsApp = isDeterministicWhatsAppTask(input);
+  const approval = SENSITIVE.test(input) || isWhatsAppMessageSend(input);
+  const codeOrProcedural = !deterministicWhatsApp && (LONG_SIGNALS.test(input) || SELF_IMPROVEMENT_SIGNALS.test(input));
 
   if (approval) {
     return {
@@ -89,7 +108,7 @@ export function decideTaskHorizon(text: string, tierDecision: TierDecision = cla
       resumable: true,
       shouldCreateScheduledJob: false,
       shouldUseCodeTools: codeOrProcedural,
-      shouldUseSkills: true,
+      shouldUseSkills: !deterministicWhatsApp,
       shouldSelfImprove: codeOrProcedural,
       summary: 'sensitive action parked behind Approval Engine',
     };
@@ -169,7 +188,7 @@ export function decideTaskHorizon(text: string, tierDecision: TierDecision = cla
     resumable: false,
     shouldCreateScheduledJob: false,
     shouldUseCodeTools: codeOrProcedural,
-    shouldUseSkills: tierDecision.tier !== 'chat' || codeOrProcedural,
+    shouldUseSkills: !deterministicWhatsApp && (tierDecision.tier !== 'chat' || codeOrProcedural),
     shouldSelfImprove: codeOrProcedural,
     summary: tierDecision.tier === 'chat' ? 'direct conversational response' : 'short immediate task',
   };

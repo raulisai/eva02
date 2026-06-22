@@ -98,8 +98,23 @@ export class EventBusService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy() {
     this.consuming = false;
-    await this.publisher.quit();
-    await this.subscriber.quit();
+    const disconnectSafe = async (client?: Redis) => {
+      if (!client) return;
+      try {
+        if (client.status === 'ready' || client.status === 'connect') {
+          await client.quit();
+        } else {
+          client.disconnect();
+        }
+      } catch (err) {
+        this.logger.warn(`Error while disconnecting Redis client: ${(err as Error).message}`);
+      }
+    };
+
+    await Promise.all([
+      disconnectSafe(this.publisher),
+      disconnectSafe(this.subscriber),
+    ]);
   }
 
   /** Publish an event to the stream. Fire-and-forget safe — logs on error. */

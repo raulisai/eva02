@@ -535,11 +535,15 @@ export class AgentLoopService {
         continue;
       }
 
-      const spec = available.find((t) => t.name === decision!.tool);
+      // JSON fallback decisions must obey the same adaptive tool subset as
+      // native tool calls. Looking in `available` allowed the model to execute
+      // browser_navigate/web_search merely because they appeared in the cached
+      // system prompt, even when this phase intentionally removed them.
+      const spec = stepTools.find((t) => t.name === decision!.tool);
       if (!spec) {
         steps.push({
           tool: decision.tool, args: decision.args, thought: decision.thought,
-          observation: `ERROR: herramienta desconocida "${decision.tool}". Usa una de: ${available.map((t) => t.name).join(', ')}, final_answer.`,
+          observation: `ERROR: herramienta desconocida o no disponible para este objetivo/fase "${decision.tool}". Usa una de: ${stepTools.map((t) => t.name).join(', ')}, final_answer.`,
         });
         budgetState = escalateOnEvent(budgetState, 'unknown_tool');
         this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
@@ -576,7 +580,7 @@ export class AgentLoopService {
 
       if (parallelDecisions.length > 1) {
         const runnable = parallelDecisions
-          .map((d) => ({ decision: d, spec: available.find((t) => t.name === d.tool) }))
+          .map((d) => ({ decision: d, spec: stepTools.find((t) => t.name === d.tool) }))
           .filter((item): item is { decision: AgentDecision; spec: ToolSpec } => !!item.spec && isParallelizable(item.spec.name, item.decision.args));
 
         if (runnable.length === parallelDecisions.length) {
@@ -613,6 +617,8 @@ export class AgentLoopService {
                 observation = await this.runDelegate(orgId, taskId, d.args, depth, opts, log, steps);
               } else if (tool.name === 'code_execute') {
                 observation = await this.runCodeExecute(orgId, taskId, d.args, opts);
+              } else if (tool.name === 'terminal_run') {
+                observation = await this.runTerminalRun(orgId, taskId, d.args, opts);
               } else {
                 observation = await tool.execute(orgId, taskId, d.args);
               }
@@ -682,6 +688,8 @@ export class AgentLoopService {
           observation = await this.runDelegate(orgId, taskId, decision.args, depth, opts, log, steps);
         } else if (spec.name === 'code_execute') {
           observation = await this.runCodeExecute(orgId, taskId, decision.args, opts);
+        } else if (spec.name === 'terminal_run') {
+          observation = await this.runTerminalRun(orgId, taskId, decision.args, opts);
         } else {
           observation = await spec.execute(orgId, taskId, decision.args);
         }
@@ -1350,6 +1358,7 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     if (/whatsapp/i.test(goal)) signals.add('whatsapp');
     if (/uber|rappi|pedido|delivery|comida|casa|trabajo|ubicacion|ubicación|lugar|dirección|direccion/i.test(goal)) signals.add('services');
     if (/bolsa|acciones|stock|precio|finanz/i.test(goal)) signals.add('finance');
+    if (/naveg|web|browser|link|enlace|p[aá]gina|sitio/i.test(goal)) signals.add('browser');
     return signals;
   }
 
@@ -1385,7 +1394,7 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     // Tool groups
     const CORE = new Set([
       'scratchpad', 'code_execute', 'terminal_run', 'terminal_input', 'terminal_output',
-      'sandbox_ls', 'ask_user', 'image_analyze', 'browser_navigate', 'memory_recall', 'skill_run', 'skill_view',
+      'sandbox_ls', 'ask_user', 'image_analyze', 'memory_recall', 'skill_run', 'skill_view',
       'delegate', 'data_log',
     ]);
     const RESEARCH_GROUP = new Set(['web_search']);
@@ -1397,11 +1406,20 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     const SCHEDULE_GROUP = new Set(['schedule_job_manage']);
     const WHATSAPP_GROUP = new Set(['whatsapp_send', 'whatsapp_read']);
     const SERVICES_GROUP = new Set(['uber_quote', 'uber_login', 'rappi_login', 'uber_request_ride', 'known_places_manage']);
+    const whatsappOnlyGoal = goalSignals.has('whatsapp')
+      && !goalSignals.has('research')
+      && !goalSignals.has('browser');
 
     return allTools.filter((t) => {
       if (usedTools.has(t.name)) return true;
       if (CORE.has(t.name)) return true;
-      if (RESEARCH_GROUP.has(t.name)) return inResearchPhase || goalSignals.has('research');
+      if (t.name === 'browser_navigate') {
+        if (goalSignals.has('whatsapp') || goalSignals.has('services')) {
+          return goalSignals.has('research') || goalSignals.has('browser');
+        }
+        return true;
+      }
+      if (RESEARCH_GROUP.has(t.name)) return !whatsappOnlyGoal && (inResearchPhase || goalSignals.has('research'));
       if (DELIVERY_TELEGRAM.has(t.name)) return goalSignals.has('telegram') || goalSignals.has('file') || inSynthesisPhase;
       if (EMAIL_GROUP.has(t.name)) return goalSignals.has('email');
       if (CALENDAR_GROUP.has(t.name)) return goalSignals.has('calendar');
@@ -1573,6 +1591,64 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     }
 
     const result = await this.sandbox.execInSession(taskId, { kind: language, code, orgId, session });
+    return this.formatSandboxResult(result);
+  }
+
+  /** terminal_run con manejo de red: sin red ejecuta directo; con red crea approval. */
+  private async runTerminalRun(
+    orgId: string,
+    taskId: string,
+    args: Record<string, unknown>,
+    opts: AgentLoopOptions,
+  ): Promise<string> {
+    const cmd = String(args.cmd ?? '').trim();
+    if (!cmd) return 'ERROR: terminal_run requiere args.cmd';
+    const session = typeof args.session === 'number' ? args.session : 0;
+    const background = args.background === true;
+
+    if (args.network === true) {
+      if (this.intelligence) {
+        const denied = await this.intelligence.validateNetworkAllowlist(orgId, cmd).catch(() => null);
+        if (denied) {
+          await this.recordNetworkExec(orgId, taskId, { language: 'bash', code: cmd, allowlistPassed: false, outcome: 'blocked', blockedReason: denied });
+          return `ERROR: ${denied}`;
+        }
+      }
+      if (process.env.EVA_SANDBOX_ALLOW_NETWORK === 'true') {
+        await this.recordNetworkExec(orgId, taskId, { language: 'bash', code: cmd, allowlistPassed: true, outcome: 'ran_direct' });
+        const result = await this.sandbox.execInSession(taskId, {
+          kind: 'terminal',
+          code: cmd,
+          orgId,
+          network: true,
+          session,
+          background,
+        });
+        return this.formatSandboxResult(result);
+      }
+      if (!this.approvals || !opts.userId) {
+        await this.recordNetworkExec(orgId, taskId, { language: 'bash', code: cmd, allowlistPassed: true, outcome: 'blocked', blockedReason: 'no_approval_context' });
+        return 'ERROR: la ejecución con red requiere aprobación humana y no está disponible en este contexto. Reintenta sin "network" o explica en final_answer qué quedó pendiente.';
+      }
+      const approval = await this.approvals.requestForPreparedAction({
+        orgId,
+        userId: opts.userId,
+        taskId,
+        actionType: 'sandbox.network_exec',
+        payload: { language: 'bash', code: cmd },
+        summary: `Ejecutar comando con acceso a red: ${cmd.slice(0, 120)}`,
+      });
+      await this.recordNetworkExec(orgId, taskId, { language: 'bash', code: cmd, allowlistPassed: true, outcome: 'approval_requested' });
+      return `PENDIENTE DE APROBACIÓN: la ejecución con red quedó en Approvals (hash ${approval.action_hash.slice(0, 12)}…). Se ejecutará al aprobarse. Continúa sin red o cierra con final_answer explicando que quedó pendiente.`;
+    }
+
+    const result = await this.sandbox.execInSession(taskId, {
+      kind: 'terminal',
+      code: cmd,
+      orgId,
+      session,
+      background,
+    });
     return this.formatSandboxResult(result);
   }
 
@@ -1973,6 +2049,7 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
         message = `Revisando Rappi... 🍔`;
         break;
       case 'code_execute':
+      case 'terminal_run':
         message = `Ejecutando código en el sandbox seguro... ⚙️`;
         break;
       case 'telegram_send_file':

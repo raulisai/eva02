@@ -87,7 +87,7 @@ describe('classifyTier', () => {
     expect(classifyTier('descárgame el video').tier).toBe('long');
     expect(classifyTier('bájalo de youtube').tier).toBe('long');
     expect(classifyTier('descárgamelo de youtube y mándamelo por telegram').tier).toBe('long');
-    expect(classifyTier('envíaselo a mi mamá por whatsapp').tier).toBe('long');
+    expect(classifyTier('envíaselo a mi mamá por whatsapp').tier).toBe('quick');
   });
 
   it('handles Spanish verbs with trailing pronouns without taking the chat shortcut', () => {
@@ -133,6 +133,29 @@ describe('decideTaskHorizon', () => {
 
     expect(decision.mode).toBe('approval');
     expect(decision.waitPolicy).toBe('approval');
+  });
+
+  it('routes WhatsApp screenshots immediately and message sends to approval', () => {
+    const screenshot = 'Mándame una captura de screenshot de mis conversaciones en WhatsApp.';
+    expect(classifyTier(screenshot)).toEqual(expect.objectContaining({
+      tier: 'quick',
+      reason: 'deterministic WhatsApp integration',
+    }));
+    expect(decideTaskHorizon(screenshot)).toEqual(expect.objectContaining({
+      mode: 'immediate',
+      durationBand: 'seconds',
+      shouldUseCodeTools: false,
+      shouldUseSkills: false,
+      shouldSelfImprove: false,
+    }));
+
+    expect(decideTaskHorizon('envíaselo a mi mamá por WhatsApp')).toEqual(expect.objectContaining({
+      mode: 'approval',
+      waitPolicy: 'approval',
+      shouldUseCodeTools: false,
+      shouldUseSkills: false,
+      shouldSelfImprove: false,
+    }));
   });
 
   it('treats code and skill improvement work as background self-improvement work', () => {
@@ -1878,13 +1901,22 @@ describe('AgentRunnerService', () => {
   });
 
   it('sends a WhatsApp Web screenshot when the user asks for a captura', async () => {
-    tasks.getTask.mockResolvedValue(makeTask({ description: 'puedes darme una captura de mi whatsap' }));
+    tasks.getTask.mockResolvedValue(makeTask({ description: 'Mándame una captura de screenshot de mis conversaciones en WhatsApp.' }));
     const whatsapp = module.get(WhatsAppWebService) as jest.Mocked<WhatsAppWebService>;
+    agentLoop.run.mockResolvedValueOnce({
+      ok: true,
+      text: 'No puedo enviar capturas de WhatsApp.',
+      steps: [],
+      tokensUsed: 42_387,
+      toolsUsed: ['browser_navigate', 'whatsapp_read'],
+    });
 
     await service.run(ORG, TASK);
 
     expect(whatsapp.captureSessionScreenshot).toHaveBeenCalledWith(ORG, TASK);
+    expect(agentLoop.run).not.toHaveBeenCalled();
     expect(modelRouter.generate).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
 
     const media = events.publish.mock.calls.map(([e]) => e).find(e => e.type === 'task.media');
     expect(media?.payload).toEqual(expect.objectContaining({
@@ -1984,6 +2016,8 @@ describe('AgentRunnerService', () => {
         text: 'voy en camino',
       }),
     }));
+    expect(agentLoop.run).not.toHaveBeenCalled();
+    expect(research.answer).not.toHaveBeenCalled();
     expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'waiting_for_approval', expect.anything());
   });
 
@@ -2388,6 +2422,7 @@ describe('AgentRunnerService', () => {
       expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'planning');
       expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'running');
       expect(approvals.approve).toHaveBeenCalledWith('app-123', ORG, 'user-1');
+      expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.any(Object));
     });
 
     it('rejects a pending task and cancels it when the user replies with a cancellation word', async () => {
@@ -2406,6 +2441,66 @@ describe('AgentRunnerService', () => {
       expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'running');
       expect(approvals.reject).toHaveBeenCalledWith('app-123', ORG, 'user-1', expect.any(String));
       expect(tasks.transition).toHaveBeenCalledWith('waiting-task-id', ORG, 'cancelled', expect.any(Object));
+      expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'completed', expect.any(Object));
+    });
+
+    it('fails the reply task and waiting task when the approval has expired', async () => {
+      const { ForbiddenException } = require('@nestjs/common');
+      const approvals = module.get(ApprovalsService) as jest.Mocked<ApprovalsService>;
+      tasks.getTask.mockResolvedValueOnce(makeTask({ description: 'sí' }));
+
+      const mockWaitingTask = makeTask({ id: 'waiting-task-id', status: 'waiting_for_approval' });
+      db.admin.limit.mockResolvedValueOnce({ data: [mockWaitingTask], error: null });
+
+      const mockApproval = { id: 'app-123', status: 'pending', task_id: 'waiting-task-id' };
+      db.admin.limit.mockResolvedValueOnce({ data: [mockApproval], error: null });
+
+      approvals.approve.mockRejectedValueOnce(new ForbiddenException('Approval is expired'));
+
+      await service.run(ORG, TASK);
+
+      expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'planning');
+      expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'running');
+      expect(approvals.approve).toHaveBeenCalledWith('app-123', ORG, 'user-1');
+      expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'failed', expect.objectContaining({
+        result: expect.objectContaining({ text: expect.stringContaining('expirado') }),
+      }));
+      expect(tasks.transition).toHaveBeenCalledWith('waiting-task-id', ORG, 'failed', expect.objectContaining({
+        result: expect.objectContaining({ text: expect.stringContaining('expiró') }),
+      }));
+    });
+
+    it('falls back to agent_input_requests and approvals in getConversationContext when t.result is empty', async () => {
+      const mockTasks = [
+        {
+          id: 'task-input-waiting',
+          title: 'Pregunta',
+          description: 'dame tu email',
+          result: null,
+          status: 'waiting_for_input',
+          created_at: new Date(Date.now() - 10000).toISOString(),
+        },
+        {
+          id: 'task-approval-waiting',
+          title: 'Aprobacion',
+          description: 'manda whatsapp',
+          result: null,
+          status: 'waiting_for_approval',
+          created_at: new Date(Date.now() - 20000).toISOString(),
+        },
+      ];
+
+      db.admin.limit.mockResolvedValueOnce({ data: mockTasks, error: null });
+      db.admin.limit.mockResolvedValueOnce({ data: [{ summary: 'Enviar WhatsApp a Juan' }], error: null });
+      db.admin.limit.mockResolvedValueOnce({ data: [{ question: '¿Cuál es tu email?' }], error: null });
+
+      const context = await (service as any).getConversationContext(makeTask({ id: 'current-task-id' }));
+
+      expect(context.length).toBe(4);
+      expect(context[0]).toEqual({ role: 'user', text: 'manda whatsapp' });
+      expect(context[1]).toEqual({ role: 'assistant', text: 'Enviar WhatsApp a Juan' });
+      expect(context[2]).toEqual({ role: 'user', text: 'dame tu email' });
+      expect(context[3]).toEqual({ role: 'assistant', text: '¿Cuál es tu email?' });
     });
   });
 });

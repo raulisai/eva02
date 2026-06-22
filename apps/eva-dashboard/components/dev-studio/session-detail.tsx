@@ -254,7 +254,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-500/10 border border-cyan-500/20 shadow-[0_0_15px_-3px_rgba(34,211,238,0.2)]">
-              <Layers className="h-4.5 w-4.5 text-cyan-400" />
+              <Layers className="h-[18px] w-[18px] text-cyan-400" />
             </div>
             <div>
               <h1 className="text-[13px] font-bold tracking-wide text-zinc-100 uppercase">EVA Development Studio</h1>
@@ -415,7 +415,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
         {/* Approvals / Warning banners */}
         {session.status === 'awaiting_goals_approval' && goals.length > 0 && (
           <div className="flex items-center gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 shadow-[0_0_20px_-3px_rgba(245,158,11,0.15)]">
-            <AlertTriangle className="h-4.5 w-4.5 text-amber-400 shrink-0" />
+            <AlertTriangle className="h-[18px] w-[18px] text-amber-400 shrink-0" />
             <div className="flex-1 min-w-0">
               <h4 className="text-xs font-semibold text-zinc-200">Aprobación de objetivos requerida</h4>
               <p className="text-[10px] text-zinc-500 mt-0.5">Selecciona y aprueba la lista de objetivos para que el equipo comience a ejecutar.</p>
@@ -749,7 +749,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
           <div className="rounded-2xl border border-white/5 bg-[#070a13]/40 backdrop-blur-md p-4">
             <div className="flex items-center justify-between border-b border-white/5 pb-2 mb-4">
               <div className="flex items-center gap-2">
-                <ClipboardList className="h-4.5 w-4.5 text-cyan-400" />
+                <ClipboardList className="h-[18px] w-[18px] text-cyan-400" />
                 <h3 className="text-xs font-semibold text-zinc-100">Línea de tiempo de eventos</h3>
               </div>
               <span className="text-[9px] font-mono text-zinc-500">{events.length} eventos recientes</span>
@@ -765,7 +765,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
           <div className="rounded-2xl border border-white/5 bg-[#070a13]/40 backdrop-blur-md p-4">
             <div className="flex items-center justify-between border-b border-white/5 pb-2 mb-4">
               <div className="flex items-center gap-2">
-                <Activity className="h-4.5 w-4.5 text-cyan-400" />
+                <Activity className="h-[18px] w-[18px] text-cyan-400" />
                 <h3 className="text-xs font-semibold text-zinc-100">Registro de tareas de agentes</h3>
               </div>
               <span className="text-[9px] font-mono text-zinc-500">{tasks.length} tareas técnicas</span>

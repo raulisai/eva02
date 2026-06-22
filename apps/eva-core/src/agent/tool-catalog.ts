@@ -207,13 +207,14 @@ export function buildToolCatalog(deps: ToolCatalogDeps): ToolSpec[] {
     },
     {
       name: 'terminal_run',
-      usage: 'terminal_run{"cmd","session"?,"background"?}: comando de shell en una terminal VIVA del sandbox (cwd /work, estado persistente: cd, export, venv). "session" (0-9) abre terminales paralelas (ej. server en 1, pruebas en 0). Si el comando pide input verás [SISTEMA: espera input] → responde con terminal_input. Si sigue corriendo, léelo con terminal_output. background:true lo lanza detached.',
+      usage: 'terminal_run{"cmd","session"?,"background"?,"network"?}: comando de shell en una terminal VIVA del sandbox (cwd /work, estado persistente: cd, export, venv). "session" (0-9) abre terminales paralelas. background:true lo lanza detached. Pasa "network":true para acceso a internet/APIs.',
       inputSchema: {
         type: 'object',
         properties: {
           cmd: { type: 'string', description: 'Comando de shell a ejecutar en /work.' },
           session: { type: 'number', description: 'Número de terminal paralela (0 por defecto).' },
           background: { type: 'boolean', description: 'true = ejecutar detached (leer con terminal_output).' },
+          network: { type: 'boolean', description: 'true = permitir acceso a red (para descargas y llamadas a APIs).' },
         },
         required: ['cmd'],
       },
@@ -224,6 +225,7 @@ export function buildToolCatalog(deps: ToolCatalogDeps): ToolSpec[] {
           kind: 'terminal', code: cmd, orgId,
           background: args.background === true,
           session: typeof args.session === 'number' ? args.session : 0,
+          network: args.network === true,
         });
         return formatSandboxResult(result);
       },

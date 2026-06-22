@@ -586,8 +586,10 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.tasks.transition(ctx.taskId, ctx.orgId, 'running');
           await this.say(ctx.orgId, ctx.taskId, 'Abro WhatsApp Web con tu perfil local. Si falta login, te paso el QR.');
           await this.log(ctx.orgId, ctx.taskId, 'whatsapp request — opening WhatsApp Web profile', 'tools');
-          const loopHandled = await this.runAgentLoop(ctx.orgId, ctx.taskId, ctx.input, ctx.conversationContext, ctx.startedAt, ctx.task.created_by, ctx.soulContext, ctx.requestLocationBlock);
-          if (loopHandled) return true;
+          // WhatsApp has deterministic handlers for screenshots, reads, setup,
+          // and approval-gated sends. Running the generic loop first lets an
+          // invented browser session or a generic refusal suppress the real
+          // integration result, so explicit WhatsApp traffic must stay here.
           await this.handleWhatsAppRequest(ctx.orgId, ctx.taskId, ctx.task, ctx.input, ctx.startedAt, ctx.conversationContext);
           return true;
         }
@@ -1174,17 +1176,42 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.tasks.transition(taskId, orgId, 'planning');
           await this.tasks.transition(taskId, orgId, 'running');
 
-          if (isConfirm) {
-            await this.log(orgId, taskId, `User confirmed approval ${approval.id} via chat: "${rawInput}"`, 'approval');
-            await this.approvals.approve(approval.id, orgId, task.created_by);
-            await this.deliver(orgId, taskId, 'Aprobación recibida. Ejecutando la acción...', 'approval-chat', 0);
-          } else {
-            await this.log(orgId, taskId, `User rejected approval ${approval.id} via chat: "${rawInput}"`, 'approval');
-            await this.approvals.reject(approval.id, orgId, task.created_by, 'Cancelado por el usuario en el chat');
-            await this.tasks.transition(waitingTask.id, orgId, 'cancelled', {
-              result: { text: 'La acción fue desaprobada y la tarea se canceló.', model: 'approval-chat' },
+          try {
+            if (isConfirm) {
+              await this.log(orgId, taskId, `User confirmed approval ${approval.id} via chat: "${rawInput}"`, 'approval');
+              await this.approvals.approve(approval.id, orgId, task.created_by);
+              await this.deliver(orgId, taskId, 'Aprobación recibida. Ejecutando la acción...', 'approval-chat', 0);
+              await this.tasks.transition(taskId, orgId, 'completed', {
+                result: { text: 'Aprobación recibida. Ejecutando la acción...', model: 'approval-chat' },
+              });
+            } else {
+              await this.log(orgId, taskId, `User rejected approval ${approval.id} via chat: "${rawInput}"`, 'approval');
+              await this.approvals.reject(approval.id, orgId, task.created_by, 'Cancelado por el usuario en el chat');
+              await this.tasks.transition(waitingTask.id, orgId, 'cancelled', {
+                result: { text: 'La acción fue desaprobada y la tarea se canceló.', model: 'approval-chat' },
+              });
+              await this.deliver(orgId, taskId, 'Entendido. Cancelé la acción y la tarea pendiente.', 'approval-chat', 0);
+              await this.tasks.transition(taskId, orgId, 'completed', {
+                result: { text: 'Entendido. Cancelé la acción y la tarea pendiente.', model: 'approval-chat' },
+              });
+            }
+          } catch (err) {
+            const errorMsg = (err instanceof Error) && err.message === 'Approval is expired'
+              ? 'La aprobación ha expirado. Por favor, solicita la acción de nuevo.'
+              : `Error al procesar la aprobación: ${(err as Error).message}`;
+
+            await this.log(orgId, taskId, `Approval error: ${(err as Error).message}`, 'approval');
+            await this.deliver(orgId, taskId, errorMsg, 'approval-chat', 0);
+
+            await this.tasks.transition(taskId, orgId, 'failed', {
+              result: { text: errorMsg, model: 'approval-chat' },
             });
-            await this.deliver(orgId, taskId, 'Entendido. Cancelé la acción y la tarea pendiente.', 'approval-chat', 0);
+
+            if ((err instanceof Error) && err.message === 'Approval is expired') {
+              await this.tasks.transition(waitingTask.id, orgId, 'failed', {
+                result: { text: 'La aprobación asociada a esta tarea expiró.', model: 'approval-chat' },
+              });
+            }
           }
           return;
         }
@@ -2332,7 +2359,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
     try {
       const { data, error } = await this.db.admin
         .from('tasks')
-        .select('id, title, description, result')
+        .select('id, title, description, result, status')
         .eq('org_id', orgId)
         .eq('created_by', userId)
         .order('created_at', { ascending: false })
@@ -2350,7 +2377,34 @@ Responde directamente al usuario en español, con un tono amable y natural.
 
       for (const t of pastTasks) {
         const userText = t.description || t.title || '';
-        const assistantText = (t.result as Record<string, unknown> | null)?.['text'] as string | null;
+        let assistantText = (t.result as Record<string, unknown> | null)?.['text'] as string | null;
+
+        if (!assistantText && t.status === 'waiting_for_input') {
+          const { data: reqs } = await this.db.admin
+            .from('agent_input_requests')
+            .select('question')
+            .eq('org_id', orgId)
+            .eq('task_id', t.id)
+            .order('created_at', { ascending: false })
+            .limit(1);
+          if (reqs && reqs.length > 0) {
+            assistantText = reqs[0].question;
+          }
+        }
+
+        if (!assistantText && t.status === 'waiting_for_approval') {
+          const { data: apps } = await this.db.admin
+            .from('approvals')
+            .select('summary')
+            .eq('org_id', orgId)
+            .eq('task_id', t.id)
+            .order('created_at', { ascending: false })
+            .limit(1);
+          if (apps && apps.length > 0) {
+            assistantText = apps[0].summary;
+          }
+        }
+
         if (userText.trim()) {
           turns.push({ role: 'user', text: userText.trim() });
         }
@@ -2872,7 +2926,7 @@ Responde directamente al usuario en español, con un tono amable y natural.
     const guard = rawInput ?? input;
 
     // Personal-data requests must never fall to web-search recovery.
-    if (EMAIL_SIGNALS.test(guard) || CALENDAR_SIGNALS_PERSONAL.test(guard) || DRIVE_SIGNALS.test(guard)) {
+    if (EMAIL_SIGNALS.test(guard) || CALENDAR_SIGNALS_PERSONAL.test(guard) || DRIVE_SIGNALS.test(guard) || WHATSAPP_SIGNALS.test(guard)) {
       await this.log(orgId, taskId, 'recovery skipped: personal-data request — no web search fallback', 'tools');
       return false;
     }
@@ -3732,6 +3786,17 @@ Responde directamente al usuario en español, con un tono amable y natural.
     }
 
     await this.deliver(orgId, taskId, resultText, 'approved-action', Date.now() - startedAt);
+    try {
+      const current = await this.tasks.getTask(taskId, orgId);
+      if (!['completed', 'failed', 'cancelled'].includes(current.status)) {
+        const nextStatus = resultText.startsWith('❌') ? 'failed' : 'completed';
+        await this.tasks.transition(taskId, orgId, nextStatus, {
+          result: { text: resultText, model: 'approved-action' },
+        });
+      }
+    } catch (err) {
+      this.logger.error(`executeApprovedAction transition error for task ${taskId}: ${(err as Error).message}`);
+    }
     await this.log(orgId, taskId, `done in ${Date.now() - startedAt}ms total`, 'pipeline');
   }
 

@@ -44,14 +44,16 @@ const ROLE_THEME: Record<string, { color: string; iconBg: string; glow: string; 
 };
 
 // ── Dynamic layout computation ────────────────────────────────────────────────
-const SVG_W = 1000;
-const TIER_H = 172;
-const START_Y = 80;
-const NODE_W = 188;
-const NODE_H = 82;
+const SVG_W_MIN = 1000;
+const SVG_H = 480;
+const NODE_W = 176;
+const NODE_H = 92;
+const COL_GAP = 26;   // minimum horizontal gap between adjacent tier columns
+const MARGIN_X = 104; // horizontal inset from the canvas edge to the outer node centers
 
 function computeLayout(visibleRoles: string[]): {
   positions: Record<string, { cx: number; cy: number }>;
+  svgW: number;
   svgH: number;
 } {
   const tierMap: Record<number, string[]> = {};
@@ -60,21 +62,36 @@ function computeLayout(visibleRoles: string[]): {
     (tierMap[tier] = tierMap[tier] ?? []).push(role);
   }
   const sortedTiers = Object.keys(tierMap).map(Number).sort((a, b) => a - b);
-  const svgH = START_Y + sortedTiers.length * TIER_H + 56;
+  const cols = sortedTiers.length;
 
   const positions: Record<string, { cx: number; cy: number }> = {};
+
+  // Columns = tiers (horizontal), agents within a tier spread vertically.
+  // Column spacing is clamped to NODE_W + COL_GAP so two adjacent columns can
+  // never overlap; when the team is large the canvas widens (and the whole SVG
+  // scales down to fit its container) instead of letting nodes collide.
+  const minTierW = NODE_W + COL_GAP;
+  const usableW = SVG_W_MIN - MARGIN_X * 2;
+  const idealTierW = cols > 1 ? usableW / (cols - 1) : 0;
+  const tierW = Math.max(idealTierW, minTierW);
+  const svgW = Math.max(SVG_W_MIN, MARGIN_X * 2 + (cols - 1) * tierW);
+  const startX = cols > 1 ? (svgW - (cols - 1) * tierW) / 2 : svgW / 2;
+
   sortedTiers.forEach((tier, idx) => {
     const roles = tierMap[tier];
-    const cy = START_Y + idx * TIER_H + TIER_H / 2;
+    const cx = cols > 1 ? startX + idx * tierW : svgW / 2;
+
     const n = roles.length;
-    const maxSpread = n > 1 ? Math.min(300, (SVG_W - NODE_W - 80) / (n - 1)) : 0;
-    const startX = SVG_W / 2 - maxSpread * (n - 1) / 2;
+    // Spread vertically: center around SVG_H / 2
+    const maxSpread = n > 1 ? Math.min(125, (SVG_H - NODE_H - 60) / (n - 1)) : 0;
+    const startY = SVG_H / 2 - (maxSpread * (n - 1)) / 2;
+
     roles.forEach((role, i) => {
-      positions[role] = { cx: startX + i * maxSpread, cy };
+      positions[role] = { cx, cy: startY + i * maxSpread };
     });
   });
 
-  return { positions, svgH };
+  return { positions, svgW, svgH: SVG_H };
 }
 
 // ── Edge computation ──────────────────────────────────────────────────────────
@@ -132,19 +149,56 @@ function computeEdges(visible: Set<string>, assigner: string): EdgeDef[] {
   });
 }
 
+function getAdjustedPoints(
+  f: { cx: number; cy: number },
+  t: { cx: number; cy: number },
+  curved?: boolean,
+): { sx: number; sy: number; ex: number; ey: number } {
+  const halfW = NODE_W / 2; // 88
+  const halfH = NODE_H / 2; // 46
+  const arrowPadding = 6;
+
+  if (curved) {
+    // Reverse edge bows upward: start from top center, end at top center of target
+    const sx = f.cx;
+    const sy = f.cy - halfH;
+    const ex = t.cx;
+    const ey = t.cy - halfH - arrowPadding;
+    return { sx, sy, ex, ey };
+  }
+
+  const dx = t.cx - f.cx;
+
+  // Forward edge (left to right)
+  if (dx > 0) {
+    const sx = f.cx + halfW;
+    const sy = f.cy;
+    const ex = t.cx - halfW - arrowPadding;
+    const ey = t.cy;
+    return { sx, sy, ex, ey };
+  } else {
+    // Fallback
+    const sx = f.cx - halfW;
+    const sy = f.cy;
+    const ex = t.cx + halfW + arrowPadding;
+    const ey = t.cy;
+    return { sx, sy, ex, ey };
+  }
+}
+
 function edgePath(
   f: { cx: number; cy: number },
   t: { cx: number; cy: number },
   curved?: boolean,
 ): string {
+  const { sx, sy, ex, ey } = getAdjustedPoints(f, t, curved);
   if (curved) {
-    // Bow out to the right so reverse edges don't overlap the forward path.
-    const dir = t.cy < f.cy ? 1 : -1;
-    return `M ${f.cx} ${f.cy} C ${f.cx + 280 * dir} ${f.cy} ${t.cx + 280 * dir} ${t.cy} ${t.cx} ${t.cy}`;
+    const bowHeight = 120;
+    return `M ${sx} ${sy} C ${sx - 30} ${sy - bowHeight} ${ex + 30} ${ey - bowHeight} ${ex} ${ey}`;
   }
-  const mx = (f.cx + t.cx) / 2;
-  const my = (f.cy + t.cy) / 2 - Math.abs(t.cx - f.cx) * 0.05;
-  return `M ${f.cx} ${f.cy} Q ${mx} ${my} ${t.cx} ${t.cy}`;
+  const mx = (sx + ex) / 2;
+  const my = (sy + ey) / 2 + (ex - sx) * 0.04;
+  return `M ${sx} ${sy} Q ${mx} ${my} ${ex} ${ey}`;
 }
 
 function labelMidpoint(
@@ -152,11 +206,13 @@ function labelMidpoint(
   t: { cx: number; cy: number },
   curved?: boolean,
 ): { x: number; y: number } {
+  const { sx, sy, ex, ey } = getAdjustedPoints(f, t, curved);
   if (curved) {
-    const dir = t.cy < f.cy ? 1 : -1;
-    return { x: (f.cx + t.cx) / 2 + 210 * dir, y: (f.cy + t.cy) / 2 };
+    return { x: (sx + ex) / 2, y: (sy + ey) / 2 - 80 };
   }
-  return { x: (f.cx + t.cx) / 2, y: (f.cy + t.cy) / 2 - 10 };
+  const mx = (sx + ex) / 2;
+  const my = (sy + ey) / 2 + (ex - sx) * 0.04;
+  return { x: mx, y: my - 10 };
 }
 
 function truncate(s: string, n: number): string {
@@ -215,7 +271,7 @@ export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus }:
 
   const visibleSet = useMemo(() => new Set(visibleRoles), [visibleRoles]);
 
-  const { positions, svgH } = useMemo(() => computeLayout(visibleRoles), [visibleRoles]);
+  const { positions, svgW, svgH } = useMemo(() => computeLayout(visibleRoles), [visibleRoles]);
   const edges = useMemo(() => computeEdges(visibleSet, assigner), [visibleSet, assigner]);
 
   const agentRunning = useCallback((role: string) => {
@@ -259,7 +315,7 @@ export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus }:
       )}
 
       <div className="rounded-2xl border border-white/5 bg-[#070a13]/60 backdrop-blur-md overflow-hidden p-2">
-        <svg viewBox={`0 0 ${SVG_W} ${svgH}`} className="w-full" style={{ maxHeight: '560px' }}>
+        <svg viewBox={`0 0 ${svgW} ${svgH}`} className="w-full" style={{ maxHeight: '560px' }}>
           <defs>
             <marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
               <path d="M0,0.5 L0,5.5 L6,3 z" fill="#1e293b" />
@@ -267,6 +323,13 @@ export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus }:
             <marker id="arr-on" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
               <path d="M0,0.5 L0,5.5 L6,3 z" fill="#22d3ee" />
             </marker>
+            <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="2" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
             <style>{`
               @keyframes flow { to { stroke-dashoffset: -16; } }
               .flowing { animation: flow 0.8s linear infinite; stroke-dasharray: 6 4; }
@@ -274,7 +337,7 @@ export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus }:
           </defs>
 
           {/* Outer boundary */}
-          <rect x="50" y="16" width="900" height={svgH - 28} rx="16"
+          <rect x="15" y="16" width={svgW - 30} height={svgH - 32} rx="16"
             fill="none" stroke="#1e293b" strokeWidth="1" strokeDasharray="6 4" opacity="0.3" />
 
           {/* Dynamic edges */}
@@ -292,19 +355,28 @@ export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus }:
             const instruction = handoff?.instruction ? truncate(handoff.instruction, 30) : null;
             const edgeLabel = instruction ?? label;
             const ago = handoff?.at ? fmtAgo(recentMs) : '';
+            const pathD = edgePath(fp, tp, curved);
 
             return (
               <g key={`${from}→${to}`}>
                 <path
-                  d={edgePath(fp, tp, curved)}
+                  d={pathD}
                   fill="none"
                   stroke={active ? '#22d3ee' : '#1e293b'}
-                  strokeWidth={active ? 1.5 : 1}
+                  strokeWidth={active ? 2 : 1}
                   className={active ? 'flowing' : undefined}
                   markerEnd={active ? 'url(#arr-on)' : 'url(#arr)'}
-                  opacity={active ? 0.85 : back ? 0.3 : 0.5}
+                  opacity={active ? 0.95 : back ? 0.3 : 0.5}
                   strokeDasharray={back && !active ? '4 3' : undefined}
+                  filter={active ? 'url(#glow)' : undefined}
                 />
+                {active && (
+                  <g filter="url(#glow)">
+                    <circle r="4.5" fill="#ffffff">
+                      <animateMotion dur="2.5s" repeatCount="indefinite" path={pathD} />
+                    </circle>
+                  </g>
+                )}
                 {edgeLabel && (
                   <g>
                     {instruction && (
@@ -364,10 +436,41 @@ export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus }:
             return (
               <g key={id} transform={`translate(${cx}, ${cy})`}>
                 {isWorking && (
-                  <circle r="46" fill="none" stroke={theme.color} strokeWidth="1" opacity="0.1">
-                    <animate attributeName="r" values="44;54;44" dur="2s" repeatCount="indefinite" />
-                    <animate attributeName="opacity" values="0.15;0;0.15" dur="2s" repeatCount="indefinite" />
-                  </circle>
+                  <g>
+                    {/* Inner glowing pulse outline */}
+                    <rect
+                      x={-NODE_W / 2 - 5}
+                      y={-NODE_H / 2 - 5}
+                      width={NODE_W + 10}
+                      height={NODE_H + 10}
+                      rx="16"
+                      fill="none"
+                      stroke={theme.color}
+                      strokeWidth="2"
+                      opacity="0.6"
+                    >
+                      <animate attributeName="opacity" values="0.7;0.2;0.7" dur="2s" repeatCount="indefinite" />
+                      <animate attributeName="stroke-width" values="1.5;4;1.5" dur="2s" repeatCount="indefinite" />
+                    </rect>
+                    {/* Expanding outer ripple */}
+                    <rect
+                      x={-NODE_W / 2 - 5}
+                      y={-NODE_H / 2 - 5}
+                      width={NODE_W + 10}
+                      height={NODE_H + 10}
+                      rx="16"
+                      fill="none"
+                      stroke={theme.color}
+                      strokeWidth="1"
+                      opacity="0.2"
+                    >
+                      <animate attributeName="width" values={`${NODE_W + 10};${NODE_W + 28};${NODE_W + 10}`} dur="2s" repeatCount="indefinite" />
+                      <animate attributeName="height" values={`${NODE_H + 10};${NODE_H + 28};${NODE_H + 10}`} dur="2s" repeatCount="indefinite" />
+                      <animate attributeName="x" values={`${-NODE_W / 2 - 5};${-NODE_W / 2 - 14};${-NODE_W / 2 - 5}`} dur="2s" repeatCount="indefinite" />
+                      <animate attributeName="y" values={`${-NODE_H / 2 - 5};${-NODE_H / 2 - 14};${-NODE_H / 2 - 5}`} dur="2s" repeatCount="indefinite" />
+                      <animate attributeName="opacity" values="0.4;0;0.4" dur="2s" repeatCount="indefinite" />
+                    </rect>
+                  </g>
                 )}
                 <foreignObject
                   x={-NODE_W / 2}
@@ -392,7 +495,7 @@ export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus }:
                         id === 'human' ? 'bg-blue-500/10 text-blue-400' : theme.iconBg,
                         selected ? 'scale-95' : '',
                       )}>
-                        <IconComponent className="h-4.5 w-4.5" />
+                        <IconComponent className="h-[18px] w-[18px]" />
                       </div>
                       <div className="flex flex-col min-w-0 leading-tight flex-1">
                         <span className="text-[11px] font-semibold text-zinc-100 truncate">{meta.label}</span>
@@ -420,6 +523,11 @@ export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus }:
                     {isBlocked && (
                       <div className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-950 border border-red-500/30 text-[9px] shadow-sm">
                         🔒
+                      </div>
+                    )}
+                    {isWorking && (
+                      <div className="absolute -top-1 -right-1 flex h-[18px] w-[18px] items-center justify-center rounded-full bg-cyan-950 border border-cyan-500/50 shadow-[0_0_8px_rgba(34,211,238,0.5)] animate-fade-in">
+                        <span className="flex h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
                       </div>
                     )}
                   </div>

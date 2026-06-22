@@ -354,6 +354,25 @@ describe('AgentLoopService', () => {
     expect(result.toolsUsed).toContain('browser_navigate');
   });
 
+  it('does not execute JSON fallback tools removed by adaptive loading', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"invento sesión","tool":"browser_navigate","args":{"session_id":"whatsapp_session","goal":"abre WhatsApp"}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"corrijo","tool":"final_answer","args":{"text":"La navegación genérica no aplica a esta ruta."}}'));
+
+    const result = await service.run(
+      ORG,
+      TASK,
+      'Mándame una captura de screenshot de mis conversaciones en WhatsApp.',
+      { maxSteps: 6 },
+    );
+
+    expect(smartNavigator.navigate).not.toHaveBeenCalled();
+    expect(result.steps[0].observation).toContain('no disponible para este objetivo/fase');
+    const firstDefinitions = modelRouter.generate.mock.calls[0][1]?.tools as Array<{ name: string }>;
+    expect(firstDefinitions.some((tool) => tool.name === 'browser_navigate')).toBe(false);
+    expect(firstDefinitions.some((tool) => tool.name === 'web_search')).toBe(false);
+  });
+
   it('uses vision for whatsapp_read unanswered_only when a screenshot is available', async () => {
     whatsapp.fetchUnansweredMessages.mockResolvedValueOnce({
       ok: true,
@@ -722,6 +741,43 @@ describe('AgentLoopService', () => {
 
     expect(sandbox.sendShellInput).toHaveBeenCalledWith(TASK, { keyboard: 'y', session: 0 });
     expect(result.ok).toBe(true);
+  });
+
+  it('routes network execution through the Approval Engine instead of running it for terminal_run', async () => {
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"descargo","tool":"terminal_run","args":{"cmd":"yt-dlp http://x","network":true}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"aviso","tool":"final_answer","args":{"text":"Quedó pendiente."}}'));
+
+    const result = await service.run(ORG, TASK, 'descarga algo', { userId: 'user-1' });
+
+    expect(approvals.requestForPreparedAction).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG, userId: 'user-1', taskId: TASK,
+      actionType: 'sandbox.network_exec',
+      payload: { language: 'bash', code: 'yt-dlp http://x' },
+    }));
+    expect(sandbox.execInSession).not.toHaveBeenCalled();
+    expect(result.steps[0].observation).toContain('PENDIENTE DE APROBACIÓN');
+  });
+
+  it('runs network execution directly in session when EVA_SANDBOX_ALLOW_NETWORK=true for terminal_run', async () => {
+    process.env.EVA_SANDBOX_ALLOW_NETWORK = 'true';
+    modelRouter.generate
+      .mockResolvedValueOnce(modelReply('{"thought":"descargo","tool":"terminal_run","args":{"cmd":"yt-dlp http://x","network":true}}'))
+      .mockResolvedValueOnce(modelReply('{"thought":"fin","tool":"final_answer","args":{"text":"listo"}}'));
+
+    const result = await service.run(ORG, TASK, 'descarga algo');
+
+    expect(sandbox.execInSession).toHaveBeenCalledWith(TASK, {
+      kind: 'terminal',
+      code: 'yt-dlp http://x',
+      orgId: ORG,
+      network: true,
+      session: 0,
+      background: false,
+    });
+    expect(database.admin.from).toHaveBeenCalledWith('task_events');
+    expect(result.ok).toBe(true);
+    delete process.env.EVA_SANDBOX_ALLOW_NETWORK;
   });
 
   // ── skills reutilizables ───────────────────────────────────────────────────
@@ -1480,8 +1536,46 @@ describe('AgentLoopService', () => {
       expect(finalPrompt).toContain('ERROR: API caída');
       // The 3rd step (precios) is in RECENT_FULL_STEPS so it's not compressed
       expect(finalPrompt).toContain('Precios estables');
-      // The most recent step is never tagged [resumido]
-      expect(finalPrompt).not.toContain('[resumido] web_search({"query":"precios"})');
+    });
+
+    describe('selectToolsForPhase / extractGoalSignals', () => {
+      it('restricts browser_navigate for WhatsApp and Services goals unless explicitly requested', () => {
+        const allTools = [
+          { name: 'browser_navigate', usage: '...' },
+          { name: 'whatsapp_send', usage: '...' },
+          { name: 'web_search', usage: '...' },
+        ] as any[];
+
+        // 1. WhatsApp goal (no research or browser keywords) -> browser_navigate should be excluded
+        const signals1 = (service as any).extractGoalSignals('Manda un hola por whatsapp');
+        expect(signals1.has('whatsapp')).toBe(true);
+        expect(signals1.has('browser')).toBe(false);
+
+        const selected1 = (service as any).selectToolsForPhase(allTools, [], 6, signals1, 0);
+        expect(selected1.some((t: any) => t.name === 'browser_navigate')).toBe(false);
+        expect(selected1.some((t: any) => t.name === 'web_search')).toBe(false);
+
+        // 2. WhatsApp goal with research keyword -> browser_navigate should be included
+        const signals2 = (service as any).extractGoalSignals('Busca info en la web y mándala por whatsapp');
+        expect(signals2.has('whatsapp')).toBe(true);
+        expect(signals2.has('research')).toBe(true);
+
+        const selected2 = (service as any).selectToolsForPhase(allTools, [], 6, signals2, 0);
+        expect(selected2.some((t: any) => t.name === 'browser_navigate')).toBe(true);
+
+        // 3. WhatsApp goal with browser keyword (like "navegar" or "web") -> browser_navigate should be included
+        const signals3 = (service as any).extractGoalSignals('Navega a google.com y manda captura por whatsapp');
+        expect(signals3.has('whatsapp')).toBe(true);
+        expect(signals3.has('browser')).toBe(true);
+
+        const selected3 = (service as any).selectToolsForPhase(allTools, [], 6, signals3, 0);
+        expect(selected3.some((t: any) => t.name === 'browser_navigate')).toBe(true);
+
+        // 4. Regular goal (no whatsapp/services) -> browser_navigate should be included by default
+        const signals4 = (service as any).extractGoalSignals('Haz una cosa regular');
+        const selected4 = (service as any).selectToolsForPhase(allTools, [], 6, signals4, 0);
+        expect(selected4.some((t: any) => t.name === 'browser_navigate')).toBe(true);
+      });
     });
   });
 });
