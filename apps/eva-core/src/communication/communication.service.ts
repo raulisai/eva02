@@ -86,7 +86,24 @@ export class CommunicationService implements OnApplicationBootstrap {
       await this.deliverToOriginatingChannel(orgId, taskId, text, false);
     });
 
-    this.logger.log('CommunicationService subscribed to task.result, task.media and task.say');
+    // Forward ask_user questions to the originating channel so a user on Telegram /
+    // WearOS actually receives the question (the dashboard already gets it via the
+    // task.form_request WebSocket event). The user's plain reply on that channel
+    // resumes the task through answerWaitingInputIfAny.
+    this.events.on('task.waiting_input', async (event: EvaEvent) => {
+      const { orgId, taskId, payload } = event;
+      if (!taskId) return;
+      const p = payload as Record<string, unknown>;
+      const question = String(p['question'] ?? '').trim();
+      if (!question) return;
+      const options = Array.isArray(p['options']) ? (p['options'] as unknown[]).map((o) => String(o)).filter(Boolean) : [];
+      const text = options.length > 0
+        ? `${question}\n\n${options.map((o, i) => `${i + 1}. ${o}`).join('\n')}\n\n(Responde aquí mismo y sigo con la tarea.)`
+        : `${question}\n\n(Responde aquí mismo y sigo con la tarea.)`;
+      await this.deliverToOriginatingChannel(orgId, taskId, text, false);
+    });
+
+    this.logger.log('CommunicationService subscribed to task.result, task.media, task.say and task.waiting_input');
   }
 
   linkTelegramAccount(input: {

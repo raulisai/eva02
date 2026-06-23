@@ -4,6 +4,13 @@ This backlog keeps only relevant, actionable improvements. Completed work moves 
 
 ---
 
+## 0ad. ask_user vía Telegram — pregunta + respuesta end-to-end (shipped 2026-06-23)
+Síntoma: una tarea de Telegram ("Envíame un mensaje de voz") hacía `ask_user`, pero la pregunta **nunca llegaba a Telegram**; el loop no se detenía, re-preguntaba en cada paso, fallaba parseos y acababa **inventando** un mensaje genérico. Raíz: `ask_user` solo emitía `task.waiting_input`/`task.form_request`, eventos que solo consume el WebSocket del dashboard; y el loop trataba `WAITING_FOR_INPUT` como observación normal y seguía.
+- [x] **Pregunta → canal de origen**: `CommunicationService` ahora reenvía `task.waiting_input` a `deliverToOriginatingChannel` (Telegram/WearOS/Playground), con opciones numeradas y nota "responde aquí mismo". El dashboard sigue recibiéndola por `task.form_request`.
+- [x] **El loop se detiene en `ask_user`**: `AgentLoopOutcome.waiting` nuevo; al parquear en `waiting_for_input` el loop retorna de inmediato en vez de re-preguntar/inventar. `runAgentLoop`, el handler de retry y la ruta capability-gate respetan `waiting` (ni entregan ni fallan; sin transición inválida `waiting_for_input→waiting_for_input`).
+- [x] **Respuesta → contexto al reanudar**: `loadAnsweredInputTurns` inyecta la pregunta+respuesta (request `answered`, ventana 6h) como turnos de conversación, así el loop reanudado conecta la respuesta del usuario con su pregunta en vez de re-preguntar. El re-encolado lo hace `answerWaitingInputIfAny` (ya existente) cuando el usuario responde por Telegram.
+- [x] Tests: reenvío de `task.waiting_input` a Telegram con opciones (communication), y manejo de `waiting` en el runner (sin `task.result`/completed/failed/pipeline) (agent-runner).
+
 ## 0ac. Agent Runner — fin del bucle de re-ejecución / reenvío a Telegram (shipped 2026-06-23)
 Síntoma: una tarea (búsqueda de canción) reenviaba el mismo mensaje a Telegram en bucle y el log mostraba `Cannot transition task from 'completed' to 'completed'`. Raíz: `run()` no se protegía contra ejecución concurrente — entre el guard `status==='pending'` y la transición a `planning` hay mucho `await`, así que múltiples `task.created` para la misma tarea (re-queue de `recoverStuckTasks`, sweep `expireTimedOutInputs`, re-reply del usuario) la ejecutaban en paralelo; cada pasada publicaba `task.result`/`task.say` → reenvío. Además varios paths completaban dos veces.
 - [x] **Claim por tarea**: `run()` reclama la tarea sincrónicamente en un `Set` in-process (antes de cualquier `await`) + `tryLock` distribuido por taskId; los `task.created` duplicados se descartan. `executeRun()` contiene el cuerpo previo.

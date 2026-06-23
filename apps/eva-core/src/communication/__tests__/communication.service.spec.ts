@@ -586,6 +586,7 @@ describe('CommunicationService', () => {
     let resultHandler: (event: EvaEvent) => Promise<void>;
     let mediaHandler: (event: EvaEvent) => Promise<void>;
     let sayHandler: (event: EvaEvent) => Promise<void>;
+    let waitingInputHandler: (event: EvaEvent) => Promise<void>;
 
     beforeEach(() => {
       service.onApplicationBootstrap();
@@ -593,6 +594,7 @@ describe('CommunicationService', () => {
       resultHandler = calls.find(([type]) => type === 'task.result')![1];
       mediaHandler = calls.find(([type]) => type === 'task.media')![1];
       sayHandler = calls.find(([type]) => type === 'task.say')![1];
+      waitingInputHandler = calls.find(([type]) => type === 'task.waiting_input')![1];
     });
 
     it('forwards task.result text to Telegram when task source is telegram', async () => {
@@ -771,12 +773,56 @@ describe('CommunicationService', () => {
       expect(telegram.sendMessage).not.toHaveBeenCalled();
     });
 
-    it('registers task.result, task.media and task.say handlers on bootstrap', () => {
+    it('forwards an ask_user question (task.waiting_input) to Telegram with its options', async () => {
+      integrations.getChannelSettings.mockResolvedValue({
+        status: 'active',
+        config: {},
+        secret: 'bot-token',
+        webhookSecret: 'secret',
+      });
+
+      await waitingInputHandler({
+        type: 'task.waiting_input',
+        orgId: ORG,
+        taskId: TASK,
+        payload: {
+          requestId: 'req-1',
+          question: '¿Qué mensaje de voz te gustaría enviar?',
+          options: ['Saludo', 'Recordatorio'],
+          expiresAt: new Date().toISOString(),
+        },
+        ts: Date.now(),
+      });
+
+      expect(telegram.sendMessage).toHaveBeenCalledWith(
+        { chat_id: '100' },
+        expect.stringContaining('¿Qué mensaje de voz te gustaría enviar?'),
+        'bot-token',
+      );
+      const [, sentText] = (telegram.sendMessage as jest.Mock).mock.calls[0];
+      expect(sentText).toContain('1. Saludo');
+      expect(sentText).toContain('2. Recordatorio');
+    });
+
+    it('skips task.waiting_input forwarding when the question is empty', async () => {
+      await waitingInputHandler({
+        type: 'task.waiting_input',
+        orgId: ORG,
+        taskId: TASK,
+        payload: { requestId: 'req-2', question: '', options: [] },
+        ts: Date.now(),
+      });
+
+      expect(telegram.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('registers task.result, task.media, task.say and task.waiting_input handlers on bootstrap', () => {
       const calls = (events.on as jest.Mock).mock.calls as [string, unknown][];
       const types = calls.map(([type]) => type);
       expect(types).toContain('task.result');
       expect(types).toContain('task.media');
       expect(types).toContain('task.say');
+      expect(types).toContain('task.waiting_input');
     });
   });
 });

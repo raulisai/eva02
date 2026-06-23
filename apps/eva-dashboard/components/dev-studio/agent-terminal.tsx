@@ -92,7 +92,11 @@ export function AgentTerminal({ taskId, orgToken, onClose }: AgentTerminalProps)
       term.write('\r\n\x1b[1;36m── EVA Sandbox Terminal ──\x1b[0m\r\n');
     });
 
-    socket.on('sandbox.output', ({ data }: { data: string; initial?: boolean }) => {
+    socket.on('sandbox.output', ({ data, initial }: { data: string; initial?: boolean }) => {
+      // The server replays the full PTY buffer on every (re)attach. Repaint from a
+      // clean screen instead of appending it on top of the stale history, otherwise
+      // reconnecting piles up duplicated output and the view never overwrites itself.
+      if (initial) term.reset();
       term.write(data);
     });
 
@@ -131,6 +135,9 @@ export function AgentTerminal({ taskId, orgToken, onClose }: AgentTerminalProps)
   function reconnect() {
     if (!socketRef.current || !taskId) return;
     setStatus('connecting');
+    // Clear the view up front so a re-attach never stacks on top of the old screen,
+    // even if the server has no buffer to replay.
+    xtermRef.current?.reset();
     attach(socketRef.current, taskId);
   }
 

@@ -62,10 +62,14 @@ export class ModelRouterService {
     return keys;
   }
 
-  // ── rate-limit retry helper ───────────────────────────────────────────────
+  // ── transient-error retry helper ─────────────────────────────────────────
 
-  /** Retries up to 3 attempts on 429 with exponential backoff (1×, 2×, 4× the API-suggested delay). */
-  private async withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
+  /**
+   * Retries on 429 (rate-limit) and 503 (service unavailable / overloaded).
+   * - 429: exponential backoff seeded from the API-suggested retry-after delay.
+   * - 503: two fast retries (3 s, 6 s) before giving up on this provider.
+   */
+  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
     const MAX_ATTEMPTS = 3;
     let lastError: Error = new Error('unknown');
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -74,11 +78,15 @@ export class ModelRouterService {
       } catch (err) {
         lastError = err as Error;
         const msg = lastError.message ?? '';
-        if (!msg.includes('429')) throw lastError; // non-rate-limit: rethrow immediately
+        const is429 = msg.includes('429');
+        const is503 = msg.includes('503') || /unavailable|overload|high demand/i.test(msg);
+        if (!is429 && !is503) throw lastError; // non-transient: rethrow immediately
         const secondsMatch = msg.match(/try again in (\d+\.?\d*)s/i);
-        const baseMs = secondsMatch ? Math.ceil(parseFloat(secondsMatch[1]) * 1000) + 500 : 8000;
+        const baseMs = is429
+          ? (secondsMatch ? Math.ceil(parseFloat(secondsMatch[1]) * 1000) + 500 : 8000)
+          : 3000; // 503: 3 s base
         const waitMs = baseMs * Math.pow(2, attempt); // 1×, 2×, 4×
-        this.logger.warn(`Rate limit (attempt ${attempt + 1}/${MAX_ATTEMPTS}) — retrying in ${waitMs}ms`);
+        this.logger.warn(`Transient error ${is429 ? '429' : '503'} (attempt ${attempt + 1}/${MAX_ATTEMPTS}) — retrying in ${waitMs}ms`);
         await new Promise((resolve) => setTimeout(resolve, waitMs));
       }
     }
@@ -90,18 +98,46 @@ export class ModelRouterService {
   async generate(prompt: string, opts: GenerateOptions = {}): Promise<GenerateResult> {
     const keys = await this.resolveKeys(opts.orgId);
     const budget  = opts.budget ?? this.inferBudget(prompt, opts);
-    const backend = this.resolveBackend(opts.backend, keys, budget);
+    const primary = this.resolveBackend(opts.backend, keys, budget);
 
-    let result: GenerateResult;
-    if (backend === 'google' && keys.google) {
-      result = await this.withRateLimitRetry(() => this.generateGoogle(prompt, opts, budget, keys.google));
-    } else if (backend === 'claude' && keys.claude) {
-      result = await this.withRateLimitRetry(() => this.generateClaude(prompt, opts, budget, keys.claude));
-    } else if (backend === 'openai' && keys.openai) {
-      result = await this.withRateLimitRetry(() => this.generateOpenAI(prompt, opts, budget, keys.openai));
-    } else if (backend === 'chatgpt_web' && keys.chatgptWeb) {
-      result = await this.generateChatGPTWeb(prompt, opts, keys.chatgptWeb);
-    } else {
+    // Ordered list of backends to try. The primary comes first; the rest are
+    // automatic fallbacks activated only when the primary fails with a transient
+    // error (503 / 429 exhausted) so the task doesn't die just because Google is
+    // having a bad minute.
+    const fallbackChain = this.buildFallbackChain(primary, keys);
+
+    let result: GenerateResult | undefined;
+    let lastErr: Error = new Error('no backend available');
+
+    for (const backend of fallbackChain) {
+      try {
+        if (backend === 'google' && keys.google) {
+          result = await this.withRetry(() => this.generateGoogle(prompt, opts, budget, keys.google));
+        } else if (backend === 'claude' && keys.claude) {
+          result = await this.withRetry(() => this.generateClaude(prompt, opts, budget, keys.claude));
+        } else if (backend === 'openai' && keys.openai) {
+          result = await this.withRetry(() => this.generateOpenAI(prompt, opts, budget, keys.openai));
+        } else if (backend === 'chatgpt_web' && keys.chatgptWeb) {
+          result = await this.generateChatGPTWeb(prompt, opts, keys.chatgptWeb);
+        } else {
+          continue; // key not configured for this backend — skip
+        }
+        if (backend !== primary) {
+          this.logger.warn(`Fell back from ${primary} to ${backend} after transient failure`);
+        }
+        break; // success
+      } catch (err) {
+        lastErr = err as Error;
+        const msg = lastErr.message ?? '';
+        const transient = msg.includes('429') || msg.includes('503') || /unavailable|overload|high demand/i.test(msg);
+        if (!transient || backend === fallbackChain[fallbackChain.length - 1]) {
+          throw lastErr; // non-transient or last option: surface the error
+        }
+        this.logger.warn(`${backend} failed (${msg.slice(0, 120)}) — trying next provider`);
+      }
+    }
+
+    if (!result) {
       this.logger.warn('No LLM API key configured — returning deterministic stub');
       result = this.generateStub(prompt, opts);
     }
@@ -597,6 +633,27 @@ export class ModelRouterService {
     const trimmed = text.trim();
     const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
     return fenced ? fenced[1].trim() : trimmed;
+  }
+
+  /**
+   * Returns an ordered list of backends to attempt, starting with `primary`.
+   * Only includes backends that have a configured key so the loop can skip
+   * empty slots cheaply.
+   */
+  private buildFallbackChain(primary: ModelBackend, keys: ResolvedKeys): ModelBackend[] {
+    // Preferred fallback order when the primary is unavailable.
+    const ALL: ModelBackend[] = ['google', 'openai', 'chatgpt_web', 'claude'];
+    const available = ALL.filter((b) => {
+      if (b === 'google') return Boolean(keys.google);
+      if (b === 'claude') return Boolean(keys.claude);
+      if (b === 'openai') return Boolean(keys.openai);
+      if (b === 'chatgpt_web') return Boolean(keys.chatgptWeb);
+      return false;
+    });
+    // Put primary first, then the rest in preference order (deduped).
+    const chain = [primary, ...available.filter((b) => b !== primary)];
+    // If nothing is configured, keep at least the primary so the stub path triggers.
+    return chain.length ? chain : [primary];
   }
 
   private resolveBackend(requested?: ModelBackend, keys?: ResolvedKeys, budget: ModelBudget = 'cheap'): ModelBackend {

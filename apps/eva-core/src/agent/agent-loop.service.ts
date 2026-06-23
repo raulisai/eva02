@@ -69,6 +69,9 @@ export interface AgentLoopOutcome {
   toolsUsed: string[];
   /** true cuando la respuesta es de recuperación (todo falló → opciones honestas, no el resultado pedido). */
   degraded?: boolean;
+  /** true cuando el loop se detuvo porque ask_user dejó la tarea en waiting_for_input.
+   *  El caller NO debe entregar ni fallar: la tarea está pausada esperando al usuario. */
+  waiting?: boolean;
 }
 
 export interface AgentLoopOptions {
@@ -723,6 +726,17 @@ export class AgentLoopService {
         thought: decision.thought,
         observation: this.truncate(observation, OBSERVATION_LIMIT),
       });
+
+      // ask_user parks the task in waiting_for_input: stop the loop and hand control
+      // back so the caller does NOT deliver a (fabricated) final answer. The question
+      // was already persisted + dispatched to the user's channel by askUser(); the
+      // task resumes as a fresh loop when the user replies.
+      if (spec.name === 'ask_user' && observation.startsWith('WAITING_FOR_INPUT')) {
+        await log(`agent-loop: tarea pausada esperando respuesta del usuario (ask_user) en paso ${i + 1}`, 'loop');
+        this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
+        return { ok: false, waiting: true, text: '', steps, tokensUsed, toolsUsed: this.toolsUsed(steps) };
+      }
+
       if (observation.startsWith('ERROR:')) {
         budgetState = escalateOnEvent(budgetState, 'tool_error');
       } else {

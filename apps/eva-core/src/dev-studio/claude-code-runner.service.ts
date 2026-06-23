@@ -1,5 +1,5 @@
 import { Injectable, Logger, Optional, OnModuleDestroy } from '@nestjs/common';
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -78,6 +78,26 @@ export interface AuthCheckResult {
   authFailed?: boolean;
 }
 
+export type OAuthStatus = 'scanning_url' | 'waiting_callback' | 'completed' | 'failed';
+
+export interface OAuthFlowState {
+  status: OAuthStatus;
+  /** The URL the user must open in their browser to authenticate. */
+  url: string | null;
+  /** True once the token was captured and saved to org_integrations. */
+  configured: boolean;
+  error: string | null;
+}
+
+interface PendingOAuth {
+  proc: ChildProcess;
+  orgId: string;
+  state: OAuthFlowState;
+  /** Resolve the startOAuthFlow() promise once we have a URL. */
+  onUrl: ((url: string) => void) | null;
+  onError: ((err: string) => void) | null;
+}
+
 export interface ClaudeRunOptions {
   orgId: string;
   taskId: string;
@@ -153,6 +173,9 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
   /** Cache of `docker image inspect` results per image tag. */
   private readonly imageCache = new Map<string, boolean>();
 
+  /** In-flight OAuth device-code flows keyed by machine key. */
+  private readonly pendingOAuth = new Map<string, PendingOAuth>();
+
   constructor(@Optional() private readonly integrations?: IntegrationsService) {}
 
   async onModuleDestroy(): Promise<void> {
@@ -204,6 +227,147 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
 
   private isAuthError(text: string | undefined): boolean {
     return !!text && ClaudeCodeRunnerService.AUTH_ERR_RE.test(text);
+  }
+
+  // ── OAuth device-code flow ──────────────────────────────────────────────────
+
+  /**
+   * Start `claude setup-token` inside the agent's machine.
+   * The CLI prints a URL the user must open in their browser. Once the user
+   * authenticates, the CLI outputs the OAuth token, which we capture and save.
+   *
+   * Returns the auth URL once found in the process output (within 30 s),
+   * or an error if the machine is missing / Docker is unavailable.
+   */
+  async startOAuthFlow(orgId: string, key: string): Promise<{ url: string } | { error: string }> {
+    const c = this.containers.get(key);
+    if (!c) return { error: 'La máquina del agente no está activa. Levántala primero.' };
+
+    // Cancel any previous pending flow for this key.
+    const prev = this.pendingOAuth.get(key);
+    if (prev) {
+      prev.proc.kill('SIGKILL');
+      this.pendingOAuth.delete(key);
+    }
+
+    return new Promise<{ url: string } | { error: string }>((resolve) => {
+      // claude setup-token: prints auth URL, waits for user to authenticate, then
+      // prints the resulting OAuth token to stdout.
+      const proc = spawn(
+        'docker',
+        ['exec', '-i', c.name, 'claude', 'setup-token'],
+        { env: process.env },
+      );
+
+      const pending: PendingOAuth = {
+        proc,
+        orgId,
+        state: { status: 'scanning_url', url: null, configured: false, error: null },
+        onUrl: (url) => resolve({ url }),
+        onError: (err) => resolve({ error: err }),
+      };
+      this.pendingOAuth.set(key, pending);
+
+      // Regexes that cover known Anthropic / Claude auth URL patterns.
+      const URL_RE = /https:\/\/(?:claude\.ai|anthropic\.com|auth\.anthropic\.com)[^\s"'\])]*/;
+      // OAuth setup tokens: sk-ant-oat01-… (long alphanumeric with underscores/dashes).
+      const TOKEN_RE = /sk-ant-[A-Za-z0-9_-]{30,}/;
+
+      let buf = '';
+      const onChunk = (chunk: Buffer) => {
+        buf += chunk.toString('utf8');
+        let nl: number;
+        while ((nl = buf.indexOf('\n')) !== -1) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          this.logger.debug(`[oauth:${key}] ${line}`);
+          this.handleOAuthLine(key, pending, line, URL_RE, TOKEN_RE);
+        }
+      };
+
+      proc.stdout?.on('data', onChunk);
+      proc.stderr?.on('data', onChunk);
+
+      proc.on('error', (err) => {
+        if (pending.state.status === 'scanning_url') {
+          pending.onError?.(`Error al iniciar claude setup-token: ${err.message}`);
+          pending.onUrl = null; pending.onError = null;
+        }
+        pending.state.status = 'failed';
+        pending.state.error = err.message;
+        this.pendingOAuth.delete(key);
+      });
+
+      proc.on('close', (code) => {
+        if (pending.state.status === 'waiting_callback' || pending.state.status === 'scanning_url') {
+          const msg = `claude setup-token finalizó inesperadamente (código ${code})`;
+          if (pending.state.status === 'scanning_url') {
+            pending.onError?.(msg);
+            pending.onUrl = null; pending.onError = null;
+          }
+          pending.state.status = 'failed';
+          pending.state.error = msg;
+        }
+        // Keep the entry briefly so pollOAuthResult can read the final status.
+        setTimeout(() => { this.pendingOAuth.delete(key); }, 30_000);
+      });
+
+      // If no URL appears within 30 s, give up.
+      setTimeout(() => {
+        if (pending.state.status === 'scanning_url') {
+          pending.onError?.('No se recibió URL de autenticación en 30 s — verifica que la imagen tenga Claude Code instalado.');
+          pending.onUrl = null; pending.onError = null;
+          proc.kill('SIGKILL');
+          pending.state.status = 'failed';
+          pending.state.error = 'Timeout esperando URL';
+          this.pendingOAuth.delete(key);
+        }
+      }, 30_000);
+    });
+  }
+
+  private handleOAuthLine(
+    key: string,
+    pending: PendingOAuth,
+    line: string,
+    URL_RE: RegExp,
+    TOKEN_RE: RegExp,
+  ): void {
+    if (pending.state.status === 'scanning_url') {
+      const m = URL_RE.exec(line);
+      if (m) {
+        pending.state.url = m[0];
+        pending.state.status = 'waiting_callback';
+        pending.onUrl?.(pending.state.url);
+        pending.onUrl = null;
+        pending.onError = null;
+        return;
+      }
+    }
+
+    if (pending.state.status === 'waiting_callback') {
+      const m = TOKEN_RE.exec(line);
+      if (m) {
+        const token = m[0];
+        pending.state.status = 'completed';
+        pending.state.configured = true;
+        // Async — fire and forget; UI will detect via pollOAuthResult.
+        void this.saveCredential(pending.orgId, 'oauth', token).then(() => {
+          this.logger.log(`[oauth:${key}] token guardado para org ${pending.orgId}`);
+        }).catch((e) => {
+          this.logger.warn(`[oauth:${key}] error guardando token: ${(e as Error).message}`);
+          pending.state.error = 'Token recibido pero no se pudo guardar: ' + (e as Error).message;
+          pending.state.configured = false;
+        });
+      }
+    }
+  }
+
+  /** Returns the current state of an in-flight or recently-completed OAuth flow. */
+  pollOAuthResult(key: string): OAuthFlowState | null {
+    const p = this.pendingOAuth.get(key);
+    return p ? { ...p.state } : null;
   }
 
   // ── Auth verification ───────────────────────────────────────────────────────

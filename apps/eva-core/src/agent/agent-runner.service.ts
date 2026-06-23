@@ -833,11 +833,12 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             userId: ctx.task.created_by,
             log: (message, scope) => this.log(ctx.orgId, ctx.taskId, message, scope),
           });
-          if (outcome.ok && outcome.text) {
+          if (outcome.waiting) {
+            // ask_user already parked the task in waiting_for_input — nothing to do.
+            await this.log(ctx.orgId, ctx.taskId, 'capability-gate: tarea pausada esperando al usuario (ask_user)', 'loop');
+          } else if (outcome.ok && outcome.text) {
+            // deliver() emits task.result and completes the task once.
             await this.deliver(ctx.orgId, ctx.taskId, outcome.text, 'agent-partial', Date.now() - ctx.startedAt);
-            await this.tasks.transition(ctx.taskId, ctx.orgId, 'completed', {
-              result: { text: outcome.text, model: 'agent-partial', latency_ms: Date.now() - ctx.startedAt },
-            });
           } else {
             // fallback: terminate with setup message if loop produced nothing
             await this.tasks.transition(ctx.taskId, ctx.orgId, 'waiting_for_input', {
@@ -1299,9 +1300,11 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           userId: task.created_by,
           log: (message, scope) => this.log(orgId, taskId, message, scope),
         });
-        if (outcome.ok) {
+        if (outcome.waiting) {
+          await this.log(orgId, taskId, 'retry pausado: tarea en waiting_for_input esperando al usuario', 'loop');
+        } else if (outcome.ok) {
+          // deliver() emits task.result and completes the task once.
           await this.deliver(orgId, taskId, outcome.text, 'agent-retry', 0);
-          await this.tasks.transition(taskId, orgId, 'completed', { result: { text: outcome.text, model: 'agent-retry', latency_ms: 0 } });
         } else {
           await this.failSafely(orgId, taskId, `Tercer intento agotado para: ${retryCtx.goal.slice(0, 200)}`);
         }
@@ -1355,6 +1358,12 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     }
 
     const conversationContext = await this.getConversationContext(task);
+    // If this run resumes a task that was waiting on ask_user, inject the question +
+    // the user's answer as an explicit Q→A pair so the loop connects them instead of
+    // re-asking. (The reply arrives on its own task, so it isn't tied to the question
+    // in plain history.)
+    const resumeTurns = await this.loadAnsweredInputTurns(orgId, taskId);
+    if (resumeTurns.length > 0) conversationContext.push(...resumeTurns);
     const requestLocation = normalizeRequestLocation(task.metadata, task.metadata?.source === 'wear_fast_path' ? 'wear_os' : 'browser');
     const requestLocationStatus = getRequestLocationStatus(task.metadata, task.metadata?.source === 'wear_fast_path' ? 'wear_os' : 'browser');
     const requestLocationBlock = this.formatRequestLocationBlock(requestLocation, requestLocationStatus);
@@ -2535,6 +2544,36 @@ Responde directamente al usuario en español, con un tono amable y natural.
       .filter((t): t is ConversationContextTurn => t !== null);
   }
 
+  /**
+   * When a task resumes after the user answered an ask_user question, returns the
+   * question→answer pair as conversation turns so the agent loop has the answer in
+   * context (the reply lives on a separate task and isn't otherwise linked). Only
+   * recently-answered requests (last 6h) are surfaced to avoid re-injecting stale
+   * answers on an unrelated future re-run of the same task id.
+   */
+  private async loadAnsweredInputTurns(orgId: string, taskId: string): Promise<ConversationContextTurn[]> {
+    try {
+      const sinceIso = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+      const { data } = await this.db.admin
+        .from('agent_input_requests')
+        .select('question, answer, answered_at, status')
+        .eq('org_id', orgId)
+        .eq('task_id', taskId)
+        .eq('status', 'answered')
+        .gte('answered_at', sinceIso)
+        .order('answered_at', { ascending: false })
+        .limit(1);
+      const row = (data ?? [])[0] as { question?: string; answer?: string } | undefined;
+      if (!row?.answer?.trim()) return [];
+      const turns: ConversationContextTurn[] = [];
+      if (row.question?.trim()) turns.push({ role: 'assistant', text: row.question.trim() });
+      turns.push({ role: 'user', text: row.answer.trim() });
+      return turns;
+    } catch {
+      return [];
+    }
+  }
+
   private async getConversationContext(task: Task): Promise<ConversationContextTurn[]> {
     let turns = await this.getConversationContextFromDb(task.org_id, task.created_by, task.id);
 
@@ -2969,6 +3008,12 @@ Responde directamente al usuario en español, con un tono amable y natural.
         tier: classifyTier(input).tier,
         log: (message, scope) => this.log(orgId, taskId, message, scope),
       });
+      // ask_user parked the task in waiting_for_input — handled, but do NOT deliver
+      // or fall through to the classic pipeline (that would re-run and fabricate).
+      if (outcome.waiting) {
+        await this.log(orgId, taskId, 'agent-loop pausado: tarea en waiting_for_input esperando al usuario', 'loop');
+        return true;
+      }
       if (!outcome.ok || !outcome.text) return false;
       await this.log(
         orgId, taskId,

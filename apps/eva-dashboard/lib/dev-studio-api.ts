@@ -109,6 +109,22 @@ export const devStudioApi = {
       body: JSON.stringify({ method, token }),
     }),
 
+  /** Start an OAuth device-code flow in the agent's machine. Returns the auth URL. */
+  startOAuthFlow: (sessionId: string, role: string) =>
+    coreFetch<{ url: string; agentId: string }>(
+      `${BASE}/sessions/${sessionId}/agents/${role}/machine/oauth/start`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  /** Poll whether the OAuth flow completed and the token was saved. */
+  pollOAuthStatus: (sessionId: string, role: string) =>
+    coreFetch<{
+      status: 'scanning_url' | 'waiting_callback' | 'completed' | 'failed' | 'idle';
+      configured: boolean;
+      url: string | null;
+      error: string | null;
+    }>(`${BASE}/sessions/${sessionId}/agents/${role}/machine/oauth/status`),
+
   // Events
   listEvents: (sessionId: string, limit?: number) => {
     const qs = limit ? `?limit=${limit}` : '';

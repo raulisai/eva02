@@ -1,6 +1,6 @@
 import {
   Body, Controller, Get, HttpCode, HttpStatus, Param,
-  ParseUUIDPipe, Post, Req, Query, BadRequestException,
+  ParseUUIDPipe, Post, Req, Query, BadRequestException, NotFoundException,
 } from '@nestjs/common';
 import { AuthenticatedRequest } from '../common/types';
 import { DevSessionService } from './dev-session.service';
@@ -243,6 +243,61 @@ export class DevStudioController {
       });
     }
     return { agentId: agent.id, ...result };
+  }
+
+  /**
+   * Start an OAuth device-code flow for an agent's machine.
+   * The backend runs `claude setup-token` inside the container and returns the
+   * auth URL the user must open in their browser. Poll /oauth/status to check
+   * when authentication completes and the token has been saved.
+   */
+  @Post('sessions/:id/agents/:role/machine/oauth/start')
+  @HttpCode(HttpStatus.OK)
+  async startAgentOAuth(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('role') role: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const { orgId } = req.user;
+    const agent = await this.sessions.ensureAgent({ orgId, sessionId: id, role, name: `${role} Agent` });
+    // Boot the machine if it isn't already up — OAuth needs a running container.
+    if (!this.claudeCode.hasContainer(agent.id)) {
+      const boot = await this.claudeCode.bootMachine({ orgId, key: agent.id, role });
+      if (!boot.ok) throw new BadRequestException(`No se pudo levantar la máquina: ${boot.error}`);
+    }
+    const result = await this.claudeCode.startOAuthFlow(orgId, agent.id);
+    if ('error' in result) throw new BadRequestException(result.error);
+    return { url: result.url, agentId: agent.id };
+  }
+
+  /** Poll the OAuth flow status after startAgentOAuth. */
+  @Get('sessions/:id/agents/:role/machine/oauth/status')
+  async getAgentOAuthStatus(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('role') role: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const { orgId } = req.user;
+    const agent = await this.sessions.getAgent(id, orgId, role);
+    if (!agent) throw new NotFoundException('Agente no encontrado');
+    const state = this.claudeCode.pollOAuthResult(agent.id);
+    if (!state) {
+      // No active flow — return whether the org already has a credential.
+      const configured = await this.claudeCode.hasCredential(orgId);
+      return { status: configured ? 'completed' : 'idle', configured, url: null, error: null };
+    }
+    // When completed, tick the session so any waiting provisioning task resumes.
+    if (state.configured) {
+      const pending = await this.sessions.listHumanTasks(id, orgId, 'pending');
+      for (const t of pending) {
+        if ((t.instructions as Record<string, unknown>)?.kind === 'claude_code_auth') {
+          await this.sessions.submitHumanTask(t.id, orgId, { method: 'oauth', configured: true });
+          await this.sessions.verifyHumanTask(t.id, orgId);
+        }
+      }
+      void this.orchestrator.tick(id, orgId);
+    }
+    return state;
   }
 
   /**

@@ -2550,5 +2550,30 @@ describe('AgentRunnerService', () => {
       );
       expect(tasks.transition).not.toHaveBeenCalled();
     });
+
+    it('parks the task when the agent loop returns waiting (ask_user) — no delivery, no pipeline fallback', async () => {
+      tasks.getTask.mockResolvedValue(makeTask({
+        title: 'Mensaje de voz',
+        description: 'envíame un mensaje de voz y automatiza el proceso de generarlo',
+      }));
+      agentLoop.run.mockResolvedValue({
+        ok: false,
+        waiting: true,
+        text: '',
+        steps: [{ tool: 'ask_user', args: { question: '¿Qué mensaje?' }, thought: '', observation: 'WAITING_FOR_INPUT: ...' }],
+        tokensUsed: 30,
+        toolsUsed: ['ask_user'],
+      });
+
+      await service.run(ORG, TASK);
+
+      expect(agentLoop.run).toHaveBeenCalled();
+      // Parked: never delivered a (fabricated) final answer, never completed/failed,
+      // and never fell through to the classic pipeline.
+      expect(publishedTypes()).not.toContain('task.result');
+      expect(tasks.transition).not.toHaveBeenCalledWith(TASK, ORG, 'completed', expect.anything());
+      expect(tasks.transition).not.toHaveBeenCalledWith(TASK, ORG, 'failed', expect.anything());
+      expect(pipeline.run).not.toHaveBeenCalled();
+    });
   });
 });

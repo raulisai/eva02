@@ -4,6 +4,7 @@ import { useEffect, useState, lazy, Suspense } from 'react';
 import {
   X, GitBranch, CheckCircle2, Clock, Terminal,
   ChevronDown, ChevronRight, Eye, EyeOff, Check, Star, Wrench,
+  ExternalLink, Loader2, ShieldCheck,
 } from 'lucide-react';
 import type { AgentRole, ClaudeAuthOption } from '@/lib/dev-studio-types';
 import { AGENT_ROLE_EMOJI } from '@/lib/dev-studio-types';
@@ -273,6 +274,7 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
                 {connecting && (
                   <ConnectClaudeCodeForm
                     sessionId={sessionId}
+                    role={role}
                     onSuccess={() => {
                       setConnecting(false);
                       devStudioApi.getAgentDetail(sessionId, role).then(setDetail).catch(() => {});
@@ -512,19 +514,38 @@ const FALLBACK_AUTH_OPTIONS: ClaudeAuthOption[] = [
   },
 ];
 
+/**
+ * ConnectClaudeCodeForm
+ *
+ * For OAuth (recommended): starts the OAuth device-code flow on the backend,
+ * which runs `claude setup-token` inside the agent's Docker machine and returns
+ * the auth URL. The user opens the URL in their browser, authenticates, and the
+ * backend captures the token automatically. The form polls for completion.
+ *
+ * For API key / org token: keeps the classic paste-the-token input.
+ */
 function ConnectClaudeCodeForm({
   sessionId,
+  role,
   onSuccess,
   onCancel,
 }: {
   sessionId: string;
+  role: string;
   onSuccess: () => void;
   onCancel: () => void;
 }) {
   const [options, setOptions] = useState<ClaudeAuthOption[]>(FALLBACK_AUTH_OPTIONS);
   const [method, setMethod] = useState<string>('oauth');
+
+  // Manual token input (for api_key / org)
   const [token, setToken] = useState('');
   const [show, setShow] = useState(false);
+
+  // OAuth URL flow state
+  const [oauthUrl, setOauthUrl] = useState<string | null>(null);
+  const [oauthStatus, setOauthStatus] = useState<'idle' | 'starting' | 'waiting' | 'done' | 'error'>('idle');
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -540,9 +561,46 @@ function ConnectClaudeCodeForm({
       .catch(() => {});
   }, []);
 
+  // Poll for OAuth completion once the URL is visible.
+  useEffect(() => {
+    if (oauthStatus !== 'waiting') return;
+    let alive = true;
+    const iv = setInterval(async () => {
+      try {
+        const s = await devStudioApi.pollOAuthStatus(sessionId, role);
+        if (!alive) return;
+        if (s.status === 'completed' && s.configured) {
+          clearInterval(iv);
+          setOauthStatus('done');
+          setTimeout(onSuccess, 1200);
+        } else if (s.status === 'failed') {
+          clearInterval(iv);
+          setOauthStatus('error');
+          setError(s.error ?? 'La autenticación falló');
+        }
+      } catch { /* retry */ }
+    }, 2500);
+    return () => { alive = false; clearInterval(iv); };
+  }, [oauthStatus, sessionId, role, onSuccess]);
+
   const selected = options.find((o) => o.method === method);
 
-  async function submit() {
+  // Start the server-side OAuth flow (for oauth method)
+  async function startOAuth() {
+    setOauthStatus('starting');
+    setError(null);
+    try {
+      const r = await devStudioApi.startOAuthFlow(sessionId, role);
+      setOauthUrl(r.url);
+      setOauthStatus('waiting');
+    } catch (e) {
+      setOauthStatus('error');
+      setError((e as Error).message || 'No se pudo iniciar el flujo OAuth');
+    }
+  }
+
+  // Classic token submit (for api_key / org)
+  async function submitToken() {
     if (!token.trim()) return;
     setLoading(true);
     setError(null);
@@ -555,6 +613,8 @@ function ConnectClaudeCodeForm({
       setLoading(false);
     }
   }
+
+  const isOAuth = method === 'oauth';
 
   return (
     <div className="rounded-md border border-cyan-500/20 bg-cyan-500/5 px-3 py-3 space-y-3">
@@ -573,7 +633,12 @@ function ConnectClaudeCodeForm({
             <button
               key={opt.method}
               type="button"
-              onClick={() => setMethod(opt.method)}
+              onClick={() => {
+                setMethod(opt.method);
+                setOauthUrl(null);
+                setOauthStatus('idle');
+                setError(null);
+              }}
               className={cn(
                 'w-full text-left rounded border px-2.5 py-2 transition-colors',
                 active ? 'border-cyan-500/50 bg-cyan-500/10' : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700',
@@ -599,42 +664,111 @@ function ConnectClaudeCodeForm({
         })}
       </div>
 
-      {/* Token input */}
-      <div className="space-y-1.5">
-        {selected?.hint && (
-          <p className="text-[10px] text-zinc-600 font-mono">{selected.hint}</p>
-        )}
-        <div className="relative">
-          <input
-            type={show ? 'text' : 'password'}
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
-            placeholder={method === 'api_key' ? 'sk-ant-…' : 'token de Claude Code'}
-            className="w-full rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 pr-8 text-xs font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
-          />
+      {/* ── OAuth flow ── */}
+      {isOAuth && (
+        <div className="space-y-2">
+          {oauthStatus === 'idle' && (
+            <>
+              <p className="text-[10px] text-zinc-500">
+                EVA abrirá el proceso de autenticación dentro de la máquina del agente
+                y te dará un enlace para que inicies sesión con tu cuenta de Claude.
+              </p>
+              <button
+                onClick={startOAuth}
+                className="w-full rounded border border-cyan-500/20 bg-cyan-500/10 py-1.5 text-xs font-mono text-cyan-400 hover:bg-cyan-500/20 transition-colors"
+              >
+                Iniciar autenticación OAuth
+              </button>
+            </>
+          )}
+
+          {oauthStatus === 'starting' && (
+            <div className="flex items-center gap-2 text-[10px] text-zinc-400">
+              <Loader2 className="h-3 w-3 animate-spin text-cyan-400" />
+              Iniciando claude setup-token en la máquina…
+            </div>
+          )}
+
+          {(oauthStatus === 'waiting' || oauthStatus === 'done') && oauthUrl && (
+            <div className="space-y-2">
+              <div className="rounded border border-amber-500/20 bg-amber-500/5 px-2.5 py-2 space-y-1.5">
+                <p className="text-[10px] font-semibold text-amber-300">
+                  Abre este enlace en tu navegador para autenticarte:
+                </p>
+                <a
+                  href={oauthUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-start gap-1.5 text-[10px] font-mono text-cyan-400 hover:text-cyan-300 break-all"
+                >
+                  <ExternalLink className="h-3 w-3 shrink-0 mt-0.5" />
+                  {oauthUrl}
+                </a>
+              </div>
+
+              {oauthStatus === 'waiting' && (
+                <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+                  <Loader2 className="h-3 w-3 animate-spin text-cyan-400 shrink-0" />
+                  Esperando que completes la autenticación en el navegador…
+                </div>
+              )}
+              {oauthStatus === 'done' && (
+                <div className="flex items-center gap-2 text-[10px] text-emerald-400">
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                  ¡Conectado! Cerrando formulario…
+                </div>
+              )}
+            </div>
+          )}
+
+          {oauthStatus === 'error' && (
+            <button
+              onClick={() => { setOauthStatus('idle'); setError(null); setOauthUrl(null); }}
+              className="w-full rounded border border-zinc-800 bg-zinc-950 py-1.5 text-xs font-mono text-zinc-400 hover:border-zinc-700 transition-colors"
+            >
+              Reintentar
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ── Manual token input (api_key / org) ── */}
+      {!isOAuth && (
+        <div className="space-y-1.5">
+          {selected?.hint && (
+            <p className="text-[10px] text-zinc-600 font-mono">{selected.hint}</p>
+          )}
+          <div className="relative">
+            <input
+              type={show ? 'text' : 'password'}
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') submitToken(); }}
+              placeholder={method === 'api_key' ? 'sk-ant-…' : 'token de Claude Code'}
+              className="w-full rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 pr-8 text-xs font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+            />
+            <button
+              type="button"
+              onClick={() => setShow((s) => !s)}
+              className="absolute right-2 top-1.5 text-zinc-600 hover:text-zinc-400"
+            >
+              {show ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            </button>
+          </div>
+          <p className="text-[9px] text-zinc-700">
+            El token se guarda cifrado y se inyecta en la máquina del agente en runtime.
+          </p>
           <button
-            type="button"
-            onClick={() => setShow((s) => !s)}
-            className="absolute right-2 top-1.5 text-zinc-600 hover:text-zinc-400"
+            onClick={submitToken}
+            disabled={loading || !token.trim()}
+            className="w-full rounded border border-cyan-500/20 bg-cyan-500/10 py-1.5 text-xs font-mono text-cyan-400 hover:bg-cyan-500/20 disabled:opacity-40 transition-colors"
           >
-            {show ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            {loading ? 'Conectando…' : 'Guardar token'}
           </button>
         </div>
-        <p className="text-[9px] text-zinc-700">
-          El token se guarda cifrado y se inyecta en la máquina del agente en runtime. EVA nunca lo muestra.
-        </p>
-      </div>
+      )}
 
       {error && <p className="text-[10px] text-red-400">{error}</p>}
-
-      <button
-        onClick={submit}
-        disabled={loading || !token.trim()}
-        className="w-full rounded border border-cyan-500/20 bg-cyan-500/10 py-1.5 text-xs font-mono text-cyan-400 hover:bg-cyan-500/20 disabled:opacity-40 transition-colors"
-      >
-        {loading ? 'Conectando…' : 'Conectar Claude Code'}
-      </button>
     </div>
   );
 }
