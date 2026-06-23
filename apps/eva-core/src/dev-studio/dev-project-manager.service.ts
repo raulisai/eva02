@@ -1,79 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ModelRouterService } from '../model-router/model-router.service';
 import { DevSessionService } from './dev-session.service';
-import { DevSession, DevGoal, DevIteration, AGENT_SYSTEM_PROMPTS, SuccessCriterion } from './dev-studio.types';
-
-/**
- * Extract and repair JSON from a potentially noisy / truncated LLM response.
- * Handles: markdown fences, leading prose, trailing prose, truncated JSON.
- */
-function extractJson<T>(text: string): T {
-  let s = text.trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```\s*$/, '');
-
-  // Try direct parse first (happy path)
-  try { return JSON.parse(s) as T; } catch { /* continue */ }
-
-  // Find the start of the first JSON structure
-  const objStart = s.indexOf('{');
-  const arrStart = s.indexOf('[');
-  let start = -1;
-  if (objStart === -1) start = arrStart;
-  else if (arrStart === -1) start = objStart;
-  else start = Math.min(objStart, arrStart);
-
-  if (start !== -1) s = s.slice(start);
-
-  // Strip trailing commas before closing brackets (common LLM artifact)
-  s = s.replace(/,(\s*[}\]])/g, '$1');
-  // Try after stripping leading prose
-  try { return JSON.parse(s) as T; } catch { /* continue */ }
-
-  // Repair truncated JSON: track structure depth and open/close containers
-  const opens: string[] = [];
-  let inStr = false;
-  let escape = false;
-  let strStart = -1;         // index of the opening " of the current string
-  let lastStructIndex = 0;   // last index of a structural character outside strings
-
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (escape) { escape = false; continue; }
-    if (ch === '\\' && inStr) { escape = true; continue; }
-    if (ch === '"') {
-      if (!inStr) { inStr = true; strStart = i; }
-      else { inStr = false; strStart = -1; lastStructIndex = i; }
-      continue;
-    }
-    if (inStr) continue;
-    if (ch === '{') { opens.push('}'); lastStructIndex = i; }
-    else if (ch === '[') { opens.push(']'); lastStructIndex = i; }
-    else if (ch === '}' || ch === ']') { opens.pop(); lastStructIndex = i; }
-    else if (ch === ',' || ch === ':') { lastStructIndex = i; }
-  }
-
-  let candidate: string;
-  if (inStr) {
-    // Truncated inside a string — close the string, then strip the incomplete key or value
-    candidate = s.slice(0, strStart); // drop the unterminated string entirely
-    // Remove trailing `: ` (incomplete value slot) or `, "key": ` (incomplete KV pair)
-    candidate = candidate.replace(/[,]?\s*"[^"]*"\s*:\s*$/, '').trimEnd();
-    candidate = candidate.replace(/[,]?\s*$/, '');
-  } else {
-    candidate = s;
-    // Trim trailing incomplete key-value
-    candidate = candidate.replace(/,\s*"[^"]*"\s*:\s*$/, '').trimEnd();
-    candidate = candidate.replace(/,\s*$/, '');
-  }
-
-  // Close open containers in reverse order
-  candidate += opens.reverse().join('');
-
-  try { return JSON.parse(candidate) as T; } catch (e) {
-    throw new Error(`extractJson failed: ${(e as Error).message}\nInput (first 300): ${text.slice(0, 300)}`);
-  }
-}
+import { DevSession, DevGoal, DevIteration, AGENT_SYSTEM_PROMPTS, SuccessCriterion, TeamTier } from './dev-studio.types';
+import { extractJson } from './dev-studio.utils';
 
 interface NorthStarResult {
   northStar: string;
@@ -84,6 +13,8 @@ interface NorthStarResult {
     priority: number;
     successCriteria: SuccessCriterion[];
   }>;
+  teamTier: TeamTier;
+  teamTierReason: string;
 }
 
 interface GoalEvaluation {
@@ -107,6 +38,22 @@ Tu tarea ahora es: dado el prompt de un usuario que quiere construir un producto
 1. Una North Star clara (1-2 oraciones que definan el estado de éxito del producto)
 2. Una lista de Definition of Done (criterios verificables para considerar el proyecto completo)
 3. Los goals de producto iniciales, ordenados por prioridad
+4. La clasificación del equipo de desarrollo necesario (teamTier)
+
+## Clasificación del equipo (teamTier)
+Elige UNO de estos tres tiers según la complejidad real del proyecto:
+
+- "small": Proyecto sencillo que un solo desarrollador puede resolver. Señales: juego, CLI, script,
+  landing page, PoC, to-do app, CRUD básico, API sin UI, prototipo rápido. Sin auth compleja,
+  sin multi-tenant, sin deploy a producción, sin necesidad de tests automatizados.
+
+- "medium": Aplicación web con UI y API separadas, auth/multi-usuario, SaaS dashboard, panel admin,
+  app móvil-estilo. Requiere frontend + backend como especialistas separados, posiblemente testing.
+  No requiere code review formal ni pipeline de deploy.
+
+- "large": Plataforma con múltiples servicios, multi-tenant, pagos, integraciones complejas, deploy
+  a producción con CI/CD, requisitos de calidad enterprise (code review, staging, rollback).
+  Requiere equipo completo: frontend + backend + testing + reviewer + deployment.
 
 Responde SOLO en JSON:
 {
@@ -124,7 +71,9 @@ Responde SOLO en JSON:
         {"id": "sc-1", "description": "Criterio verificable y específico", "verifiable": true}
       ]
     }
-  ]
+  ],
+  "teamTier": "medium",
+  "teamTierReason": "El proyecto requiere UI separada del backend y autenticación de usuarios"
 }
 Genera 3-6 goals. Priority: 100 = crítico, 50 = importante, 10 = nice-to-have.`;
 
@@ -194,6 +143,14 @@ export class DevProjectManagerService {
         verifiable: (c as SuccessCriterion).verifiable ?? true,
       })),
     }));
+
+    // Validate and default teamTier
+    const validTiers: TeamTier[] = ['small', 'medium', 'large'];
+    if (!validTiers.includes(parsed.teamTier as TeamTier)) {
+      // Heuristic fallback based on goal count
+      parsed.teamTier = parsed.goals.length <= 2 ? 'small' : parsed.goals.length <= 4 ? 'medium' : 'large';
+      parsed.teamTierReason = 'Clasificado por heurística de número de goals';
+    }
 
     return parsed;
   }

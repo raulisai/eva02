@@ -11,7 +11,7 @@ import { ClaudeCodeRunnerService, CLAUDE_AUTH_OPTIONS } from './claude-code-runn
 import { ApprovalsService } from '../approvals/approvals.service';
 import {
   DevSession, DevGoal, DevIteration, AGENT_SYSTEM_PROMPTS,
-  AgentRole, DevGoalStatus,
+  AgentRole, DevGoalStatus, TeamTier, TEAM_TIER_CONFIG,
 } from './dev-studio.types';
 
 // Max iterations per goal before stopping and asking user
@@ -432,8 +432,9 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
       .eq('id', session.id)
       .eq('org_id', orgId);
 
-    // Derive tasks via architect
-    const architectPlan = await this.architect.deriveTasks(session, goal, iteration);
+    // Derive tasks via architect (pass team tier so it constrains role selection)
+    const teamTier = (session.metadata?.teamTier as TeamTier | undefined) ?? 'medium';
+    const architectPlan = await this.architect.deriveTasks(session, goal, iteration, teamTier);
 
     if (architectPlan.humanApprovalRequired) {
       const humanTask = await this.sessionService.createHumanTask({
@@ -455,8 +456,9 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    // Register only the agents actually needed for these tasks, and boot each
-    // one's dedicated machine eagerly so the user can watch it come up.
+    // Register only the agents actually needed for these tasks.
+    // PM + Architect are always present; technical roles come from the architect plan
+    // and are already constrained to the session's team tier.
     const neededRoles = [
       'project_manager',
       'architect',
@@ -1000,6 +1002,16 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
 
     await this.sessionService.setNorthStar(sessionId, orgId, northStarResult.northStar, northStarResult.definitionOfDone);
 
+    // Persist team tier so every tick can use it without re-classifying
+    const teamTier = northStarResult.teamTier ?? 'medium';
+    await this.db.admin
+      .from('dev_sessions')
+      .update({ metadata: { ...(session.metadata ?? {}), teamTier, teamTierReason: northStarResult.teamTierReason } })
+      .eq('id', sessionId)
+      .eq('org_id', orgId);
+
+    this.logger.log(`Session ${sessionId} team tier: ${teamTier} — ${northStarResult.teamTierReason}`);
+
     // Create goals
     for (const goalDef of northStarResult.goals) {
       await this.sessionService.createGoal({
@@ -1016,7 +1028,7 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
 
     await this.sessionService.logEvent({
       orgId, sessionId, eventType: 'goals.awaiting_approval',
-      message: `North Star generada. ${northStarResult.goals.length} goals propuestos, esperando aprobación.`,
+      message: `North Star generada. Tier: ${teamTier} (${TEAM_TIER_CONFIG[teamTier].description}). ${northStarResult.goals.length} goals propuestos, esperando aprobación.`,
     });
 
     await this.emitToSession(orgId, sessionId, 'dev.session.updated', {

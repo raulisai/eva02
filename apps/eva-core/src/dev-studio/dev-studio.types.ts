@@ -56,6 +56,46 @@ export type DevHumanTaskStatus =
   | 'rejected'
   | 'cancelled';
 
+// ── Team tiers ────────────────────────────────────────────────────────────────
+
+/**
+ * Project-size tier, set once at session start by the PM and persisted in
+ * session.metadata.teamTier. Determines which roles the Architect may use and
+ * how many tasks it can emit per iteration.
+ *
+ *   small  → 1 dev (full_stack | backend | frontend) — PoC, game, script, CRUD
+ *   medium → 2-3 devs (frontend + backend + optional testing) — SaaS, dashboard
+ *   large  → full team (frontend + backend + testing + reviewer + optional deployment)
+ */
+export type TeamTier = 'small' | 'medium' | 'large';
+
+export interface TeamTierConfig {
+  /** Technical roles the Architect may assign tasks to (PM + Architect always added by orchestrator). */
+  availableRoles: string[];
+  /** Hard cap on tasks the Architect emits per iteration. */
+  maxTasksPerIteration: number;
+  /** One-line description shown in logs and UI. */
+  description: string;
+}
+
+export const TEAM_TIER_CONFIG: Record<TeamTier, TeamTierConfig> = {
+  small: {
+    availableRoles: ['full_stack', 'backend', 'frontend'],
+    maxTasksPerIteration: 2,
+    description: 'Equipo mínimo — un solo desarrollador polivalente',
+  },
+  medium: {
+    availableRoles: ['frontend', 'backend', 'full_stack', 'testing'],
+    maxTasksPerIteration: 4,
+    description: 'Equipo equilibrado — frontend + backend + testing opcional',
+  },
+  large: {
+    availableRoles: ['frontend', 'backend', 'testing', 'reviewer', 'deployment'],
+    maxTasksPerIteration: 6,
+    description: 'Equipo completo — especialistas + reviewer + deployment',
+  },
+};
+
 // Roles de agente especializado
 export type AgentRole =
   | 'project_manager'

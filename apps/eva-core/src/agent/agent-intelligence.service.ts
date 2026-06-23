@@ -498,7 +498,15 @@ Responde ÚNICAMENTE con este JSON (sin markdown, sin texto extra):
       type: 'task.form_request',
       orgId,
       taskId,
-      payload: { form_key: 'agent_input', title: 'EVA necesita una aclaración', description: question, fields: [{ key: 'answer', label: question, type: 'text', required: true, options }] },
+      payload: {
+        message: question,
+        form: {
+          form_key: 'agent_input',
+          title: 'EVA necesita una aclaración',
+          description: question,
+          fields: [{ id: 'answer', label: 'Respuesta', type: options.length > 0 ? 'options' : 'text', required: true, options }],
+        },
+      },
     });
     return `WAITING_FOR_INPUT: pregunta enviada al usuario. request_id=${(data as { id: string }).id}; timeout=${expiresAt}. Si no responde, continúa asumiendo lo razonable y decláralo.`;
   }

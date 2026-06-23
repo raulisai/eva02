@@ -15,11 +15,12 @@ export interface InteractiveFormBubbleProps {
     description?: string;
     fields?: Array<{
       id: string;
-      type?: string; // 'text' | 'number' | 'textarea'
+      type?: string; // 'text' | 'number' | 'textarea' | 'options'
       label?: string;
       placeholder?: string;
       required?: boolean;
       profile_path?: string;
+      options?: string[];
     }>;
   };
   onSubmit: (values: Record<string, string>) => Promise<void>;
@@ -129,6 +130,47 @@ export function InteractiveFormBubble({
     }
   };
 
+  const handleOptionSelect = async (fieldId: string, option: string) => {
+    setSubmitting(true);
+    try {
+      await onSubmit({ [fieldId]: option });
+    } catch (err) {
+      console.error('Error submitting option:', err);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // If all fields are options type (quick-reply), render compact buttons without full form chrome
+  const allOptionsFields = form.fields?.every((f) => f.type === 'options' && (f.options?.length ?? 0) > 0);
+  if (allOptionsFields && form.form_key === 'agent_input') {
+    return (
+      <div className="flex justify-start animate-slide-up w-full max-w-[85%]">
+        <div className="w-full border border-cyan-500/30 bg-zinc-950/90 rounded-sm p-3 space-y-2 shadow-xl">
+          {form.description && (
+            <p className="text-xs text-zinc-200 font-mono leading-relaxed">{form.description}</p>
+          )}
+          {form.fields?.map((field) => (
+            <div key={field.id} className="flex flex-wrap gap-2">
+              {field.options?.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleOptionSelect(field.id, option)}
+                  className="px-3 py-1.5 text-xs font-mono border border-cyan-500/40 bg-cyan-500/10 text-cyan-200 rounded-sm hover:bg-cyan-500/20 hover:border-cyan-400/60 disabled:opacity-50 transition-colors"
+                >
+                  {submitting ? <Loader2 className="w-3 h-3 animate-spin inline mr-1" /> : null}
+                  {option}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   const isLocationField = (fieldId: string) => {
     const idLower = fieldId.toLowerCase();
     return idLower.includes('origin') || idLower.includes('location') || idLower.includes('pickup') || idLower.includes('destino') || idLower.includes('destination') || idLower.includes('dropoff');
@@ -168,7 +210,25 @@ export function InteractiveFormBubble({
                 </label>
 
                 <div className="relative flex items-center">
-                  {field.type === 'textarea' ? (
+                  {field.type === 'options' && (field.options?.length ?? 0) > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {field.options?.map((option) => (
+                        <button
+                          key={option}
+                          type="button"
+                          disabled={submitting}
+                          onClick={() => { setValues((prev) => ({ ...prev, [field.id]: option })); }}
+                          className={`px-3 py-1.5 text-xs font-mono border rounded-sm transition-colors disabled:opacity-50 ${
+                            values[field.id] === option
+                              ? 'border-cyan-400/60 bg-cyan-500/20 text-cyan-200'
+                              : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-cyan-500/40 hover:text-cyan-200'
+                          }`}
+                        >
+                          {option}
+                        </button>
+                      ))}
+                    </div>
+                  ) : field.type === 'textarea' ? (
                     <textarea
                       id={field.id}
                       required={field.required}
@@ -192,7 +252,7 @@ export function InteractiveFormBubble({
                     />
                   )}
 
-                  {isLoc && field.type !== 'textarea' && (
+                  {isLoc && field.type !== 'textarea' && field.type !== 'options' && (
                     <button
                       type="button"
                       onClick={() => handleGetCurrentLocation(field.id)}

@@ -1,4 +1,5 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { DatabaseService } from '../database/database.service';
 import { calculateCost } from './model-pricing';
@@ -18,6 +19,7 @@ interface ResolvedKeys {
   openai?: string;
   claude?: string;
   google?: string;
+  chatgptWeb?: string;
 }
 
 @Injectable()
@@ -44,14 +46,16 @@ export class ModelRouterService {
     const keys: ResolvedKeys = { openai: this.openaiKey, claude: this.anthropicKey, google: this.googleKey };
     if (!orgId || !this.integrations) return keys;
     try {
-      const [anthropic, openai, google] = await Promise.all([
+      const [anthropic, openai, google, chatgptWeb] = await Promise.all([
         this.integrations.getSecret(orgId, 'model', 'anthropic'),
         this.integrations.getSecret(orgId, 'model', 'openai'),
         this.integrations.getSecret(orgId, 'model', 'google'),
+        this.integrations.getSecret(orgId, 'model', 'chatgpt_web'),
       ]);
       if (anthropic) keys.claude = anthropic;
       if (openai) keys.openai = openai;
       if (google) keys.google = google;
+      if (chatgptWeb) keys.chatgptWeb = chatgptWeb;
     } catch (error) {
       this.logger.warn(`Org key lookup failed, falling back to env keys: ${(error as Error).message}`);
     }
@@ -95,6 +99,8 @@ export class ModelRouterService {
       result = await this.withRateLimitRetry(() => this.generateClaude(prompt, opts, budget, keys.claude));
     } else if (backend === 'openai' && keys.openai) {
       result = await this.withRateLimitRetry(() => this.generateOpenAI(prompt, opts, budget, keys.openai));
+    } else if (backend === 'chatgpt_web' && keys.chatgptWeb) {
+      result = await this.generateChatGPTWeb(prompt, opts, keys.chatgptWeb);
     } else {
       this.logger.warn('No LLM API key configured — returning deterministic stub');
       result = this.generateStub(prompt, opts);
@@ -483,6 +489,93 @@ export class ModelRouterService {
     return { embedding: data.data[0].embedding, model, backend: 'openai' };
   }
 
+  // ── private: ChatGPT Web (subscription session token) ────────────────────
+
+  /**
+   * Calls the ChatGPT web interface API using the user's session cookie token.
+   * Lets users consume their ChatGPT Plus/Pro subscription without a separate API key.
+   * The session token value comes from the __Secure-next-auth.session-token cookie on chat.openai.com.
+   */
+  private async generateChatGPTWeb(
+    prompt: string,
+    opts: GenerateOptions,
+    sessionToken: string,
+  ): Promise<GenerateResult> {
+    // Step 1: exchange session cookie for a short-lived access token
+    const sessionRes = await fetch('https://chat.openai.com/api/auth/session', {
+      headers: { Cookie: `__Secure-next-auth.session-token=${sessionToken}` },
+    });
+    if (!sessionRes.ok) {
+      throw new Error(`ChatGPT session refresh failed: ${sessionRes.status}`);
+    }
+    const session = (await sessionRes.json()) as { accessToken?: string };
+    if (!session.accessToken) {
+      throw new Error('ChatGPT session token expired or invalid — refresh it in Settings → Models');
+    }
+
+    // Step 2: build conversation messages
+    const model = opts.model ?? 'gpt-4o';
+    const messages: Array<{ id: string; author: { role: string }; content: { content_type: string; parts: string[] } }> = [];
+    if (opts.systemPrompt) {
+      messages.push({ id: randomUUID(), author: { role: 'system' }, content: { content_type: 'text', parts: [opts.systemPrompt] } });
+    }
+    messages.push({ id: randomUUID(), author: { role: 'user' }, content: { content_type: 'text', parts: [prompt] } });
+
+    const convRes = await fetch('https://chat.openai.com/backend-api/conversation', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${session.accessToken}`,
+        'Accept': 'text/event-stream',
+      },
+      body: JSON.stringify({
+        action: 'next',
+        messages,
+        model,
+        parent_message_id: randomUUID(),
+        conversation_id: null,
+      }),
+    });
+
+    if (!convRes.ok) {
+      const err = await convRes.text();
+      throw new Error(`ChatGPT Web conversation failed ${convRes.status}: ${err.slice(0, 300)}`);
+    }
+
+    const text = this.parseChatGPTSSE(await convRes.text());
+    return {
+      text,
+      model: `chatgpt-web/${model}`,
+      backend: 'chatgpt_web',
+      // Web API does not expose token counts
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    };
+  }
+
+  /** Extracts the final accumulated assistant text from a ChatGPT SSE stream. */
+  private parseChatGPTSSE(raw: string): string {
+    let finalText = '';
+    for (const line of raw.split('\n')) {
+      if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+      try {
+        const data = JSON.parse(line.slice(6)) as {
+          message?: {
+            content?: { content_type?: string; parts?: string[] };
+            author?: { role?: string };
+            error?: string | null;
+          };
+          error?: string | null;
+        };
+        if (data.error) throw new Error(String(data.error));
+        const content = data.message?.content;
+        if (content?.content_type === 'text' && data.message?.author?.role === 'assistant') {
+          finalText = content.parts?.join('') ?? finalText;
+        }
+      } catch { /* skip malformed SSE chunks */ }
+    }
+    return finalText;
+  }
+
   // ── private: dev stub ─────────────────────────────────────────────────────
 
   private generateStub(prompt: string, opts: GenerateOptions): GenerateResult {
@@ -511,15 +604,18 @@ export class ModelRouterService {
     if (budget === 'cheap' || budget === 'balanced') {
       if (keys?.google) return 'google';
       if (keys?.openai) return 'openai';
+      if (keys?.chatgptWeb) return 'chatgpt_web';
       if (keys?.claude) return 'claude';
     }
     if (budget === 'powerful') {
       if (keys?.claude) return 'claude';
       if (keys?.openai) return 'openai';
+      if (keys?.chatgptWeb) return 'chatgpt_web';
       if (keys?.google) return 'google';
     }
     if (keys?.claude && !keys?.openai) return 'claude';
     if (keys?.openai) return 'openai';
+    if (keys?.chatgptWeb) return 'chatgpt_web';
     return this.preferredBackend;
   }
 

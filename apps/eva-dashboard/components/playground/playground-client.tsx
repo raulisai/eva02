@@ -65,6 +65,9 @@ interface BrowserLocationStatus {
   captured_at: string;
 }
 
+const SESSION_STORAGE_KEY = 'eva_playground_session_v2';
+const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+
 export function PlaygroundClient() {
   const { events, taskPatches } = useWs();
   const [order, setOrder] = useState('');
@@ -74,9 +77,51 @@ export function PlaygroundClient() {
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const [shareLocation, setShareLocation] = useState(false);
+  const sessionRestoredRef = useRef(false);
 
   const statusOf = (entry: SessionEntry): TaskStatus =>
     taskPatches[entry.task.id] ?? entry.task.status;
+
+  // Restore session from localStorage on mount (once)
+  useEffect(() => {
+    if (sessionRestoredRef.current) return;
+    sessionRestoredRef.current = true;
+    try {
+      const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as { entries: Array<{ taskId: string; orgId: string; order: string }>; savedAt: number };
+      if (!saved.savedAt || Date.now() - saved.savedAt > SESSION_MAX_AGE_MS) {
+        localStorage.removeItem(SESSION_STORAGE_KEY);
+        return;
+      }
+      const supabase = createClient();
+      Promise.all(
+        saved.entries.map(async ({ taskId, orgId, order: entryOrder }) => {
+          const { data } = await supabase.from('tasks').select('*').eq('id', taskId).eq('org_id', orgId).maybeSingle();
+          if (data) return { task: data as Task, order: entryOrder };
+          return null;
+        }),
+      ).then((results) => {
+        const restored = results.filter(Boolean) as SessionEntry[];
+        if (restored.length > 0) {
+          setSession(restored);
+          setSelectedId(restored[restored.length - 1].task.id);
+        }
+      }).catch(() => {});
+    } catch {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist session to localStorage whenever it changes
+  useEffect(() => {
+    if (!sessionRestoredRef.current || session.length === 0) return;
+    try {
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+        entries: session.map((e) => ({ taskId: e.task.id, orgId: e.task.org_id, order: e.order })),
+        savedAt: Date.now(),
+      }));
+    } catch {}
+  }, [session]);
 
   const selected = session.find((entry) => entry.task.id === selectedId) ?? session[session.length - 1] ?? null;
   const selectedStatus: TaskStatus = selected ? statusOf(selected) : 'pending';
@@ -234,6 +279,30 @@ export function PlaygroundClient() {
                   events={eventsFor(entry.task.id)}
                   selected={selected?.task.id === entry.task.id}
                   onSelect={() => setSelectedId(entry.task.id)}
+                  onQuickReply={async (answer, questionText) => {
+                    try {
+                      const created = await coreFetch<Task>('/tasks', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          title: answer.length > 80 ? `${answer.slice(0, 77)}...` : answer,
+                          description: answer,
+                          metadata: {
+                            source: 'playground',
+                            parent_task_id: entry.task.id,
+                            conversation_context: [
+                              { role: 'user', text: entry.order },
+                              ...(questionText ? [{ role: 'assistant', text: questionText }] : []),
+                              { role: 'user', text: answer },
+                            ],
+                          },
+                        }),
+                      });
+                      setSession((prev) => [...prev, { task: created, order: answer }]);
+                      setSelectedId(created.id);
+                    } catch (err) {
+                      setError((err as Error).message);
+                    }
+                  }}
                 />
               ))}
               <div ref={conversationEndRef} />
@@ -381,9 +450,27 @@ function buildConversationContext(session: SessionEntry[], chronological: EvaEve
       ? String((resultEvent.payload as Record<string, unknown>)['text'] ?? '')
       : (entry.task.result as Record<string, unknown> | null)?.['text'] as string | undefined;
 
+    // If no final result yet, include the last question EVA asked so replies have context
+    const lastAssistantText = !resultText
+      ? taskEvents
+          .filter((e) => e.type === 'task.say' || e.type === 'task.waiting_input')
+          .sort((a, b) => a.ts - b.ts)
+          .map((e) => {
+            if (e.type === 'task.say') return String((e.payload as Record<string, unknown>)['text'] ?? '');
+            if (e.type === 'task.waiting_input') return String((e.payload as Record<string, unknown>)['question'] ?? '');
+            return '';
+          })
+          .filter(Boolean)
+          .at(-1) ?? null
+      : null;
+
     return [
       { role: 'user', text: entry.order },
-      ...(resultText ? [{ role: 'assistant' as const, text: resultText }] : []),
+      ...(resultText
+        ? [{ role: 'assistant' as const, text: resultText }]
+        : lastAssistantText
+          ? [{ role: 'assistant' as const, text: lastAssistantText }]
+          : []),
     ];
   });
 
@@ -452,18 +539,19 @@ async function captureBrowserLocation(): Promise<{
 }
 
 /** One order + EVA's bubbles (acks, media, result) for a session task. */
-function ConversationGroup({ entry, status, events, selected, onSelect }: {
+function ConversationGroup({ entry, status, events, selected, onSelect, onQuickReply }: {
   entry: SessionEntry;
   status: TaskStatus;
   events: EvaEvent[];
   selected: boolean;
   onSelect: () => void;
+  onQuickReply?: (answer: string, questionText?: string) => Promise<void>;
 }) {
   const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null);
   const [feedbackBusy, setFeedbackBusy] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const timelineEvents = events
-    .filter((e) => ['task.say', 'task.media', 'task.form_request', 'task.setup_required', 'task.step'].includes(e.type))
+    .filter((e) => ['task.say', 'task.media', 'task.form_request', 'task.setup_required', 'task.step', 'task.waiting_input'].includes(e.type))
     .sort((a, b) => a.ts - b.ts);
   const resultEvent = events.find((event) => event.type === 'task.result');
   const resultText = resultEvent
@@ -558,6 +646,10 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
         if (event.type === 'task.form_request') {
           const payload = event.payload as any;
           const form = payload.form;
+          if (!form) return null;
+          const isAgentInput = form.form_key === 'agent_input';
+          // agent_input is rendered by the task.waiting_input QuickReplyBubble instead
+          if (isAgentInput) return null;
           return (
             <InteractiveFormBubble
               key={`form-${index}`}
@@ -566,13 +658,17 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
               message={payload.message}
               form={form}
               onSubmit={async (values) => {
+                if (isAgentInput && onQuickReply) {
+                  const answerValue = values['answer'] ?? Object.values(values)[0] ?? '';
+                  await onQuickReply(answerValue, payload.message ?? form?.description);
+                  return;
+                }
                 const formKey = form?.form_key ?? 'unknown';
-                const description = JSON.stringify({ form_key: formKey, ...values });
                 await coreFetch<Task>('/tasks', {
                   method: 'POST',
                   body: JSON.stringify({
                     title: `Formulario: ${form?.title ?? formKey}`,
-                    description,
+                    description: JSON.stringify({ form_key: formKey, ...values }),
                     metadata: {
                       source: 'playground',
                       form_key: formKey,
@@ -583,6 +679,27 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
                     },
                   }),
                 });
+              }}
+            />
+          );
+        }
+        if (event.type === 'task.waiting_input') {
+          const payload = event.payload as any;
+          const question = String(payload.question ?? '');
+          const options: string[] = Array.isArray(payload.options) ? payload.options : [];
+          if (!question) return null;
+          // Only show the quick-reply bubble if the task is still waiting (no answer yet)
+          const alreadyAnswered = events.some(
+            (e) => e.type === 'task.created' && (e.payload as any)?.resumed_from_input_request_id === payload.requestId,
+          );
+          if (alreadyAnswered) return null;
+          return (
+            <QuickReplyBubble
+              key={`qr-${index}`}
+              question={question}
+              options={options.length > 0 ? options : ['Sí', 'No']}
+              onReply={async (answer) => {
+                if (onQuickReply) await onQuickReply(answer, question);
               }}
             />
           );
@@ -678,6 +795,56 @@ function ConversationGroup({ entry, status, events, selected, onSelect }: {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function QuickReplyBubble({ question, options, onReply }: {
+  question: string;
+  options: string[];
+  onReply: (answer: string) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [answered, setAnswered] = useState<string | null>(null);
+
+  const handleClick = async (option: string) => {
+    if (busy || answered) return;
+    setBusy(true);
+    try {
+      await onReply(option);
+      setAnswered(option);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex justify-start animate-slide-up">
+      <div className="max-w-[85%] border border-cyan-500/30 bg-cyan-500/5 rounded-sm px-3 py-2.5 space-y-2.5">
+        <p className="text-xs text-cyan-100 whitespace-pre-wrap leading-relaxed">{question}</p>
+        <div className="flex flex-wrap gap-2">
+          {options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              disabled={busy || Boolean(answered)}
+              onClick={() => void handleClick(option)}
+              className={cn(
+                'px-3 py-1.5 text-xs font-mono border rounded-sm transition-colors disabled:opacity-50',
+                answered === option
+                  ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200'
+                  : 'border-cyan-500/40 bg-zinc-900 text-zinc-300 hover:border-cyan-400/60 hover:text-cyan-200',
+              )}
+            >
+              {busy && !answered ? <Loader2 className="w-3 h-3 animate-spin inline mr-1" /> : null}
+              {option}
+            </button>
+          ))}
+        </div>
+        {answered && (
+          <p className="text-[10px] font-mono text-zinc-500">Respondiste: {answered}</p>
+        )}
+      </div>
     </div>
   );
 }

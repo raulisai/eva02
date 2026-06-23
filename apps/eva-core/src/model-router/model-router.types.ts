@@ -1,4 +1,4 @@
-export type ModelBackend = 'openai' | 'claude' | 'google' | 'auto';
+export type ModelBackend = 'openai' | 'claude' | 'google' | 'chatgpt_web' | 'auto';
 
 export type ModelBudget = 'cheap' | 'balanced' | 'powerful';
 

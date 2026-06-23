@@ -14,7 +14,7 @@ import {
 } from './integrations.types';
 import { WEAR_COMMANDS, WEAR_DEFAULT_ENABLED } from './wear-catalog';
 
-const KNOWN_MODEL_PROVIDERS = ['anthropic', 'openai', 'google', 'groq', 'openrouter'];
+const KNOWN_MODEL_PROVIDERS = ['anthropic', 'openai', 'google', 'groq', 'openrouter', 'chatgpt_web'];
 const KNOWN_CHANNEL_PROVIDERS = ['wear', 'telegram', 'discord', 'slack', 'whatsapp', 'email', 'sms'];
 const KNOWN_CREDENTIAL_PROVIDERS = ['google', 'google_web', 'uber', 'github', 'amazon', 'brave_search', 'tavily', 'serpapi', 'custom', 'claude_code'];
 
@@ -276,6 +276,11 @@ export class IntegrationsService {
       ?? this.envKeyFor(provider);
     if (!key) return { ok: false, error: 'No API key configured for this provider' };
 
+    // ChatGPT Web uses session token exchange instead of a models list probe
+    if (provider === 'chatgpt_web') {
+      return this.testChatGPTWebSession(key);
+    }
+
     const probes: Record<string, { url: string; headers: Record<string, string> }> = {
       anthropic:  { url: 'https://api.anthropic.com/v1/models', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' } },
       openai:     { url: 'https://api.openai.com/v1/models', headers: { Authorization: `Bearer ${key}` } },
@@ -304,6 +309,35 @@ export class IntegrationsService {
         latency_ms: latency,
         detail: count !== undefined ? `${count} models available` : 'connected',
       };
+    } catch (error) {
+      return { ok: false, latency_ms: Date.now() - started, error: (error as Error).message };
+    }
+  }
+
+  /** Validates a ChatGPT session token by exchanging it for an access token. */
+  private async testChatGPTWebSession(sessionToken: string): Promise<{
+    ok: boolean; latency_ms?: number; detail?: string; error?: string;
+  }> {
+    const started = Date.now();
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      const res = await fetch('https://chat.openai.com/api/auth/session', {
+        headers: { Cookie: `__Secure-next-auth.session-token=${sessionToken}` },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      const latency = Date.now() - started;
+
+      if (!res.ok) {
+        return { ok: false, latency_ms: latency, error: `Session check failed: HTTP ${res.status}` };
+      }
+      const body = (await res.json().catch(() => ({}))) as { accessToken?: string; user?: { email?: string } };
+      if (!body.accessToken) {
+        return { ok: false, latency_ms: latency, error: 'Token expired or invalid — re-copy it from chat.openai.com' };
+      }
+      const email = body.user?.email ? ` (${body.user.email})` : '';
+      return { ok: true, latency_ms: latency, detail: `Session active${email}` };
     } catch (error) {
       return { ok: false, latency_ms: Date.now() - started, error: (error as Error).message };
     }

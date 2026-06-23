@@ -1,8 +1,11 @@
 'use client';
 
 import { useEffect, useState, lazy, Suspense } from 'react';
-import { X, GitBranch, CheckCircle2, Clock, Terminal, ChevronDown, ChevronRight } from 'lucide-react';
-import type { AgentRole } from '@/lib/dev-studio-types';
+import {
+  X, GitBranch, CheckCircle2, Clock, Terminal,
+  ChevronDown, ChevronRight, Eye, EyeOff, Check, Star, Wrench,
+} from 'lucide-react';
+import type { AgentRole, ClaudeAuthOption } from '@/lib/dev-studio-types';
 import { AGENT_ROLE_EMOJI } from '@/lib/dev-studio-types';
 import { devStudioApi } from '@/lib/dev-studio-api';
 import { cn } from '@/lib/utils';
@@ -13,6 +16,9 @@ import { es } from 'date-fns/locale';
 const AgentTerminal = lazy(() =>
   import('./agent-terminal').then((m) => ({ default: m.AgentTerminal }))
 );
+
+/** Roles that run Claude Code inside their Docker machine */
+const CODE_ROLES = new Set(['backend', 'frontend', 'full_stack', 'testing']);
 
 const ROLE_LABEL: Record<string, string> = {
   project_manager: 'Project Manager',
@@ -60,23 +66,41 @@ interface AgentDetailPanelProps {
 export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDetailPanelProps) {
   const [detail, setDetail] = useState<Record<string, unknown> | null>(null);
   const [logs, setLogs] = useState<Record<string, unknown>[]>([]);
+  const [liveSteps, setLiveSteps] = useState<Record<string, unknown>[]>([]);
   const [tab, setTab] = useState<Tab>('tasks');
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
   const [booting, setBooting] = useState(false);
+  const [connecting, setConnecting] = useState(false);
 
-  // Poll detail every 4s so status/tasks stay live
+  // Poll agent detail every 4 s
   useEffect(() => {
     let alive = true;
-    const load = () => devStudioApi.getAgentDetail(sessionId, role).then((d) => { if (alive) setDetail(d); }).catch(() => {});
+    const load = () => devStudioApi.getAgentDetail(sessionId, role)
+      .then((d) => { if (alive) setDetail(d); })
+      .catch(() => {});
     load();
     const iv = setInterval(load, 4000);
     return () => { alive = false; clearInterval(iv); };
   }, [sessionId, role]);
 
+  // Always poll last 5 steps for the live activity indicator (independent of tab)
+  useEffect(() => {
+    let alive = true;
+    const load = () => devStudioApi.getAgentLogs(sessionId, role, 5)
+      .then((l) => { if (alive) setLiveSteps(l); })
+      .catch(() => {});
+    load();
+    const iv = setInterval(load, 3000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [sessionId, role]);
+
+  // Poll full logs only when that tab is open
   useEffect(() => {
     if (tab !== 'logs') return;
     let alive = true;
-    const load = () => devStudioApi.getAgentLogs(sessionId, role).then((l) => { if (alive) setLogs(l); }).catch(() => {});
+    const load = () => devStudioApi.getAgentLogs(sessionId, role)
+      .then((l) => { if (alive) setLogs(l); })
+      .catch(() => {});
     load();
     const iv = setInterval(load, 3000);
     return () => { alive = false; clearInterval(iv); };
@@ -93,6 +117,8 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
     authOk: boolean | null; authError: string | null;
   } | undefined;
 
+  const isCodeRole = CODE_ROLES.has(role);
+
   const done = studioTasks.filter((t) => ['approved', 'merged', 'completed'].includes(t.status as string));
   const failed = studioTasks.filter((t) => ['failed', 'cancelled'].includes(t.status as string));
   const pending = studioTasks.filter((t) => !['approved', 'merged', 'completed', 'failed', 'cancelled'].includes(t.status as string));
@@ -101,8 +127,11 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
   const activeBackingId = activeTask ? (activeTask.id as string) : null;
   const agentStatus = (agent?.status as string) ?? 'idle';
 
-  // Latest tool/step from logs for the live "qué está haciendo ahora"
-  const lastStep = logs.length > 0 ? logs[logs.length - 1] : null;
+  // Latest live step from always-on poll
+  const lastLiveStep = liveSteps.length > 0 ? liveSteps[liveSteps.length - 1] : null;
+  // Last tool call in recent steps (most informative for "doing now")
+  const lastToolCall = [...liveSteps].reverse().find((s) => s.type === 'tool_call');
+  const liveActivity = lastToolCall ?? lastLiveStep;
 
   const TABS: { key: Tab; label: string; count?: number }[] = [
     { key: 'tasks', label: 'Tareas', count: studioTasks.length },
@@ -143,12 +172,16 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
           </button>
         </div>
 
-        {/* Live step indicator */}
-        {agentStatus === 'running' && lastStep && (
-          <div className="mt-2 flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5">
+        {/* Live activity indicator */}
+        {agentStatus === 'running' && liveActivity && (
+          <div className="mt-2 flex items-center gap-2 rounded-md border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-            <span className="text-[10px] font-mono text-zinc-500 shrink-0">paso {lastStep.step as number}</span>
-            <span className="text-[11px] text-zinc-300 truncate font-mono">{stepSummary(lastStep.content)}</span>
+            <span className="text-[10px] font-mono text-zinc-500 shrink-0 uppercase tracking-widest">
+              {liveActivity.type === 'tool_call' ? 'usando' : 'paso'} {liveActivity.step as number}
+            </span>
+            <span className="text-[11px] text-emerald-300 truncate font-mono">
+              {stepSummary(liveActivity.content)}
+            </span>
           </div>
         )}
 
@@ -160,31 +193,94 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
           <Stat label="Ejecuciones" value={allBacking.length} color="text-purple-400" />
         </div>
 
-        {/* Machine — dedicated Docker image per agent + Claude Code login state */}
+        {/* Machine section */}
         {machine && (
-          <div className="mt-3 flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5">
-            <span className={cn(
-              'w-1.5 h-1.5 rounded-full shrink-0',
-              machine.up ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600',
-            )} />
-            <span className="text-[10px] font-mono text-zinc-400 shrink-0">
-              {machine.up ? 'máquina' : 'apagada'}
-            </span>
-            <span className="text-[11px] font-mono text-cyan-300 truncate" title={machine.tooling ?? undefined}>
-              {machine.image ?? machine.defaultImage ?? 'eva-agent-base'}
-            </span>
-            {machine.authOk !== null && (
-              <span
-                className={cn(
-                  'ml-auto shrink-0 text-[9px] font-mono px-1.5 py-0.5 rounded border',
-                  machine.authOk
-                    ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/5'
-                    : 'border-red-500/30 text-red-400 bg-red-500/5',
-                )}
-                title={machine.authError ?? undefined}
-              >
-                {machine.authOk ? '🔑 logueado' : '🔑 token inválido'}
+          <div className="mt-3 space-y-2">
+            {/* Row 1: container status + image */}
+            <div className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5">
+              <span className={cn(
+                'w-1.5 h-1.5 rounded-full shrink-0',
+                machine.up ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600',
+              )} />
+              <span className="text-[10px] font-mono text-zinc-500 shrink-0">
+                {machine.up ? 'activa' : 'apagada'}
               </span>
+              <span className="text-[11px] font-mono text-zinc-300 truncate" title={machine.image ?? undefined}>
+                {machine.image ?? machine.defaultImage ?? 'eva-agent-base'}
+              </span>
+            </div>
+
+            {/* Row 2: tools pills */}
+            {machine.tooling && (
+              <div className="flex flex-wrap items-center gap-1 px-0.5">
+                <Wrench className="h-2.5 w-2.5 text-zinc-600 shrink-0" />
+                {machine.tooling.split(' · ').map((tool) => (
+                  <span
+                    key={tool.trim()}
+                    className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-zinc-800 bg-zinc-900/60 text-zinc-400"
+                  >
+                    {tool.trim()}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Row 3: Claude Code auth status (code roles only) */}
+            {isCodeRole && (
+              <>
+                <div className={cn(
+                  'flex items-center gap-2.5 rounded-md border px-2.5 py-2',
+                  machine.authOk === true
+                    ? 'border-emerald-500/20 bg-emerald-500/5'
+                    : machine.authOk === false
+                    ? 'border-red-500/20 bg-red-500/5'
+                    : 'border-zinc-800 bg-zinc-950',
+                )}>
+                  <span className="text-sm shrink-0">🤖</span>
+                  <div className="flex-1 min-w-0">
+                    <p className={cn(
+                      'text-[11px] font-medium',
+                      machine.authOk === true ? 'text-emerald-400'
+                      : machine.authOk === false ? 'text-red-400'
+                      : 'text-zinc-500',
+                    )}>
+                      {machine.authOk === true
+                        ? 'Claude Code conectado'
+                        : machine.authOk === false
+                        ? 'Token inválido'
+                        : 'Claude Code no configurado'}
+                    </p>
+                    {machine.authError && (
+                      <p className="text-[9px] text-zinc-600 truncate mt-0.5" title={machine.authError}>
+                        {machine.authError}
+                      </p>
+                    )}
+                  </div>
+                  {machine.authOk !== true && !connecting && (
+                    <button
+                      onClick={() => setConnecting(true)}
+                      className="shrink-0 text-[10px] font-mono px-2.5 py-1 rounded border border-cyan-500/40 text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 transition-colors"
+                    >
+                      {machine.authOk === false ? 'Reconectar' : 'Conectar'}
+                    </button>
+                  )}
+                  {machine.authOk === true && (
+                    <span className="shrink-0 text-[10px] font-mono text-emerald-400">🔑</span>
+                  )}
+                </div>
+
+                {/* Inline Claude Code connect form */}
+                {connecting && (
+                  <ConnectClaudeCodeForm
+                    sessionId={sessionId}
+                    onSuccess={() => {
+                      setConnecting(false);
+                      devStudioApi.getAgentDetail(sessionId, role).then(setDetail).catch(() => {});
+                    }}
+                    onCancel={() => setConnecting(false)}
+                  />
+                )}
+              </>
             )}
           </div>
         )}
@@ -315,8 +411,7 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
           </div>
         )}
 
-        {/* Terminal tab — prefer the agent's persistent machine, fall back to the
-            active task's sandbox. */}
+        {/* Terminal tab */}
         {tab === 'terminal' && (() => {
           const terminalTarget = activeBackingId ?? (machine?.up ? machine.key : null);
           return (
@@ -389,6 +484,162 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
     </div>
   );
 }
+
+// ── Inline Claude Code connect form ───────────────────────────────────────────
+
+const FALLBACK_AUTH_OPTIONS: ClaudeAuthOption[] = [
+  {
+    method: 'oauth',
+    label: 'Token de suscripción (OAuth)',
+    description: 'Usa tu plan Max/Pro ya contratado. No paga por token.',
+    envVar: 'CLAUDE_CODE_OAUTH_TOKEN',
+    recommended: true,
+    hint: 'Genera el token con `claude setup-token` y pégalo aquí.',
+  },
+  {
+    method: 'api_key',
+    label: 'API key de Anthropic',
+    description: 'Pay-per-token con una API key (sk-ant-…).',
+    envVar: 'ANTHROPIC_API_KEY',
+    hint: 'Crea una key en console.anthropic.com → API Keys.',
+  },
+  {
+    method: 'org',
+    label: 'Credencial de la organización',
+    description: 'Token OAuth compartido a nivel organización.',
+    envVar: 'CLAUDE_CODE_OAUTH_TOKEN',
+    hint: 'Token OAuth de la cuenta de la organización.',
+  },
+];
+
+function ConnectClaudeCodeForm({
+  sessionId,
+  onSuccess,
+  onCancel,
+}: {
+  sessionId: string;
+  onSuccess: () => void;
+  onCancel: () => void;
+}) {
+  const [options, setOptions] = useState<ClaudeAuthOption[]>(FALLBACK_AUTH_OPTIONS);
+  const [method, setMethod] = useState<string>('oauth');
+  const [token, setToken] = useState('');
+  const [show, setShow] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    devStudioApi.getClaudeCodeOptions()
+      .then((r) => {
+        if (r.options?.length) {
+          setOptions(r.options);
+          const rec = r.options.find((o) => o.recommended);
+          if (rec) setMethod(rec.method);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const selected = options.find((o) => o.method === method);
+
+  async function submit() {
+    if (!token.trim()) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await devStudioApi.saveClaudeCodeCredential(sessionId, method, token.trim());
+      onSuccess();
+    } catch (e) {
+      setError((e as Error).message || 'No se pudo guardar la credencial');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="rounded-md border border-cyan-500/20 bg-cyan-500/5 px-3 py-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] font-semibold text-zinc-200">Conectar Claude Code</p>
+        <button onClick={onCancel} className="text-zinc-600 hover:text-zinc-400">
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {/* Method selector */}
+      <div className="space-y-1.5">
+        {options.map((opt) => {
+          const active = opt.method === method;
+          return (
+            <button
+              key={opt.method}
+              type="button"
+              onClick={() => setMethod(opt.method)}
+              className={cn(
+                'w-full text-left rounded border px-2.5 py-2 transition-colors',
+                active ? 'border-cyan-500/50 bg-cyan-500/10' : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700',
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <span className={cn(
+                  'flex h-3 w-3 items-center justify-center rounded-full border shrink-0',
+                  active ? 'border-cyan-400 bg-cyan-400' : 'border-zinc-700',
+                )}>
+                  {active && <Check className="h-2 w-2 text-zinc-950" />}
+                </span>
+                <span className="text-[11px] font-medium text-zinc-200">{opt.label}</span>
+                {opt.recommended && (
+                  <span className="ml-auto flex items-center gap-0.5 text-[9px] font-mono text-amber-400">
+                    <Star className="h-2.5 w-2.5 fill-amber-400" /> recomendado
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] text-zinc-500 mt-0.5 pl-5">{opt.description}</p>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Token input */}
+      <div className="space-y-1.5">
+        {selected?.hint && (
+          <p className="text-[10px] text-zinc-600 font-mono">{selected.hint}</p>
+        )}
+        <div className="relative">
+          <input
+            type={show ? 'text' : 'password'}
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+            placeholder={method === 'api_key' ? 'sk-ant-…' : 'token de Claude Code'}
+            className="w-full rounded border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 pr-8 text-xs font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+          />
+          <button
+            type="button"
+            onClick={() => setShow((s) => !s)}
+            className="absolute right-2 top-1.5 text-zinc-600 hover:text-zinc-400"
+          >
+            {show ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+          </button>
+        </div>
+        <p className="text-[9px] text-zinc-700">
+          El token se guarda cifrado y se inyecta en la máquina del agente en runtime. EVA nunca lo muestra.
+        </p>
+      </div>
+
+      {error && <p className="text-[10px] text-red-400">{error}</p>}
+
+      <button
+        onClick={submit}
+        disabled={loading || !token.trim()}
+        className="w-full rounded border border-cyan-500/20 bg-cyan-500/10 py-1.5 text-xs font-mono text-cyan-400 hover:bg-cyan-500/20 disabled:opacity-40 transition-colors"
+      >
+        {loading ? 'Conectando…' : 'Conectar Claude Code'}
+      </button>
+    </div>
+  );
+}
+
+// ── Small helpers ─────────────────────────────────────────────────────────────
 
 function Stat({ label, value, color }: { label: string; value: number; color: string }) {
   return (
@@ -487,7 +738,6 @@ function logTypeColor(type: string): string {
   return 'bg-zinc-800 text-zinc-400';
 }
 
-/** Human-readable one-line summary of a task_events payload. */
 function stepSummary(content: unknown): string {
   if (content == null) return '';
   if (typeof content === 'string') return content.slice(0, 90);
