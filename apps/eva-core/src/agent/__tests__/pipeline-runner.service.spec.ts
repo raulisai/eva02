@@ -166,15 +166,18 @@ describe('PipelineRunnerService', () => {
     });
 
     it('skips phases whose dependencies failed', async () => {
+      // Auto-repair attempts a second run when a phase fails (ok=false).
       agentLoop.run
-        .mockResolvedValueOnce({ ok: false, text: 'Error al crear informe', steps: [], tokensUsed: 50, toolsUsed: [] });
+        .mockResolvedValueOnce({ ok: false, text: 'Error al crear informe', steps: [], tokensUsed: 50, toolsUsed: [] })
+        .mockResolvedValueOnce({ ok: false, text: 'Repair también falló', steps: [], tokensUsed: 30, toolsUsed: [] });
 
       const outcome = await service.run(ORG, TASK, 'Crea informe, conviértelo a PDF y envíalo');
       expect(outcome.ok).toBe(false);
       expect(outcome.phases[0].status).toBe('failed');
       expect(outcome.phases[1].status).toBe('skipped');
       expect(outcome.phases[2].status).toBe('skipped');
-      expect(agentLoop.run).toHaveBeenCalledTimes(1);
+      // Auto-repair calls agentLoop.run once more for the failed phase.
+      expect(agentLoop.run).toHaveBeenCalledTimes(2);
     });
 
     it('marks phase failed and skips dependents when agentLoop throws', async () => {

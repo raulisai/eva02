@@ -4,6 +4,7 @@ import { SandboxService } from './sandbox.service';
 import { ModelRouterService } from '../model-router/model-router.service';
 import { EventBusService } from '../events/event-bus.service';
 import { DatabaseService } from '../database/database.service';
+import { classifyError } from './error-classifier';
 import type {
   PipelineDefinition,
   PipelineOutcome,
@@ -185,6 +186,8 @@ export class PipelineRunnerService {
     // Phases with dependsOn execute only after all their dependencies complete.
     try {
       let wave = 0;
+      // R-resilience: tracks which phases already consumed their one auto-repair attempt.
+      const retriedPhases = new Set<string>();
       while (phaseResults.some((r) => r.status === 'pending')) {
         // Collect all phases that are ready to run (all deps completed)
         const ready = pipeline.phases.filter((phase, i) => {
@@ -240,19 +243,43 @@ export class PipelineRunnerService {
           const phaseContext = contextParts.length > 0 ? contextParts.join('\n\n') : undefined;
 
           const phaseStart = Date.now();
-          try {
-            const outcome = await this.agentLoop.run(orgId, taskId, interpolatedGoal, {
-              maxSteps: phase.maxSteps,
-              context: phaseContext,
-              userId: opts.userId,
-              log,
-            });
+          // R-resilience: wall-clock timeout per phase (90s per step budget, min 2 min)
+          const phaseTimeoutMs = Math.max(phase.maxSteps * 90_000, 120_000);
 
-            result.durationMs = Date.now() - phaseStart;
-            result.stepsUsed = outcome.steps.length;
-            result.tokensUsed = outcome.tokensUsed;
+          // Helper: run one loop attempt for this phase with optional extra context.
+          const runPhaseAttempt = (extraContext?: string) => {
+            const parts = [...contextParts];
+            if (extraContext) parts.push(extraContext);
+            const ctx = parts.length > 0 ? parts.join('\n\n') : undefined;
+            const timeoutGuard = new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new Error(`timeout: fase "${phase.name}" superó ${Math.round(phaseTimeoutMs / 60_000)} min`)),
+                phaseTimeoutMs,
+              ).unref(),
+            );
+            return Promise.race([
+              this.agentLoop.run(orgId, taskId, interpolatedGoal, {
+                maxSteps: phase.maxSteps,
+                context: ctx,
+                userId: opts.userId,
+                log,
+              }),
+              timeoutGuard,
+            ]);
+          };
+
+          const applyOutcome = (outcome: Awaited<ReturnType<typeof this.agentLoop.run>>) => {
+            result.stepsUsed += outcome.steps.length;
+            result.tokensUsed += outcome.tokensUsed;
             totalTokens += outcome.tokensUsed;
             totalSteps += outcome.steps.length;
+          };
+
+          try {
+            const outcome = await runPhaseAttempt();
+
+            result.durationMs = Date.now() - phaseStart;
+            applyOutcome(outcome);
 
             if (outcome.ok && outcome.text) {
               result.status = 'completed';
@@ -263,15 +290,66 @@ export class PipelineRunnerService {
                 'pipeline-phase',
               );
             } else {
-              result.status = 'failed';
-              result.error = outcome.text || 'La fase no produjo resultado';
-              await log(`✗ "${phase.name}" falló: ${result.error.slice(0, 200)}`, 'pipeline-phase');
+              // Phase ran but produced no good result — R-resilience: auto-repair once
+              const firstError = outcome.text || 'La fase no produjo resultado';
+              let repaired = false;
+              if (!retriedPhases.has(phase.name)) {
+                retriedPhases.add(phase.name);
+                try {
+                  await log(`⟳ "${phase.name}" sin resultado — auto-repair con contexto de fallo`, 'pipeline-phase');
+                  const repairCtx = `[AUTO-REPAIR] Intento anterior no produjo resultado. Error: ${firstError.slice(0, 200)}. Cambia de estrategia y simplifica el enfoque.`;
+                  const repairOutcome = await runPhaseAttempt(repairCtx);
+                  applyOutcome(repairOutcome);
+                  result.durationMs = Date.now() - phaseStart;
+                  if (repairOutcome.ok && repairOutcome.text) {
+                    result.status = 'completed';
+                    result.output = repairOutcome.text;
+                    pipelineCtx[phase.outputKey] = repairOutcome.text;
+                    await log(`✓ "${phase.name}" auto-reparada — ${repairOutcome.steps.length} pasos adicionales`, 'pipeline-phase');
+                    repaired = true;
+                  }
+                } catch { /* fall through to failed */ }
+              }
+              if (!repaired) {
+                result.status = 'failed';
+                result.error = firstError;
+                result.durationMs = Date.now() - phaseStart;
+                await log(`✗ "${phase.name}" falló: ${firstError.slice(0, 200)}`, 'pipeline-phase');
+              }
             }
           } catch (err) {
-            result.status = 'failed';
-            result.error = (err as Error).message;
-            result.durationMs = Date.now() - phaseStart;
-            await log(`✗ "${phase.name}" error: ${result.error.slice(0, 200)}`, 'pipeline-phase');
+            const errMsg = (err as Error).message;
+            // R-resilience: on timeout/transient exception, auto-repair once
+            let repaired = false;
+            if (!retriedPhases.has(phase.name)) {
+              retriedPhases.add(phase.name);
+              const isTimeout = errMsg.startsWith('timeout:');
+              const { retryable, backoffMs } = classifyError(errMsg);
+              if (isTimeout || retryable) {
+                try {
+                  const waitMs = isTimeout ? 800 : backoffMs;
+                  await new Promise<void>((r) => setTimeout(r, waitMs));
+                  await log(`⟳ "${phase.name}" (${errMsg.slice(0, 80)}) — auto-repair`, 'pipeline-phase');
+                  const repairCtx = `[AUTO-REPAIR] Intento anterior: ${errMsg.slice(0, 200)}. Acelera y simplifica — usa el mínimo de pasos posible.`;
+                  const repairOutcome = await runPhaseAttempt(repairCtx);
+                  applyOutcome(repairOutcome);
+                  result.durationMs = Date.now() - phaseStart;
+                  if (repairOutcome.ok && repairOutcome.text) {
+                    result.status = 'completed';
+                    result.output = repairOutcome.text;
+                    pipelineCtx[phase.outputKey] = repairOutcome.text;
+                    await log(`✓ "${phase.name}" auto-reparada tras error`, 'pipeline-phase');
+                    repaired = true;
+                  }
+                } catch { /* fall through to failed */ }
+              }
+            }
+            if (!repaired) {
+              result.status = 'failed';
+              result.error = errMsg;
+              result.durationMs = Date.now() - phaseStart;
+              await log(`✗ "${phase.name}" error: ${errMsg.slice(0, 200)}`, 'pipeline-phase');
+            }
           }
 
           await this.savePipelineMetadata(orgId, taskId, pipeline, phaseResults, i + 1);

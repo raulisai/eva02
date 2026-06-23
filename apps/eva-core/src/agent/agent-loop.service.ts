@@ -43,6 +43,7 @@ import {
 import { Tier } from './tier';
 import { z } from 'zod';
 import { buildAlternativesHint } from './tool-alternatives';
+import { classifyError } from './error-classifier';
 import {
   DeliveryRequirement,
   deriveDeliveryRequirements,
@@ -93,6 +94,8 @@ export interface AgentLoopOptions {
   ladderLevel?: 3 | 4 | 5;
   /** Task tier from the runner triage — drives the initial model budget. */
   tier?: Tier;
+  /** R-resilience: hard wall-clock deadline for the whole loop (ms). Default derived from maxSteps. */
+  wallClockMs?: number;
 }
 
 type ToolExecutor = (orgId: string, taskId: string, args: Record<string, unknown>) => Promise<string>;
@@ -237,7 +240,7 @@ export class AgentLoopService {
     const defaultSteps = depth === 0 ? DEFAULT_ROOT_STEPS : profile?.maxSteps ?? DEFAULT_SUB_STEPS;
     const requestedMaxSteps = opts.maxSteps ?? defaultSteps;
     const minDeliverySteps = deliveryRequirements.length > 0 ? 12 : 1;
-    const maxSteps = Math.min(Math.max(requestedMaxSteps, minDeliverySteps), 20);
+    let maxSteps = Math.min(Math.max(requestedMaxSteps, minDeliverySteps), 20);
     const log = opts.log ?? (async () => undefined);
     const available = this.tools.filter((t) => {
       if (t.rootOnly && depth > 0) return false;
@@ -250,12 +253,17 @@ export class AgentLoopService {
     const goalSignals = depth === 0 ? this.extractGoalSignals(goal) : new Set<string>();
     const startedAt = Date.now();
 
+    // Wall-clock deadline — graceful synthesis if a step blocks indefinitely.
+    const defaultWallMs = maxSteps >= 15 ? 10 * 60_000 : maxSteps >= 8 ? 6 * 60_000 : 4 * 60_000;
+    const loopDeadlineAt = startedAt + (opts.wallClockMs ?? defaultWallMs);
+
     const steps: AgentLoopStep[] = [];
     let tokensUsed = 0;
     let parseFailures = 0;
     let formatHint: string | undefined;
     let dodRejections = 0;
     let stallCount = 0;
+    let stepExtended = false;
     // Budget policy: complex tasks (long/medium or with mandatory deliverables)
     // open at `balanced` so the trajectory-setting first decisions are sound.
     let budgetState: BudgetState = depth === 0
@@ -383,6 +391,12 @@ export class AgentLoopService {
       if (currentTask?.status === 'cancelled') {
         this.recordTrajectory(orgId, taskId, goal, steps, 'cancelled', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         throw new TaskCancelledError();
+      }
+
+      // R-resilience: wall-clock deadline — break and synthesize instead of blocking forever
+      if (Date.now() > loopDeadlineAt) {
+        await log(`agent-loop: tiempo de pared agotado (${Math.round((opts.wallClockMs ?? defaultWallMs) / 60_000)} min) — sintetizando con lo reunido`, 'loop');
+        break;
       }
 
       // Mid-loop steer — drain live user redirections injected via POST /tasks/:id/steer.
@@ -574,6 +588,11 @@ export class AgentLoopService {
         if (stallCount >= 2 && depth === 0 && this.intelligence) {
           plan = await this.intelligence.replan(orgId, taskId, goal, steps);
         }
+        // R-resilience: structural escalation on critical stall — suggest delegation escape hatch
+        if (stallCount >= 3) {
+          const stalledTool = steps[steps.length - 1]?.tool ?? 'la herramienta actual';
+          formatHint = `STALL CRÍTICO (${stallCount} ciclos seguidos): abandona "${stalledTool}". Opciones:\n1. Usa delegate{goal:"<sub-objetivo concreto>", role:"especialista"} para subcontratar la parte bloqueada.\n2. Responde final_answer honesto describiendo qué lograste y qué queda pendiente.`;
+        }
         this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
         continue;
       }
@@ -615,12 +634,9 @@ export class AgentLoopService {
               let observation: string;
               if (tool.name === 'delegate') {
                 observation = await this.runDelegate(orgId, taskId, d.args, depth, opts, log, steps);
-              } else if (tool.name === 'code_execute') {
-                observation = await this.runCodeExecute(orgId, taskId, d.args, opts);
-              } else if (tool.name === 'terminal_run') {
-                observation = await this.runTerminalRun(orgId, taskId, d.args, opts);
               } else {
-                observation = await tool.execute(orgId, taskId, d.args);
+                // R-resilience: transient retry handled inside dispatchToolWithRetry
+                observation = await this.dispatchToolWithRetry(tool, orgId, taskId, d.args, opts, log);
               }
               return { tool, decision: d, observation };
             } catch (error) {
@@ -679,27 +695,22 @@ export class AgentLoopService {
       }
 
       let observation: string;
-      try {
-        const guardError = await this.toolGuards(orgId, spec, decision.args, steps, depth, deliveryRequirements);
-        if (guardError) {
-          observation = guardError;
-        } else
-        if (spec.name === 'delegate') {
+      const guardError = await this.toolGuards(orgId, spec, decision.args, steps, depth, deliveryRequirements);
+      if (guardError) {
+        observation = guardError;
+      } else if (spec.name === 'delegate') {
+        try {
           observation = await this.runDelegate(orgId, taskId, decision.args, depth, opts, log, steps);
-        } else if (spec.name === 'code_execute') {
-          observation = await this.runCodeExecute(orgId, taskId, decision.args, opts);
-        } else if (spec.name === 'terminal_run') {
-          observation = await this.runTerminalRun(orgId, taskId, decision.args, opts);
-        } else {
-          observation = await spec.execute(orgId, taskId, decision.args);
+        } catch (error) {
+          if (error instanceof MissingInformationError) throw error;
+          observation = `ERROR: ${(error as Error).message.slice(0, 300)}`;
         }
-      } catch (error) {
-        if (error instanceof MissingInformationError) throw error;
-        observation = `ERROR: ${(error as Error).message.slice(0, 300)}`;
+      } else {
+        // R-resilience: transient retry with exponential backoff before burning a pivot step
+        observation = await this.dispatchToolWithRetry(spec, orgId, taskId, decision.args, opts, log);
       }
 
-      // P2: on ERROR, append concrete alternative routes so the model pivots
-      // immediately instead of retrying the same tool.
+      // P2: on ERROR, append concrete alternative routes so the model pivots immediately
       if (observation.startsWith('ERROR:')) {
         const availableToolNames = new Set(stepTools.map((t) => t.name));
         const altHint = buildAlternativesHint(spec.name, availableToolNames);
@@ -721,7 +732,31 @@ export class AgentLoopService {
         if (depth === 0 && this.intelligence) {
           plan = this.intelligence.updatePlanFromObservation(plan, observation);
         }
+        // R-resilience: adaptive step extension — grant up to 3 extra steps when converging near the end
+        if (!stepExtended && depth === 0 && i >= maxSteps - 3 && i < maxSteps - 1) {
+          const planDone = plan.filter((p) => p.status === 'done').length;
+          const errorRate = steps.filter((s) => s.observation.startsWith('ERROR:')).length / Math.max(steps.length, 1);
+          const converging = plan.length > 0 && planDone >= Math.ceil(plan.length * 0.6) && errorRate < 0.35 && stallCount === 0;
+          if (converging && this.missingDeliveryRequirements(steps, deliveryRequirements).length > 0) {
+            const ext = Math.min(3, 25 - maxSteps);
+            if (ext > 0) {
+              maxSteps += ext;
+              stepExtended = true;
+              await log(`agent-loop: +${ext} pasos por convergencia (${planDone}/${plan.length} fases, error rate ${(errorRate * 100).toFixed(0)}%)`, 'loop');
+            }
+          }
+        }
       }
+
+      // R-resilience: early exit on confirmed thrashing (≥3 stalls + majority errors)
+      {
+        const errorCount = steps.filter((s) => s.observation.startsWith('ERROR:')).length;
+        if (stallCount >= 3 && steps.length >= 6 && errorCount >= Math.floor(steps.length * 0.6)) {
+          await log(`agent-loop: thrashing crítico (${errorCount}/${steps.length} errores, ${stallCount} stalls) — síntesis anticipada`, 'loop');
+          break;
+        }
+      }
+
       this.recordTrajectory(orgId, taskId, goal, steps, 'running', tokensUsed, depth, startedAt, stallCount, dodRejections, modelBudgetPerStep);
     }
 
@@ -1711,6 +1746,18 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
       blackboard: opts.blackboard,
     });
     if (sub.ok) {
+      // R-resilience: mini quality gate — empty/degenerate output triggers one retry with a specialist role
+      if (sub.text.trim().length < 5 && depth === 0 && (role ?? '') !== 'especialista') {
+        const altRole = 'especialista';
+        await log(`agent-loop: sub-agente (${role ?? 'generalista'}) respuesta trivial — reintentando con ${altRole}`, 'loop');
+        const retry = await this.run(orgId, taskId, subGoal, {
+          depth: depth + 1, role: altRole, context, userId: opts.userId, log, blackboard: opts.blackboard,
+        });
+        if (retry.ok && retry.text.trim().length > 25) {
+          if (opts.blackboard) opts.blackboard[`${altRole}: ${subGoal}`] = retry.text;
+          return retry.text;
+        }
+      }
       if (opts.blackboard) {
         const key = role ? `${role}: ${subGoal}` : subGoal;
         opts.blackboard[key] = sub.text;
@@ -1719,6 +1766,56 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     }
     const lastError = [...sub.steps].reverse().find((s) => s.observation.startsWith('ERROR:'));
     return `ERROR: el sub-agente (${role ?? 'generalista'}) no resolvió "${subGoal.slice(0, 80)}".${lastError ? ` Último error: ${this.truncate(lastError.observation, 160)}.` : ''} Prueba otro rol, divide distinto el objetivo o resuélvelo tú con otra herramienta.`;
+  }
+
+  /**
+   * R-resilience: dispatches a tool and retries up to 2× with exponential backoff if the
+   * error is classified as transient (timeout, 503, Docker cold-start, etc.).
+   * Permanent errors (auth, bad-args) are returned immediately — no retry wasted.
+   * delegate is excluded (it calls run() recursively and manages its own resilience).
+   */
+  private async dispatchToolWithRetry(
+    spec: ToolSpec,
+    orgId: string,
+    taskId: string,
+    args: Record<string, unknown>,
+    opts: AgentLoopOptions,
+    log: (m: string, s: string) => Promise<unknown>,
+  ): Promise<string> {
+    const invoke = async (): Promise<string> => {
+      if (spec.name === 'code_execute') return this.runCodeExecute(orgId, taskId, args, opts);
+      if (spec.name === 'terminal_run') return this.runTerminalRun(orgId, taskId, args, opts);
+      return spec.execute(orgId, taskId, args);
+    };
+
+    let obs: string;
+    try {
+      obs = await invoke();
+    } catch (err) {
+      if (err instanceof MissingInformationError) throw err;
+      obs = `ERROR: ${(err as Error).message.slice(0, 300)}`;
+    }
+
+    // Skip retries in test environment to keep tests fast and deterministic.
+    const isTestEnv = process.env.NODE_ENV === 'test';
+
+    for (let attempt = 1; attempt <= 2 && !isTestEnv && obs.startsWith('ERROR:'); attempt++) {
+      const { retryable, backoffMs } = classifyError(obs.slice(6));
+      if (!retryable) break;
+      await log(
+        `agent-loop: error transitorio "${spec.name}" — reintento ${attempt}/2 (backoff ${backoffMs * attempt}ms)`,
+        'loop',
+      );
+      await new Promise<void>((r) => setTimeout(r, backoffMs * attempt));
+      try {
+        obs = await invoke();
+      } catch (err) {
+        if (err instanceof MissingInformationError) throw err;
+        obs = `ERROR: ${(err as Error).message.slice(0, 300)}`;
+      }
+    }
+
+    return obs;
   }
 
   private async synthesizeRecoveryOptions(orgId: string, taskId: string, goal: string, steps: AgentLoopStep[]): Promise<GenerateResult> {
