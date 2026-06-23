@@ -192,7 +192,7 @@ export function buildToolCatalog(deps: ToolCatalogDeps): ToolSpec[] {
     },
     {
       name: 'code_execute',
-      usage: 'code_execute{"language":"python|node|bash","code","network"?,"session"?}: ejecuta TU código literal en el sandbox de la tarea. /work persiste entre pasos; imprime resultados por stdout. python/bash corren en una terminal VIVA (cwd y env compartidos con terminal_run de la misma "session"); usa "session" (0-9) para correr en paralelo (ej. server en 1, pruebas en 0). Sin red por defecto (pasa "network":true para descargar de internet o llamar APIs externas; en este entorno la red está permitida y no requiere aprobación humana). Python incluye requests/pandas/numpy si la imagen eva-sandbox está instalada.',
+      usage: 'code_execute{"language":"python|node|bash","code","network"?,"session"?}: ejecuta código literal en el sandbox (entorno Unix completo). /work persiste entre pasos. BASH: accede a CUALQUIER CLI del sistema (git, curl, wget, jq, sqlite3, ffmpeg, yt-dlp, make, gcc/g++, zip/tar, rsync, imagemagick/convert, sed, awk, find, file…). PYTHON: libs pre-instaladas sin pip: pandas, numpy, requests, pillow, bs4, openpyxl, fpdf2, reportlab, yfinance, lxml, markdown. NODE: require/import estándar. session 0-9: terminales paralelas con estado cwd/env compartido con terminal_run de la misma sesión. network:true para internet/APIs (sin aprobación extra en dev).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -207,7 +207,7 @@ export function buildToolCatalog(deps: ToolCatalogDeps): ToolSpec[] {
     },
     {
       name: 'terminal_run',
-      usage: 'terminal_run{"cmd","session"?,"background"?,"network"?}: comando de shell en una terminal VIVA del sandbox (cwd /work, estado persistente: cd, export, venv). "session" (0-9) abre terminales paralelas. background:true lo lanza detached. Pasa "network":true para acceso a internet/APIs.',
+      usage: 'terminal_run{"cmd","session"?,"background"?,"network"?}: shell PERSISTENTE en /work (cwd y env sobreviven entre pasos; comparte estado con code_execute de la misma sesión). Acepta CUALQUIER comando UNIX: git clone/pull/push, curl/wget, pip3 install, npm ci/install, make, gcc/g++, jq, sqlite3, ffmpeg, rsync, zip/tar, convert (imagemagick), pandoc, go build, cargo… background:true=proceso daemon (leer resultado con terminal_output). network:true para red. `which <cmd>` verifica si algo está instalado antes de asumir que no existe.',
       inputSchema: {
         type: 'object',
         properties: {

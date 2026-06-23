@@ -856,12 +856,30 @@ export class AgentLoopService {
       blocks.push('', extras.skillsIndexBlock);
     }
 
+    const has = (name: string) => tools.some((t) => t.name === name);
+
     blocks.push(
       '',
       'HERRAMIENTAS:',
       ...tools.map((t) => `- ${t.usage}`),
       '- final_answer{"text"}: entrega la respuesta final al usuario (español, directa).',
     );
+
+    // Sandbox capability block — always injected when execution tools are available so
+    // the model knows the full Unix environment BEFORE it decides how to solve a problem.
+    if (has('code_execute') || has('terminal_run')) {
+      blocks.push(
+        '',
+        'SANDBOX — ENTORNO UNIX COMPLETO (tu laboratorio de ejecución):',
+        '- /work: directorio compartido entre TODOS los pasos de esta tarea. Archivos que escribes aquí persisten.',
+        '- CLIs disponibles (sin `apt install`): git · curl · wget · jq · sqlite3 · ffmpeg · yt-dlp · zip/tar/gzip · rsync · imagemagick (convert/identify) · grep · sed · awk · find · file · pandoc (si disponible)',
+        '- Lenguajes: python3 (con pip3) · node/npm · bash · go · gcc/g++ (si imagen eva-sandbox)',
+        '- Python pre-instalado (sin pip): pandas · numpy · requests · pillow · bs4 · openpyxl · fpdf2 · reportlab · yfinance · lxml · markdown · python-dateutil · yt-dlp',
+        '- Descubrimiento: ejecuta `which <cmd>` o `<cmd> --version` ANTES de asumir que algo no está. `pip3 list | grep X` para Python. NUNCA declares que algo es imposible sin verificar primero.',
+        '- Composición: escribe un script en /work con code_execute → ejecútalo con terminal_run. Inicia un servidor en session=1 → prueba desde session=0. Encadena pipes en bash para procesar datos sin Python.',
+        '- REGLA: si una herramienta específica falla, bash+curl/jq/python puede cubrir casi cualquier necesidad. SIEMPRE hay una ruta alternativa.',
+      );
+    }
 
     // ── Contextual tier: relevant executable skills (code-based, ranked by outcome) ──
     if (extras.skills.length > 0) {
@@ -932,7 +950,6 @@ export class AgentLoopService {
       );
     }
 
-    const has = (name: string) => tools.some((t) => t.name === name);
     blocks.push(
       '',
       'REGLAS:',
@@ -950,7 +967,7 @@ export class AgentLoopService {
         ? ['- Antes de resolver desde cero, revisa el indice de skills del prompt (## Skills). Si alguna aplica, cargala con skill_view{"slug":"..."} y sigue sus instrucciones.']
         : []),
       ...(has('code_execute') || has('terminal_run')
-        ? ['- Usa code_execute/terminal_run para explorarte y corregirte: escribir, ejecutar, observar errores, ajustar y verificar es la ruta normal para mejorar tus propias soluciones.']
+        ? ['- Usa code_execute/terminal_run para explorarte y corregirte: escribir, ejecutar, observar errores, ajustar y verificar es la ruta normal. BASH y Python son comodines universales: git para repositorios, curl/requests para APIs, jq para JSON, sqlite3 para datos relacionales, ffmpeg para multimedia, imagemagick para imágenes, grep/awk/sed para texto. Si dudas de disponibilidad, ejecuta `which <cmd>` o `<cmd> --help` antes de asumir que no existe.']
         : []),
       ...(has('skill_save') || has('skill_manage')
         ? ['- Tras una tarea compleja, codigo reutilizable o un fix dificil, guarda o parchea el aprendizaje con skill_save/skill_manage antes del final_answer cuando tengas evidencia de que funciona.']
@@ -976,8 +993,8 @@ export class AgentLoopService {
               : []),
           ]
         : []),
-      '- Si una herramienta devuelve ERROR, NO repitas lo mismo ni te rindas: corrige los args, prueba otra herramienta o un enfoque distinto (ej. web_search si falla una API, code_execute si falla una búsqueda).',
-      '- PROHIBIDO pip/npm install en loop: si un `pip install X` falla, NO lo repitas. En su lugar usa una librería ya disponible del sandbox (ver lista arriba). Gastar más de 1 paso en pip install es un ciclo de estancamiento.',
+      '- ANTE ERROR — diagnóstico antes de rendirte: (1) ¿arg incorrecto? corrígelo. (2) ¿comando no encontrado? ejecuta `which X` para verificar. (3) ¿lib Python faltante? busca equivalente en la lista pre-instalada. (4) ¿API caída? usa curl/requests para llamar directamente o busca alternativa pública. (5) ¿enfoque equivocado? cambia de ángulo: lo que no logras con web_search, hazlo con code_execute+requests; lo que no logras con Python, hazlo con bash+jq/sqlite3/awk; lo que no logras con terminal_run, hazlo con code_execute python subprocess. SIEMPRE hay una ruta alternativa — declara imposibilidad solo después de agotar al menos 2 enfoques distintos.',
+      '- PROHIBIDO pip/npm install en loop: si `pip install X` falla, NO lo repitas. Usa una librería pre-instalada equivalente del sandbox (ver bloque SANDBOX arriba). Gastar más de 1 paso en pip install es un ciclo de estancamiento.',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
       '- NUNCA inventes salida que ninguna herramienta produjo (datos, contenidos de archivo, respuestas de API). Reportar un bloqueo honesto siempre vale más que un resultado fabricado.',
       ...(has('skill_save')
