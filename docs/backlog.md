@@ -4,6 +4,15 @@ This backlog keeps only relevant, actionable improvements. Completed work moves 
 
 ---
 
+## 0ac. Agent Runner — fin del bucle de re-ejecución / reenvío a Telegram (shipped 2026-06-23)
+Síntoma: una tarea (búsqueda de canción) reenviaba el mismo mensaje a Telegram en bucle y el log mostraba `Cannot transition task from 'completed' to 'completed'`. Raíz: `run()` no se protegía contra ejecución concurrente — entre el guard `status==='pending'` y la transición a `planning` hay mucho `await`, así que múltiples `task.created` para la misma tarea (re-queue de `recoverStuckTasks`, sweep `expireTimedOutInputs`, re-reply del usuario) la ejecutaban en paralelo; cada pasada publicaba `task.result`/`task.say` → reenvío. Además varios paths completaban dos veces.
+- [x] **Claim por tarea**: `run()` reclama la tarea sincrónicamente en un `Set` in-process (antes de cualquier `await`) + `tryLock` distribuido por taskId; los `task.created` duplicados se descartan. `executeRun()` contiene el cuerpo previo.
+- [x] **`deliver()` idempotente**: si la tarea ya está terminal, NO republica `task.result` (no reenvía a Telegram) ni vuelve a transicionar. Elimina el crash `completed→completed` y los reenvíos de ejecuciones tardías/duplicadas.
+- [x] **Doble-completado eliminado**: `answerWaitingInputIfAny` y el handler de aprobación por chat ya no transicionan a `completed` antes de `deliver()` (deliver es el único punto de completado); el catch de aprobación publica el error sin completar y luego marca `failed`.
+- [x] **Tope de re-ejecuciones**: `metadata.run_count` corta en `MAX_TASK_RUNS=8` → `failSafely` en vez de reenviar indefinidamente (no se queda con tareas a medias ni spamea).
+- [x] **No resucitar tareas terminadas**: al entregar, se marcan `cancelled` los `agent_input_requests` aún `pending` para que `expireTimedOutInputs` no re-encole una tarea ya entregada.
+- [x] Tests de regresión en `agent-runner.service.spec.ts` (guard de concurrencia, tope de re-queue, supresión de entrega duplicada).
+
 ## 0aa. Dev Studio — Robustez de flujo + login Claude Code verificable (shipped 2026-06-19)
 **Anti-atasco (P0):**
 - [x] **Heartbeat + reconciliación**: `DevOrchestratorService` corre un barrido cada 2 min (`recoverAndSweep`) + uno al boot. Boot: re-encola tareas huérfanas de iteraciones `running` viejas (>15 min) tras crash/reinicio. Heartbeat: re-tickea sesiones `running` sin avance (>3 min). Idempotente (guard + _tick cortocircuitan si hay trabajo vivo). `listStaleRunningSessions/Iterations` + `requeueOrphanedTasks` en `dev-session.service`.

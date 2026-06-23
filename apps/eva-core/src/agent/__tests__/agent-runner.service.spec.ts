@@ -203,7 +203,12 @@ describe('AgentRunnerService', () => {
         },
         {
           provide: EventBusService,
-          useValue: { publish: jest.fn().mockResolvedValue('0-1'), on: jest.fn() },
+          useValue: {
+            publish: jest.fn().mockResolvedValue('0-1'),
+            on: jest.fn(),
+            tryLock: jest.fn().mockResolvedValue(true),
+            releaseLock: jest.fn().mockResolvedValue(undefined),
+          },
         },
         {
           provide: TasksService,
@@ -2501,6 +2506,49 @@ describe('AgentRunnerService', () => {
       expect(context[1]).toEqual({ role: 'assistant', text: 'Enviar WhatsApp a Juan' });
       expect(context[2]).toEqual({ role: 'user', text: 'dame tu email' });
       expect(context[3]).toEqual({ role: 'assistant', text: '¿Cuál es tu email?' });
+    });
+  });
+
+  describe('loop / duplicate-execution guards', () => {
+    it('does not execute the same task twice concurrently (in-flight guard)', async () => {
+      let releaseFirst: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+      let getTaskCalls = 0;
+      tasks.getTask.mockImplementation(async () => {
+        getTaskCalls += 1;
+        if (getTaskCalls === 1) await gate; // park the first run inside executeRun
+        return makeTask({ description: 'hola' });
+      });
+
+      const first = service.run(ORG, TASK);
+      await Promise.resolve(); // let the first run claim the task and reach getTask
+      await service.run(ORG, TASK); // second event for same task → must be skipped
+      expect(modelRouter.generate).not.toHaveBeenCalled();
+
+      releaseFirst();
+      await first;
+      expect(modelRouter.generate).toHaveBeenCalledTimes(1); // executed exactly once
+    });
+
+    it('stops a runaway re-queue loop after MAX_TASK_RUNS without re-sending', async () => {
+      tasks.getTask.mockResolvedValue(makeTask({ status: 'pending', metadata: { run_count: 8 } }));
+
+      await service.run(ORG, TASK);
+
+      expect(modelRouter.generate).not.toHaveBeenCalled();
+      expect(pipeline.run).not.toHaveBeenCalled();
+      expect(tasks.transition).toHaveBeenCalledWith(TASK, ORG, 'failed', expect.anything());
+    });
+
+    it('deliver suppresses a duplicate/late delivery once the task is terminal', async () => {
+      tasks.getTask.mockResolvedValue(makeTask({ status: 'completed' }));
+
+      await (service as any).deliver(ORG, TASK, 'respuesta', 'agent-loop', 0);
+
+      expect(events.publish).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'task.result' }),
+      );
+      expect(tasks.transition).not.toHaveBeenCalled();
     });
   });
 });

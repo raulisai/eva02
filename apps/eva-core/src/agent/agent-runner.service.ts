@@ -11,7 +11,7 @@ import { ApprovalsService } from '../approvals/approvals.service';
 import { ToolRouterService } from '../tool-router/tool-router.service';
 import { TasksService } from '../tasks/tasks.service';
 import { DatabaseService } from '../database/database.service';
-import { Task, TaskCancelledError } from '../tasks/task.types';
+import { Task, TaskCancelledError, TERMINAL_STATUSES } from '../tasks/task.types';
 import { ConversationDigesterService } from './conversation-digester.service';
 import { DriveFetchResult, GoogleDriveService } from './google-drive.service';
 import { CreateEventInput } from './google-calendar.service';
@@ -280,6 +280,19 @@ export class AgentRunnerService implements OnApplicationBootstrap {
   private readonly crossChannelCtx = new Map<string, { channel: CommunicationChannel; userId: string }>();
   private readonly activeToolSessions = new Map<string, { tool: string; details?: any; updatedAt: number }>();
   private readonly TOOL_SESSION_TTL_MS = 10 * 60 * 1000; // 10 minutes
+  // Tasks executing on THIS node right now. Guards against duplicate concurrent
+  // runs when `task.created` fires more than once for the same task (re-queue on
+  // restart, autonomy input-timeout sweep, scheduler retry, user re-reply). Without
+  // this, two runs both pass the `status === 'pending'` check, both execute the
+  // agent loop, and both deliver → duplicate Telegram messages + "Cannot transition
+  // from 'completed' to 'completed'".
+  private readonly inFlightTasks = new Set<string>();
+  // Hard ceiling on how many times a single task may (re)execute. Normal flows run
+  // 1–3 times (initial run + approval/input resumes). Anything past this is a runaway
+  // re-queue loop — fail it permanently instead of resending forever.
+  private readonly MAX_TASK_RUNS = 8;
+  // TTL for the cross-node run lock. Generous: must outlast the longest agent-loop run.
+  private readonly RUN_LOCK_TTL_MS = 15 * 60 * 1000;
   private routes: RunnerRoute[] = [];
 
   constructor(
@@ -427,10 +440,10 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       .eq('id', waiting.id);
     await this.tasks.transition(replyTask.id, orgId, 'planning');
     await this.tasks.transition(replyTask.id, orgId, 'running');
-    await this.tasks.transition(replyTask.id, orgId, 'completed', {
-      result: { text: 'Respuesta recibida. Continúo con la tarea pendiente.', model: 'input-resume' },
-    });
     await this.events.publish({ type: 'task.created', orgId, taskId: waiting.id, payload: { resumed_from_input_request_id: request.id } });
+    // deliver() is the single completion point — it emits task.result and transitions
+    // running→completed once. (A prior explicit 'completed' transition here made the
+    // subsequent deliver throw 'completed'→'completed'.)
     await this.deliver(orgId, replyTask.id, 'Respuesta recibida. Continúo con la tarea pendiente.', 'input-resume', 0);
     return true;
   }
@@ -1133,7 +1146,38 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     return true;
   }
 
+  /**
+   * Entry point for every `task.created` event. Serializes execution per task so a
+   * task can never run twice at once, no matter how many times the event fires.
+   */
   async run(orgId: string, taskId: string): Promise<void> {
+    const key = `${orgId}:${taskId}`;
+    // Same-node guard: claim the task SYNCHRONOUSLY (before any await) so two
+    // concurrent task.created events can't both pass the check then both proceed.
+    if (this.inFlightTasks.has(key)) {
+      this.logger.debug(`run() skipped — task ${taskId} already in flight on this node`);
+      return;
+    }
+    this.inFlightTasks.add(key);
+    // Cross-node guard (best-effort; fail-open so a Redis outage can't wedge runs).
+    const canLock = typeof this.events.tryLock === 'function';
+    let acquired = false;
+    try {
+      if (canLock) {
+        acquired = await this.events.tryLock(`task-run:${taskId}`, this.RUN_LOCK_TTL_MS);
+        if (!acquired) {
+          this.logger.debug(`run() skipped — task ${taskId} claimed by another worker`);
+          return;
+        }
+      }
+      await this.executeRun(orgId, taskId);
+    } finally {
+      this.inFlightTasks.delete(key);
+      if (acquired) await this.events.releaseLock(`task-run:${taskId}`).catch(() => undefined);
+    }
+  }
+
+  private async executeRun(orgId: string, taskId: string): Promise<void> {
     let task: Task;
     try {
       task = await this.tasks.getTask(taskId, orgId);
@@ -1141,6 +1185,23 @@ export class AgentRunnerService implements OnApplicationBootstrap {
       return; // task vanished — nothing to do
     }
     if (task.status !== 'pending') return;
+
+    // Runaway re-queue guard: if this task has already executed too many times it is
+    // stuck in a resend loop (e.g. completes, gets resurrected, completes again…).
+    // Stop it permanently instead of spamming the user's channel forever.
+    const runCount = (Number((task.metadata as Record<string, unknown>)?.['run_count']) || 0) + 1;
+    if (runCount > this.MAX_TASK_RUNS) {
+      this.logger.warn(`Task ${taskId} exceeded ${this.MAX_TASK_RUNS} runs — stopping re-queue loop`);
+      await this.failSafely(orgId, taskId, `La tarea se reintentó demasiadas veces (${runCount}) sin completarse; la detengo para no repetir mensajes.`);
+      return;
+    }
+    try {
+      await this.db.admin
+        .from('tasks')
+        .update({ metadata: { ...(task.metadata as Record<string, unknown> ?? {}), run_count: runCount } })
+        .eq('org_id', orgId)
+        .eq('id', taskId);
+    } catch { /* best-effort counter — never block execution */ }
 
     const rawInput = task.description ?? task.title;
 
@@ -1180,10 +1241,8 @@ export class AgentRunnerService implements OnApplicationBootstrap {
             if (isConfirm) {
               await this.log(orgId, taskId, `User confirmed approval ${approval.id} via chat: "${rawInput}"`, 'approval');
               await this.approvals.approve(approval.id, orgId, task.created_by);
+              // deliver() emits task.result and transitions running→completed once.
               await this.deliver(orgId, taskId, 'Aprobación recibida. Ejecutando la acción...', 'approval-chat', 0);
-              await this.tasks.transition(taskId, orgId, 'completed', {
-                result: { text: 'Aprobación recibida. Ejecutando la acción...', model: 'approval-chat' },
-              });
             } else {
               await this.log(orgId, taskId, `User rejected approval ${approval.id} via chat: "${rawInput}"`, 'approval');
               await this.approvals.reject(approval.id, orgId, task.created_by, 'Cancelado por el usuario en el chat');
@@ -1191,9 +1250,6 @@ export class AgentRunnerService implements OnApplicationBootstrap {
                 result: { text: 'La acción fue desaprobada y la tarea se canceló.', model: 'approval-chat' },
               });
               await this.deliver(orgId, taskId, 'Entendido. Cancelé la acción y la tarea pendiente.', 'approval-chat', 0);
-              await this.tasks.transition(taskId, orgId, 'completed', {
-                result: { text: 'Entendido. Cancelé la acción y la tarea pendiente.', model: 'approval-chat' },
-              });
             }
           } catch (err) {
             const errorMsg = (err instanceof Error) && err.message === 'Approval is expired'
@@ -1201,8 +1257,13 @@ export class AgentRunnerService implements OnApplicationBootstrap {
               : `Error al procesar la aprobación: ${(err as Error).message}`;
 
             await this.log(orgId, taskId, `Approval error: ${(err as Error).message}`, 'approval');
-            await this.deliver(orgId, taskId, errorMsg, 'approval-chat', 0);
-
+            // Surface the error on the user's channel WITHOUT completing — the task
+            // is failing, so emit the result then transition to 'failed' (deliver()
+            // would mark it completed and make the failed transition invalid).
+            await this.events.publish({
+              type: 'task.result', orgId, taskId,
+              payload: { text: errorMsg, model: 'approval-chat', latency_ms: 0 },
+            }).catch(() => undefined);
             await this.tasks.transition(taskId, orgId, 'failed', {
               result: { text: errorMsg, model: 'approval-chat' },
             });
@@ -1418,6 +1479,22 @@ export class AgentRunnerService implements OnApplicationBootstrap {
 
   /** Final answer event + completed transition with the result persisted. */
   private async deliver(orgId: string, taskId: string, text: string, model: string, latencyMs: number) {
+    // Idempotency: if the task already reached a terminal state, a duplicate/late
+    // execution is trying to deliver again. Publishing task.result here would re-send
+    // the message to Telegram and the transition would throw 'completed'→'completed'.
+    // Suppress both — deliver exactly once.
+    let current: Task | null = null;
+    try {
+      current = await this.tasks.getTask(taskId, orgId);
+    } catch {
+      return; // task vanished
+    }
+    if (TERMINAL_STATUSES.includes(current.status)) {
+      this.crossChannelCtx.delete(taskId);
+      this.logger.warn(`deliver skipped — task ${taskId} already '${current.status}' (duplicate delivery suppressed)`);
+      return;
+    }
+
     const cross = this.crossChannelCtx.get(taskId);
     this.crossChannelCtx.delete(taskId); // clean up regardless of outcome
     const payload: Record<string, unknown> = { text, model, latency_ms: latencyMs };
@@ -1429,6 +1506,22 @@ export class AgentRunnerService implements OnApplicationBootstrap {
     await this.tasks.transition(taskId, orgId, 'completed', {
       result: { text, model, latency_ms: latencyMs },
     });
+    // Close any input request still marked pending so the autonomy timeout sweep
+    // (expireTimedOutInputs) can't resurrect this finished task into a new run.
+    await this.cancelPendingInputRequests(orgId, taskId);
+  }
+
+  /** Best-effort: mark a finished task's open input requests as cancelled so the
+   *  input-timeout sweep never re-queues a task that has already been delivered. */
+  private async cancelPendingInputRequests(orgId: string, taskId: string): Promise<void> {
+    try {
+      await this.db.admin
+        .from('agent_input_requests')
+        .update({ status: 'cancelled' })
+        .eq('org_id', orgId)
+        .eq('task_id', taskId)
+        .eq('status', 'pending');
+    } catch { /* best-effort cleanup — never block delivery */ }
   }
 
   /** Image/audio attachments when the order asks for them (bucket + task.media). */
