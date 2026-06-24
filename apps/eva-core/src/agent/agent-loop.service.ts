@@ -1,4 +1,5 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as pathLib from 'node:path';
 import * as os from 'node:os';
@@ -2062,9 +2063,14 @@ Si alguno no se cumple o falta verificar, responde con una explicación de qué 
     const language: SandboxLanguage = rawLang === 'node' || rawLang === 'bash' ? rawLang : 'python';
     const description = `Resuelve: ${goal.slice(0, 220)} (sedimentada automáticamente del agent-loop)`;
 
+    // Use a short hash of the goal + code as slug so the slug is opaque to the
+    // model: a human-readable slug like "loop-busca-danza-del-fuego" appears in
+    // prepareExecution's SKILLS DISPONIBLES list and can cause the model to
+    // re-schedule the same personal request on every subsequent autonomy tick.
+    const goalHash = createHash('sha256').update(goal + code).digest('hex').slice(0, 10);
     void this.skillLibrary
       .register(orgId, {
-        slug: `loop-${goal}`,
+        slug: `loop-${goalHash}`,
         displayName: goal.slice(0, 80),
         description,
         language,

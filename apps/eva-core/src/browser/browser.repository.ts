@@ -115,6 +115,12 @@ export class BrowserRepository {
   }
 
   async findSessionOrThrow(sessionId: string, orgId: string): Promise<BrowserSession> {
+    // Guard: PostgreSQL UUID columns reject non-UUID strings with 22P02.
+    // The agent sometimes passes descriptive names (e.g. "danza_fuego_download")
+    // instead of a real session UUID — catch that before hitting the DB.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+      throw new NotFoundException(`Browser session "${sessionId}" not found — expected a UUID. Use browser_open first to get a valid session_id.`);
+    }
     const { data, error } = await this.db.admin
       .from('browser_sessions')
       .select('*')

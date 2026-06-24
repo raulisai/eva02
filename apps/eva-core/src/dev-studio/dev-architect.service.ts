@@ -162,8 +162,11 @@ Genera las tareas técnicas para esta iteración.`.trim();
       }
 
       // Sanitize and enrich tasks
+      const defaultRole = (tierConfig.availableRoles[0] ?? 'full_stack') as TechnicalTask['role'];
       parsed.tasks = parsed.tasks.map((t, i) => ({
         ...t,
+        // Normalise role early so the guard and branchName always have a valid value.
+        role: (t.role && tierConfig.availableRoles.includes(t.role)) ? t.role : defaultRole,
         priority: t.priority ?? (100 - i * 10),
         dependsOn: (t.dependsOn ?? []).map((dep) => typeof dep === 'number' ? `task-${dep}` : String(dep)),
         acceptanceCriteria: (t.acceptanceCriteria ?? []).map((c, ci) => ({

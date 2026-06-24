@@ -28,10 +28,11 @@ Síntoma: una tarea (búsqueda de canción) reenviaba el mismo mensaje a Telegra
 - [x] **Fix handler muerto**: `updateIterationStatus` ahora publica `sessionId` en `dev.iteration.updated` (el handler del orquestador lo exigía → nunca disparaba).
 
 **Login Claude Code (P1):**
+- [x] Login manual sincronizado: `claude auth status --json` libera el provisioning y reanuda la sesión sin llamada de modelo.
 - [x] **Validación de token al guardar**: `verifyToken()` corre `claude -p` 1-turn en contenedor efímero; `POST .../claude-code/credential` rechaza con 400 si el token es claramente inválido (no bloquea por fallos de infra).
 - [x] **`verifyAuth()` por máquina**: tras bootear una máquina de código, el orquestador verifica login dentro del contenedor y guarda `metadata.machine.authOk` + emite `dev.agent.machine{auth_ok|auth_failed}`. UI: chip "🔑 logueado / token inválido" en el panel del agente.
 - [x] **AUTH_FAILED tipado**: `run()` detecta errores de auth (regex) y los marca; el orquestador reabre el provisioning `claude_code_auth` y re-encola la task en vez de un blocker genérico; `handleAgentFailure` es idempotente respecto al provisioning.
-- [x] **OAuth automático tolerante a terminal**: `claude auth login` ahora corre con env vars dentro de `docker exec` (`TERM=dumb`, `NO_COLOR`, `COLUMNS=4096`) y el runner reconstruye URLs OAuth completas desde salida envuelta, OSC hyperlinks o query fragments antes de caer al modo terminal manual; no envía Enter automático al prompt de código y acepta submits duplicados/tardíos si el código ya está en vuelo o la credencial ya se guardó.
+- [x] **OAuth automático tolerante a terminal**: `claude auth login` ahora corre con env vars dentro de `docker exec` (`TERM=dumb`, `NO_COLOR`, `COLUMNS=4096`) y el runner reconstruye URLs OAuth completas desde salida envuelta, OSC hyperlinks o query fragments antes de caer al modo terminal manual; no envía Enter automático al prompt de código, acepta submits duplicados/tardíos y reconoce `claude auth status --json` como fuente de verdad cuando la CLI mantiene el token dentro de la máquina sin exportarlo a la integración del org.
 
 **Debuggability (P2):**
 - [x] **`claude.exit` inspeccionable**: cada run de Claude Code emite a `dev_events` su exit (ok/auth_failed/error) con image, container y cola del stderr.
@@ -43,7 +44,7 @@ Síntoma: una tarea (búsqueda de canción) reenviaba el mismo mensaje a Telegra
 - [x] **Aviso de fallback de imagen**: `bootMachine` emite `fallback` cuando el rol cae a la imagen base por no estar construida la especializada.
 
 ### Pendiente
-- [ ] **P0 — Reanudación de waves encoladas**: `dispatchQueuedTasks()`/`runWaveFromQueued()` ejecutan tareas recuperadas o reanudadas, pero no cierran la `dev_iteration`, no conservan el DAG, ignoran el booleano de `runAgentTask()` y no disparan el tick final. Un fallo de máquina deja la sesión en `running` y el heartbeat solo agrega `orchestrator.tick`. Unificar este camino con `dispatchTaskWaves()` y cubrir provisioning/restart/fallo total con tests.
+- [ ] **P1 — Restaurar DAG al reanudar waves encoladas**: la reanudación ya cierra la iteración, respeta fallos y dispara el tick final con lectura `org_id`; aún debe reconstruir `depends_on` antes de ejecutar varias tareas en paralelo.
 - [ ] **P0 — Restaurar scoping multi-tenant en Dev Studio**: la lectura de `dev_iterations` en `runWaveFromQueued()` y la lectura de la iteración actual en `getFlowState()` filtran por `id` pero omiten `.eq('org_id', orgId)`. Corregir ambas y añadir aserciones de tenancy.
 - [ ] **P1 — Heartbeat basado en progreso real**: `listStaleRunningSessions()` usa `dev_sessions.updated_at`, pero los ticks/eventos/tareas no actualizan esa fila. Mientras una sesión siga `running`, se vuelve a considerar stale cada 2 min y ensucia la timeline aunque no haya una recuperación posible.
 - [ ] **Timeout de pared por iteración en vivo**: hoy solo se recuperan iteraciones colgadas al boot (>15 min); una iteración viva genuinamente colgada se acota por timeouts per-task (claude 10 min). Evaluar un tope duro por iteración.

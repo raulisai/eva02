@@ -5,13 +5,16 @@ import {
 import { AuthenticatedRequest } from '../common/types';
 import { DevSessionService } from './dev-session.service';
 import { DevOrchestratorService } from './dev-orchestrator.service';
+import { DevProjectManagerService } from './dev-project-manager.service';
 import { ClaudeCodeRunnerService, CLAUDE_AUTH_OPTIONS, ClaudeAuthMethod } from './claude-code-runner.service';
 import { machineSpecForRole } from './agent-machines';
 import { CreateSessionDto } from './dto/create-session.dto';
+import { PlanSessionDto } from './dto/plan-session.dto';
 import { ApproveGoalsDto } from './dto/approve-goals.dto';
 import { SubmitHumanTaskDto } from './dto/submit-human-task.dto';
 import { SteerSessionDto } from './dto/steer-session.dto';
 import { MergeActionDto } from './dto/merge-action.dto';
+import { DevAgent } from './dev-studio.types';
 
 @Controller('dev-studio')
 export class DevStudioController {
@@ -19,7 +22,57 @@ export class DevStudioController {
     private readonly sessions: DevSessionService,
     private readonly orchestrator: DevOrchestratorService,
     private readonly claudeCode: ClaudeCodeRunnerService,
+    private readonly pm: DevProjectManagerService,
   ) {}
+
+  /**
+   * Persist a machine-local Claude login and release every auth-specific wait
+   * attached to this session. This is shared by the explicit re-check button
+   * and OAuth polling so a login completed in the terminal resumes work too.
+   */
+  private async reconcileAuthenticatedMachine(
+    sessionId: string,
+    orgId: string,
+    agent: DevAgent,
+  ): Promise<void> {
+    const pending = await this.sessions.listHumanTasks(sessionId, orgId, 'pending');
+    const authTasks = pending.filter(
+      (task) => (task.instructions as Record<string, unknown> | undefined)?.kind === 'claude_code_auth',
+    );
+    const metadata = (agent.metadata ?? {}) as Record<string, unknown>;
+    const machine = (metadata.machine ?? {}) as Record<string, unknown>;
+    const resetBlocked = agent.status === 'blocked' && (authTasks.length > 0 || machine.authOk === false);
+
+    await this.sessions.updateAgentStatus(agent.id, orgId, resetBlocked ? 'idle' : (agent.status ?? 'idle'), {
+      current_task_id: resetBlocked ? null : agent.current_task_id,
+      metadata: {
+        ...metadata,
+        machine: {
+          ...machine,
+          authOk: true,
+          authError: null,
+          checkedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    for (const task of authTasks) {
+      await this.sessions.submitHumanTask(task.id, orgId, { method: 'oauth', configured: true });
+      await this.sessions.verifyHumanTask(task.id, orgId);
+    }
+
+    if (authTasks.length > 0 || resetBlocked) {
+      void this.orchestrator.tick(sessionId, orgId);
+    }
+  }
+
+  // ── Project planning preview (no session created) ─────────────────────────
+
+  @Post('sessions/plan')
+  @HttpCode(HttpStatus.OK)
+  async planSession(@Body() dto: PlanSessionDto, @Req() req: AuthenticatedRequest) {
+    return this.pm.previewPlan(dto.description, req.user.orgId);
+  }
 
   // ── Sessions ──────────────────────────────────────────────────────────────
 
@@ -34,7 +87,12 @@ export class DevStudioController {
       title,
       originalPrompt: dto.prompt,
       projectId: dto.project_id,
+      metadata: dto.preplan ? { preplan: dto.preplan } : undefined,
     });
+    // If a pre-approved plan was provided, auto-start the session immediately
+    if (dto.preplan?.autoApprove && dto.preplan?.goals?.length) {
+      void this.orchestrator.startSessionWithPreplan(session.id, orgId, dto.preplan as any);
+    }
     return session;
   }
 
@@ -307,6 +365,11 @@ export class DevStudioController {
 
     const check = await this.claudeCode.verifyAuth(orgId, agent.id);
 
+    if (check.ok) {
+      await this.reconcileAuthenticatedMachine(id, orgId, agent);
+      return { ok: true, authOk: true, error: null };
+    }
+
     // Persist the result so the UI badge updates without a full session tick.
     const existing = (agent.metadata ?? {}) as Record<string, unknown>;
     await this.sessions.updateAgentStatus(agent.id, orgId, agent.status ?? 'idle', {
@@ -368,6 +431,13 @@ export class DevStudioController {
       if (!boot.ok) throw new BadRequestException(`No se pudo levantar la máquina: ${boot.error}`);
     }
 
+    // The user may already have completed `claude auth login` in this machine.
+    // Reconcile it instead of starting a second OAuth process.
+    if (await this.claudeCode.hasCredential(orgId, agent.id)) {
+      await this.reconcileAuthenticatedMachine(id, orgId, agent);
+      return { ok: true, url: null, agentId: agent.id, error: null, useTerminal: false, configured: true };
+    }
+
     const result = await this.claudeCode.startOAuthFlow(orgId, agent.id);
     if ('error' in result) {
       // Return structured error so the UI can decide to show the terminal instead.
@@ -389,20 +459,15 @@ export class DevStudioController {
     if (!agent) throw new NotFoundException('Agente no encontrado');
     const state = this.claudeCode.pollOAuthResult(agent.id);
     if (!state) {
-      // No active flow — return whether the org already has a credential.
-      const configured = await this.claudeCode.hasCredential(orgId);
+      // No active flow — accept either an org credential or this machine's
+      // local Claude login.
+      const configured = await this.claudeCode.hasCredential(orgId, agent.id);
+      if (configured) await this.reconcileAuthenticatedMachine(id, orgId, agent);
       return { status: configured ? 'completed' : 'idle', configured, url: null, error: null };
     }
     // When completed, tick the session so any waiting provisioning task resumes.
     if (state.configured) {
-      const pending = await this.sessions.listHumanTasks(id, orgId, 'pending');
-      for (const t of pending) {
-        if ((t.instructions as Record<string, unknown>)?.kind === 'claude_code_auth') {
-          await this.sessions.submitHumanTask(t.id, orgId, { method: 'oauth', configured: true });
-          await this.sessions.verifyHumanTask(t.id, orgId);
-        }
-      }
-      void this.orchestrator.tick(id, orgId);
+      await this.reconcileAuthenticatedMachine(id, orgId, agent);
     }
     return state;
   }
@@ -426,7 +491,7 @@ export class DevStudioController {
     if (!body?.code?.trim()) throw new BadRequestException('El campo `code` es requerido');
     const ok = this.claudeCode.submitOAuthCode(agent.id, body.code.trim());
     if (!ok) {
-      const configured = await this.claudeCode.hasCredential(orgId);
+      const configured = await this.claudeCode.hasCredential(orgId, agent.id);
       if (configured) return { ok: true, alreadyConfigured: true };
       throw new BadRequestException('No hay un flujo OAuth activo esperando el código. Reinicia el flujo.');
     }

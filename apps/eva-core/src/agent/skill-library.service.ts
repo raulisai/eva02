@@ -552,6 +552,14 @@ export class SkillLibraryService {
         baseScores.set(skill.slug, 0);
         return 0;
       }
+      // Provisional skills (auto-sedimentadas, no verificadas) requieren al menos
+      // un token de overlap con el goal para evitar que aparezcan en tareas sin
+      // relación — e.g. una skill sedimentada de "buscar canción X" no debe
+      // sugerirse para una tarea de "mantenimiento interno".
+      if (score <= 0 && skill.isProvisional) {
+        baseScores.set(skill.slug, 0);
+        return 0;
+      }
       score += 0.75;
     }
 

@@ -1,5 +1,7 @@
 import { DevSessionService } from '../dev-session.service';
 import { ClaudeCodeRunnerService } from '../claude-code-runner.service';
+import { DevStudioController } from '../dev-studio.controller';
+import { DevOrchestratorService } from '../dev-orchestrator.service';
 
 describe('DevSessionService.buildIterationOutputs', () => {
   function svcWithTasks(tasks: Record<string, unknown>[]): DevSessionService {
@@ -118,5 +120,147 @@ describe('ClaudeCodeRunnerService OAuth code submission', () => {
     expect(svc.submitOAuthCode('agent1', 'abc123')).toBe(true);
     expect(svc.submitOAuthCode('agent1', 'abc123')).toBe(true);
     expect(writes).toEqual(['abc123\n']);
+  });
+});
+
+describe('ClaudeCodeRunnerService machine-local OAuth', () => {
+  it('accepts a persistent machine that already has local Claude auth', async () => {
+    const svc = new ClaudeCodeRunnerService();
+    const containers = (svc as unknown as {
+      containers: Map<string, { hasToken: boolean }>;
+    }).containers;
+    containers.set('agent1', { hasToken: true });
+
+    await expect(svc.hasCredential('org1', 'agent1')).resolves.toBe(true);
+    await expect(svc.hasCredential('org1')).resolves.toBe(false);
+  });
+
+  it('completes OAuth when CLI status confirms login without an exportable token', async () => {
+    const svc = new ClaudeCodeRunnerService();
+    const internals = svc as unknown as {
+      containers: Map<string, { hasToken: boolean }>;
+      readOAuthTokenFromContainer: (container: string) => Promise<string | null>;
+      checkContainerAuthStatus: (container: string) => Promise<boolean>;
+      finalizeOAuthFromContainer: (key: string, pending: Record<string, unknown>) => Promise<boolean>;
+    };
+    internals.containers.set('agent1', { hasToken: false });
+    jest.spyOn(internals, 'readOAuthTokenFromContainer').mockResolvedValue(null);
+    jest.spyOn(internals, 'checkContainerAuthStatus').mockResolvedValue(true);
+    const pending = {
+      orgId: 'org1',
+      containerName: 'eva-agent-1',
+      state: { status: 'waiting_callback', url: null, configured: false, error: null },
+    };
+
+    await expect(internals.finalizeOAuthFromContainer('agent1', pending)).resolves.toBe(true);
+    expect(pending.state).toMatchObject({ status: 'completed', configured: true, error: null });
+    expect(internals.containers.get('agent1')?.hasToken).toBe(true);
+  });
+
+  it('accepts terminal login status without requiring a model probe', async () => {
+    const svc = new ClaudeCodeRunnerService();
+    const internals = svc as unknown as {
+      containers: Map<string, { name: string; hasToken: boolean }>;
+      checkContainerAuthStatus: (container: string) => Promise<boolean>;
+      probe: (prefix: string[], env: NodeJS.ProcessEnv) => Promise<{ ok: boolean }>;
+    };
+    internals.containers.set('agent1', { name: 'eva-agent-1', hasToken: false });
+    jest.spyOn(internals, 'checkContainerAuthStatus').mockResolvedValue(true);
+    const probe = jest.spyOn(internals, 'probe').mockResolvedValue({ ok: false });
+
+    await expect(svc.verifyAuth('org1', 'agent1')).resolves.toEqual({ ok: true });
+    expect(probe).not.toHaveBeenCalled();
+    expect(internals.containers.get('agent1')?.hasToken).toBe(true);
+  });
+});
+
+describe('DevStudioController manual Claude login reconciliation', () => {
+  it('clears the auth blocker, verifies provisioning, and resumes the session', async () => {
+    const sessions = {
+      getAgent: jest.fn().mockResolvedValue({
+        id: 'agent1', status: 'blocked', current_task_id: null,
+        metadata: { machine: { authOk: false, authError: 'NO_TOKEN' } },
+      }),
+      listHumanTasks: jest.fn().mockResolvedValue([
+        { id: 'human1', instructions: { kind: 'claude_code_auth' } },
+      ]),
+      updateAgentStatus: jest.fn().mockResolvedValue(undefined),
+      submitHumanTask: jest.fn().mockResolvedValue(undefined),
+      verifyHumanTask: jest.fn().mockResolvedValue(undefined),
+    };
+    const orchestrator = { tick: jest.fn().mockResolvedValue(undefined) };
+    const claudeCode = {
+      hasContainer: jest.fn().mockReturnValue(true),
+      verifyAuth: jest.fn().mockResolvedValue({ ok: true }),
+    };
+    const controller = new DevStudioController(sessions as any, orchestrator as any, claudeCode as any);
+
+    await expect(controller.checkAgentAuth('session1', 'backend', {
+      user: { orgId: 'org1' },
+    } as any)).resolves.toEqual({ ok: true, authOk: true, error: null });
+
+    expect(sessions.updateAgentStatus).toHaveBeenCalledWith(
+      'agent1', 'org1', 'idle',
+      expect.objectContaining({
+        current_task_id: null,
+        metadata: expect.objectContaining({
+          machine: expect.objectContaining({ authOk: true, authError: null }),
+        }),
+      }),
+    );
+    expect(sessions.submitHumanTask).toHaveBeenCalledWith(
+      'human1', 'org1', { method: 'oauth', configured: true },
+    );
+    expect(sessions.verifyHumanTask).toHaveBeenCalledWith('human1', 'org1');
+    expect(orchestrator.tick).toHaveBeenCalledWith('session1', 'org1');
+  });
+});
+
+describe('DevOrchestratorService queued task resumption', () => {
+  it('scopes the iteration by org, closes it, and ticks after resumed work', async () => {
+    const maybeSingle = jest.fn().mockResolvedValue({
+      data: { id: 'iteration1', title: 'Initial board', status: 'running' },
+    });
+    const eqOrg = jest.fn().mockReturnValue({ maybeSingle });
+    const eqId = jest.fn().mockReturnValue({ eq: eqOrg });
+    const db = {
+      admin: { from: jest.fn().mockReturnValue({ select: jest.fn().mockReturnValue({ eq: eqId }) }) },
+    };
+    const sessions = {
+      updateStudioTaskStatus: jest.fn().mockResolvedValue(undefined),
+      listIterationTasks: jest.fn().mockResolvedValue([
+        { id: 'task1', status: 'needs_review', result_summary: 'Canvas rendered' },
+      ]),
+      buildIterationOutputs: jest.fn().mockResolvedValue(['Canvas rendered']),
+      updateIterationStatus: jest.fn().mockResolvedValue(undefined),
+      logEvent: jest.fn().mockResolvedValue(undefined),
+    };
+    const svc = new DevOrchestratorService(
+      {} as any, {} as any, {} as any, {} as any, db as any,
+      sessions as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    const internals = svc as unknown as {
+      runAgentTask: (...args: unknown[]) => Promise<boolean>;
+      tickSafe: (sessionId: string, orgId: string) => Promise<void>;
+      runWaveFromQueued: (
+        session: Record<string, unknown>, orgId: string, tasks: Record<string, unknown>[],
+      ) => Promise<number>;
+    };
+    jest.spyOn(internals, 'runAgentTask').mockResolvedValue(true);
+    const tickSafe = jest.spyOn(internals, 'tickSafe').mockResolvedValue(undefined);
+
+    await expect(internals.runWaveFromQueued(
+      { id: 'session1' },
+      'org1',
+      [{ id: 'task1', iteration_id: 'iteration1', role: 'backend', prompt: 'Render canvas' }],
+    )).resolves.toBe(1);
+
+    expect(eqId).toHaveBeenCalledWith('id', 'iteration1');
+    expect(eqOrg).toHaveBeenCalledWith('org_id', 'org1');
+    expect(sessions.updateIterationStatus).toHaveBeenCalledWith(
+      'iteration1', 'org1', 'completed',
+      expect.objectContaining({ completed_outputs: ['Canvas rendered'] }),
+    );
+    expect(tickSafe).toHaveBeenCalledWith('session1', 'org1');
   });
 });

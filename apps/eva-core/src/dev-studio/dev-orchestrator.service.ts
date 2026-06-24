@@ -45,9 +45,9 @@ const ITERATION_STALE_MS = 15 * 60 * 1000;
 
 // How long a task can sit in `assigned`/`running` without a status update before
 // the orchestrator considers it a silent crash and auto-requeues it.
-// 8 minutes is generous enough for slow Claude Code runs but short enough to
-// unblock a session within one or two heartbeat cycles.
-const TASK_STUCK_MS = 8 * 60 * 1000;
+// 30 minutes: Claude Code tasks regularly take 15-30 min; the onEvent heartbeat
+// touches updated_at every 60 s so a genuinely-live task never hits this limit.
+const TASK_STUCK_MS = 30 * 60 * 1000;
 
 @Injectable()
 export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
@@ -75,8 +75,9 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
 
     this.events.on('dev.iteration.updated' as any, async (event) => {
       const payload = event.payload as { iterationId?: string; status?: string; sessionId?: string };
-      if (payload.status === 'completed' || payload.status === 'evaluating') {
-        // Find session from iteration
+      // `needs_more_work` also needs a re-tick so the loop continues without
+      // relying on the direct tickSafe call inside dispatchTaskWaves.
+      if (payload.status === 'completed' || payload.status === 'evaluating' || payload.status === 'needs_more_work') {
         if (payload.sessionId) {
           await this.tickSafe(payload.sessionId, event.orgId);
         }
@@ -543,7 +544,17 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
       taskCount: createdTaskIds.length,
     });
 
-    // Dispatch tasks using wave executor (parallel by dependency)
+    // Mark all newly created tasks as `assigned` BEFORE releasing the tick guard.
+    // If we left them as `queued`, the next tick (fired immediately after this
+    // function returns and the guard is released) would see queued tasks and
+    // dispatch them via runWaveFromQueued — racing with the dispatchTaskWaves
+    // fire-and-forget below and executing each task twice.
+    for (const taskId of createdTaskIds) {
+      await this.sessionService.updateStudioTaskStatus(taskId, orgId, 'assigned').catch(() => undefined);
+    }
+
+    // Dispatch tasks using wave executor (parallel by dependency).
+    // Tasks are already `assigned`; dispatchTaskWaves will move them to `running`.
     this.dispatchTaskWaves(session, orgId, iteration, architectPlan.tasks, taskIndexToId).catch((err) =>
       this.logger.error(`Wave dispatch error for session ${session.id}: ${err.message}`),
     );
@@ -578,7 +589,17 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
     // Gate: code roles run on Claude Code. If any code task is present and the org
     // has no Claude Code credential, pause and ask the user to provision one.
     const needsClaude = tasks.some((t) => CODE_ROLES.has(t.role));
-    if (needsClaude && !(await this.claudeCode.hasCredential(orgId))) {
+    let hasClaudeAuth = await this.claudeCode.hasCredential(orgId);
+    if (needsClaude && !hasClaudeAuth) {
+      const agents = await this.sessionService.listAgents(session.id, orgId).catch(() => []);
+      for (const agent of agents) {
+        if (CODE_ROLES.has(agent.role) && await this.claudeCode.hasCredential(orgId, agent.id)) {
+          hasClaudeAuth = true;
+          break;
+        }
+      }
+    }
+    if (needsClaude && !hasClaudeAuth) {
       // Leave the studio tasks queued so a later tick dispatches them once provisioned.
       for (const id of taskIndexToId.values()) {
         if (id) await this.sessionService.updateStudioTaskStatus(id, orgId, 'queued').catch(() => undefined);
@@ -674,8 +695,9 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
         iterationId: iteration.id,
       }).catch(() => undefined);
 
-      // Always re-tick so the loop continues (or closes) — never strand the session.
-      await this.tickSafe(session.id, orgId);
+      // Re-tick is driven by the dev.iteration.updated event published above by
+      // updateIterationStatus (handles completed + needs_more_work + evaluating).
+      // No direct call here to avoid double-ticking the same session.
     }
   }
 
@@ -719,6 +741,7 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
 
   private async runWaveFromQueued(session: DevSession, orgId: string, tasks: Record<string, unknown>[]): Promise<number> {
     let dispatched = 0;
+    const iterations = new Map<string, DevIteration>();
     // Simple: run all queued in parallel (no dep resolution for re-dispatch)
     await Promise.all(tasks.map(async (task) => {
       const taskId = task.id as string;
@@ -730,13 +753,27 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
         .from('dev_iterations')
         .select('*')
         .eq('id', task.iteration_id as string)
+        .eq('org_id', orgId)
         .maybeSingle();
 
       if (!iterRow) return;
+      iterations.set(iterRow.id as string, iterRow as DevIteration);
 
       await this.sessionService.updateStudioTaskStatus(taskId, orgId, 'assigned');
       try {
-        await this.runAgentTask(session, orgId, taskId, prompt, role, iterRow as DevIteration);
+        const success = await this.runAgentTask(session, orgId, taskId, prompt, role, iterRow as DevIteration);
+        if (!success) {
+          const iterationTasks = await this.sessionService.listIterationTasks(iterRow.id as string, orgId);
+          const refreshed = iterationTasks.find((candidate) => candidate.id === taskId);
+          // Auth failures deliberately return the task to `queued`; provisioning
+          // already explains that blocker, so do not create a second human task.
+          if (refreshed?.status !== 'queued') {
+            await this.handleAgentFailure(
+              session, orgId, taskId, iterRow as DevIteration, null,
+              String(refreshed?.result_summary ?? 'Task execution failed'),
+            );
+          }
+        }
       } catch (err) {
         // Explicitly mark as failed so the task doesn't stay frozen in `assigned`.
         const errMsg = (err as Error).message;
@@ -750,6 +787,34 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
       }
       dispatched++;
     }));
+
+    // Re-dispatched work must close its original iteration just like a fresh
+    // wave. Keep it open only when auth provisioning re-queued some work.
+    for (const iteration of iterations.values()) {
+      const iterationTasks = await this.sessionService.listIterationTasks(iteration.id, orgId);
+      const stillPending = iterationTasks.some((task) =>
+        ['queued', 'assigned', 'running'].includes(String(task.status)),
+      );
+      if (stillPending) continue;
+
+      const allFailed = iterationTasks.length > 0 && iterationTasks.every((task) => task.status === 'failed');
+      const outputs = await this.sessionService.buildIterationOutputs(iteration.id, orgId).catch(() => [] as string[]);
+      await this.sessionService.updateIterationStatus(
+        iteration.id,
+        orgId,
+        allFailed ? 'needs_more_work' : 'completed',
+        { completed_at: new Date().toISOString(), completed_outputs: outputs },
+      );
+      await this.sessionService.logEvent({
+        orgId,
+        sessionId: session.id,
+        eventType: 'iteration.completed',
+        message: `Iteración "${iteration.title}" finalizada tras reanudar ${iterationTasks.length} tarea(s).`,
+        iterationId: iteration.id,
+      });
+    }
+
+    if (iterations.size > 0) await this.tickSafe(session.id, orgId);
     return dispatched;
   }
 
@@ -832,12 +897,14 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
     role: AgentRole,
     iteration: DevIteration,
   ): Promise<boolean> {
+    const agentRecord = await this.sessionService.getAgent(session.id, orgId, role);
+
     // ── Guard: code roles REQUIRE Claude Code — never fall back to agent loop ──
     // The agent loop lacks filesystem tooling and can't write production code.
     // If the credential is missing, requeue the task and surface the provisioning
     // panel so the user can connect Claude Code before the task runs.
     if (CODE_ROLES.has(role)) {
-      const hasCred = await this.claudeCode.hasCredential(orgId);
+      const hasCred = await this.claudeCode.hasCredential(orgId, agentRecord?.id);
       if (!hasCred) {
         await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'queued', {
           result_summary: 'En espera de credencial de Claude Code. Conecta Claude Code para continuar.',
@@ -899,7 +966,6 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
     await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'running');
 
     // Update agent status to running
-    const agentRecord = await this.sessionService.getAgent(session.id, orgId, role);
     if (agentRecord) {
       await this.sessionService.updateAgentStatus(agentRecord.id, orgId, 'running', { current_task_id: studioTaskId });
     }
@@ -919,11 +985,14 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
       await this.tasks.transition(backingTaskId, orgId, 'running');
 
       // Code roles run on Claude Code (pre-baked sandbox); others use the API loop.
-      const useClaudeCode = CODE_ROLES.has(role) && (await this.claudeCode.hasCredential(orgId));
+      const useClaudeCode = CODE_ROLES.has(role) && (await this.claudeCode.hasCredential(orgId, agentRecord?.id));
       const runtimeLabel = useClaudeCode ? 'claude-code' : 'agent-loop';
 
       let outcome: { ok: boolean; text?: string; authFailed?: boolean };
       if (useClaudeCode) {
+        // Heartbeat: touch dev_tasks.updated_at periodically so the stuck-task
+        // detector doesn't falsely requeue this task while Claude is still active.
+        let lastHeartbeat = Date.now();
         const result = await this.claudeCode.run({
           orgId,
           taskId: backingTaskId,
@@ -945,6 +1014,12 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
               orgId, sessionId: session.id, eventType: `claude.${ev.type}`,
               message: ev.text.slice(0, 500), iterationId: iteration.id, taskId: studioTaskId,
             });
+            // Touch updated_at at most every 60 s so the task is never
+            // treated as "stuck" while Claude Code is actively producing events.
+            if (Date.now() - lastHeartbeat > 60_000) {
+              lastHeartbeat = Date.now();
+              await this.sessionService.touchStudioTask(studioTaskId, orgId).catch(() => undefined);
+            }
           },
         });
         outcome = { ok: result.ok, text: result.resultSummary ?? result.text ?? result.error ?? '', authFailed: result.authFailed };

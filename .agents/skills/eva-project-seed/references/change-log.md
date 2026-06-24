@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-24 08:53Z
+C: dev-studio/claude-oauth: accept machine-local Claude Code login verified by `claude auth status --json` when the CLI does not expose an exportable token; allow orchestrator guards and runs to use the authenticated persistent machine; remove credential-content logging; files=apps/eva-core/src/dev-studio/claude-code-runner.service.ts,apps/eva-core/src/dev-studio/dev-orchestrator.service.ts,apps/eva-core/src/dev-studio/dev-studio.controller.ts,apps/eva-core/src/dev-studio/__tests__/dev-robustness.spec.ts,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm test --workspace @eva/core -- src/dev-studio/__tests__/dev-robustness.spec.ts --runInBand (12 passed); npm run build --workspace @eva/core
+P: pending/improve -> run one real queued code-agent task after the live machine-local OAuth login and confirm Claude Code executes without reopening provisioning
+
 ### 2026-06-24 07:47Z
 C: dev-studio/claude-oauth: make automated Claude Code auth URL capture tolerate wrapped terminal output, OSC hyperlinks, and query-fragment output; pass no-color/wide-terminal env into `docker exec`; avoid blank-code Enter at the prompt and accept duplicate/tardy code submits when already in flight/configured; files=apps/eva-core/src/dev-studio/claude-code-runner.service.ts,apps/eva-core/src/dev-studio/dev-studio.controller.ts,apps/eva-core/src/dev-studio/__tests__/dev-robustness.spec.ts,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm test --workspace @eva/core -- src/dev-studio/__tests__/dev-robustness.spec.ts --runInBand; npm run build --workspace @eva/core
 P: pending/improve -> run a live Dev Studio agent-machine OAuth smoke with real Claude Code and confirm the automatic flow reaches code entry, accepts the pasted code once, and does not fall back to the terminal

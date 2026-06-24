@@ -93,6 +93,8 @@ export interface OAuthFlowState {
 interface PendingOAuth {
   proc: ChildProcess;
   orgId: string;
+  /** Container the login process runs in — read to recover the token post-login. */
+  containerName: string;
   state: OAuthFlowState;
   /** Accumulated raw output (ANSI-stripped) for multi-line URL reconstruction. */
   fullBuf: string;
@@ -205,7 +207,7 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
         if (this.containers.has(key)) continue;
         this.containers.set(key, {
           name, image, hostDir: '', role: undefined,
-          hasToken: true, sessionScoped: true, shells: new Map(),
+          hasToken: false, sessionScoped: true, shells: new Map(),
         });
         this.logger.log(`[init] Reconnected orphaned container ${name} → key ${key.slice(0,8)}`);
       }
@@ -234,9 +236,11 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
 
   // ── Credentials ──────────────────────────────────────────────────────────
 
-  /** Whether the org has a Claude Code credential configured. */
-  async hasCredential(orgId: string): Promise<boolean> {
-    return (await this.resolveCredential(orgId)) !== null;
+  /** Whether the org or a specific persistent machine has usable Claude Code auth. */
+  async hasCredential(orgId: string, machineKey?: string): Promise<boolean> {
+    if ((await this.resolveCredential(orgId)) !== null) return true;
+    if (!machineKey) return false;
+    return this.hasMachineAuth(machineKey);
   }
 
   async resolveCredential(orgId: string): Promise<StoredClaudeCredential | null> {
@@ -402,6 +406,7 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
       const pending: PendingOAuth = {
         proc,
         orgId,
+        containerName: c.name,
         fullBuf: '',
         state: { status: 'scanning_url', url: null, configured: false, error: null },
         onUrl: (url) => resolve({ url }),
@@ -412,6 +417,9 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
       const TOKEN_RE = /sk-ant-[A-Za-z0-9_-]{30,}/;
       // Detect the "Paste code here" prompt that Claude Code shows in code-grant flow
       const CODE_PROMPT_RE = /paste\s+code\s+here|enter\s+(?:the\s+)?code|code\s*>/i;
+      // `claude auth login` prints this once the code is exchanged successfully.
+      // The token itself is NOT printed — it's written to the credential file.
+      const LOGIN_OK_RE = /login\s+success|successfully\s+logged\s+in|authentication\s+success/i;
 
       let lineBuf = '';
 
@@ -475,6 +483,12 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
           const tm = TOKEN_RE.exec(pending.fullBuf);
           if (tm) this.handleOAuthToken(key, pending, tm[0]);
         }
+
+        // "Login successful." — the CLI exchanged the code and wrote the token to
+        // the credential file (it's NOT printed). Read it back from the container.
+        if (pending.state.status !== 'completed' && LOGIN_OK_RE.test(clean)) {
+          void this.finalizeOAuthFromContainer(key, pending);
+        }
       };
 
       proc.stdout?.on('data', onChunk);
@@ -493,6 +507,28 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
       proc.on('close', (code) => {
         // Final flush — try to grab URL if we haven't yet
         if (pending.state.status === 'scanning_url') tryFindUrl();
+
+        // Already done (token captured from stdout or the credential file).
+        if (pending.state.status === 'completed') {
+          setTimeout(() => { this.pendingOAuth.delete(key); }, 60_000);
+          return;
+        }
+
+        // Exit 0 after the code was submitted → login almost certainly succeeded;
+        // the token lives in the container's credential file, not in stdout.
+        // Recover it from the container before declaring failure.
+        if (code === 0 && (pending.state.status === 'waiting_callback' || pending.state.status === 'waiting_for_code')) {
+          void this.finalizeOAuthFromContainer(key, pending).then((ok) => {
+            if (!ok) {
+              pending.state.status = 'failed';
+              pending.state.error =
+                'El login finalizó pero no se encontró la credencial en la máquina. ' +
+                'Reintenta o usa el Terminal del agente: claude auth login';
+            }
+            setTimeout(() => { this.pendingOAuth.delete(key); }, 60_000);
+          });
+          return;
+        }
 
         if (pending.state.status === 'scanning_url' || pending.state.status === 'waiting_callback') {
           const snippet = pending.fullBuf.replace(/\s+/g, ' ').slice(-300);
@@ -563,6 +599,129 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /**
+   * After `claude auth login` reports success, the OAuth token is written to the
+   * container's credential file (`~/.claude/.credentials.json` or the
+   * `@anthropic-ai/claude-code` path) — it is never printed to stdout. Read the
+   * file back, extract the token, and persist it to org_integrations.
+   * Returns true if a token was found and saved.
+   */
+  private async finalizeOAuthFromContainer(key: string, pending: PendingOAuth): Promise<boolean> {
+    if (pending.state.status === 'completed') return true;
+    const token = await this.readOAuthTokenFromContainer(pending.containerName);
+    if (token) {
+      this.logger.log(`[oauth:${key}] token recuperado de la credencial del contenedor`);
+      this.handleOAuthToken(key, pending, token);
+      return true;
+    }
+
+    // Newer Claude Code versions may keep the OAuth token behind their own
+    // credential storage. The CLI status is the source of truth in that case.
+    if (await this.checkContainerAuthStatus(pending.containerName)) {
+      pending.state.status = 'completed';
+      pending.state.configured = true;
+      pending.state.error = null;
+      const container = this.containers.get(key);
+      if (container) container.hasToken = true;
+      this.logger.log(`[oauth:${key}] login confirmado por claude auth status`);
+      return true;
+    }
+
+    this.logger.warn(`[oauth:${key}] login terminó sin auth utilizable en ${pending.containerName}`);
+    return false;
+  }
+
+  /**
+   * Read the Claude Code credential file(s) inside a container and extract the
+   * OAuth access token. Retries 3 times with 1 s gap in case the file is
+   * written just after the process exits.
+   *
+   * Handles all known credential shapes:
+   *  • `{ claudeAiOauth: { accessToken } }` — written by `claude auth login`
+   *  • `{ access_token }` / `{ accessToken }` / `{ token }` — our own injected format
+   *  • Raw sk-ant-… token in the file text (legacy)
+   *
+   * NOTE: OAuth tokens from `claude auth login` are NOT necessarily `sk-ant-…`
+   * prefixed — they can be JWTs or other bearer tokens. We accept any string
+   * that is at least 20 chars and is the value of a recognized key.
+   */
+  private async readOAuthTokenFromContainer(containerName: string): Promise<string | null> {
+    // The credential may be written just after the process exits — retry briefly.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 1200));
+      try {
+        // Check every known location; use $HOME so it works regardless of user.
+        const { stdout } = await execFileAsync('docker', [
+          'exec', containerName, 'sh', '-c',
+          // Emit each file's content prefixed with a sentinel so we can split them.
+          'for f in ' +
+            '"$HOME/.claude/.credentials.json" ' +
+            '"$HOME/.config/@anthropic-ai/claude-code/.credentials.json" ' +
+            '"/root/.claude/.credentials.json" ' +
+            '"/root/.config/@anthropic-ai/claude-code/.credentials.json"; ' +
+          'do [ -f "$f" ] && printf "===FILE===\\n" && cat "$f" && printf "\\n===END===\\n"; done',
+        ], { timeout: 12_000, env: process.env });
+
+        const blocks = stdout.split('===FILE===').slice(1);
+        for (const block of blocks) {
+          const text = block.split('===END===')[0].trim();
+          if (!text) continue;
+          try {
+            const json = JSON.parse(text) as Record<string, unknown>;
+            const candidate =
+              // Shape written by `claude auth login` (nested OAuth object)
+              (json?.claudeAiOauth as Record<string, unknown>)?.accessToken ??
+              (json?.claudeAiOauth as Record<string, unknown>)?.refreshToken ??
+              // Flat shapes (our injected format + older CLI versions)
+              json?.access_token ??
+              json?.accessToken ??
+              json?.token ??
+              json?.api_key;
+            if (typeof candidate === 'string' && candidate.length >= 20) {
+              this.logger.log(`[oauth] token extraído de credencial del contenedor (longitud ${candidate.length})`);
+              return candidate;
+            }
+          } catch {
+            /* JSON parse failed — fall through to regex */
+          }
+          // Last resort: any sk-ant token in the raw text
+          const m = /sk-ant-[A-Za-z0-9_-]{20,}/.exec(text);
+          if (m) return m[0];
+        }
+
+        if (stdout.includes('===FILE===')) {
+          this.logger.warn(`[oauth] archivos de credenciales encontrados pero sin token exportable`);
+        }
+      } catch (e) {
+        this.logger.warn(`[oauth] intento ${attempt + 1}: error leyendo credencial de ${containerName}: ${(e as Error).message.slice(0, 120)}`);
+      }
+    }
+    return null;
+  }
+
+  private async checkContainerAuthStatus(containerName: string): Promise<boolean> {
+    try {
+      const { stdout } = await execFileAsync('docker', [
+        'exec', containerName, 'claude', 'auth', 'status', '--json',
+      ], { timeout: 15_000, env: process.env });
+      const parsed = JSON.parse(stdout) as { loggedIn?: boolean; authenticated?: boolean };
+      return parsed.loggedIn === true || parsed.authenticated === true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async hasMachineAuth(key: string): Promise<boolean> {
+    const container = this.containers.get(key);
+    if (!container) return false;
+    if (container.hasToken) return true;
+    const authenticated =
+      await this.checkContainerAuthStatus(container.name) ||
+      await this.checkContainerHasAuth(container.name);
+    if (authenticated) container.hasToken = true;
+    return authenticated;
+  }
+
   /** Returns the current state of an in-flight or recently-completed OAuth flow. */
   pollOAuthResult(key: string): OAuthFlowState | null {
     const p = this.pendingOAuth.get(key);
@@ -595,6 +754,7 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
    * This does NOT probe the API; it's a fast local check.
    */
   async checkContainerHasAuth(containerName: string): Promise<boolean> {
+    if (await this.checkContainerAuthStatus(containerName)) return true;
     try {
       const { stdout } = await execFileAsync('docker', [
         'exec', containerName, 'sh', '-c',
@@ -644,8 +804,16 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
    * flag, so it correctly detects manual `claude auth login` sessions.
    */
   async verifyAuth(orgId: string, key: string): Promise<AuthCheckResult> {
-    let c = this.containers.get(key);
+    const c = this.containers.get(key);
     if (!c) return { ok: false, error: 'NO_MACHINE' };
+
+    // A manual `claude auth login` is already authoritative. Returning here is
+    // important: the previous implementation followed this with a model probe,
+    // so a timeout/quota/network error made a valid terminal login look invalid.
+    if (await this.checkContainerAuthStatus(c.name)) {
+      c.hasToken = true;
+      return { ok: true };
+    }
 
     // If the container says hasToken=false, check the actual state — the user
     // may have authenticated manually via `claude auth login` in the terminal.
@@ -797,8 +965,11 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
       return { ok: false, text: '', error: 'Docker no disponible en este nodo' };
     }
 
+    const key = opts.machineKey ?? opts.taskId;
+    const sessionScoped = Boolean(opts.machineKey);
     const credential = await this.resolveCredential(opts.orgId);
-    if (!credential) {
+    const hasLocalMachineAuth = Boolean(opts.machineKey) && await this.hasMachineAuth(key);
+    if (!credential && !hasLocalMachineAuth) {
       return { ok: false, text: '', error: 'NO_CREDENTIAL: el org no tiene credencial de Claude Code configurada' };
     }
 
@@ -817,17 +988,17 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
 
     // Prefer the agent's persistent machine (machineKey); fall back to a
     // throwaway per-task container keyed by taskId.
-    const key = opts.machineKey ?? opts.taskId;
-    const sessionScoped = Boolean(opts.machineKey);
-
     let container = this.containers.get(key);
     // A session machine booted before the credential existed has no token — the
     // claude CLI can't authenticate. Recreate it now that we have a credential.
-    if (container && !container.hasToken) {
+    if (container && !container.hasToken && credential) {
       await this.destroyContainer(key);
       container = undefined;
     }
     if (!container) {
+      if (!credential) {
+        return { ok: false, text: '', error: 'NO_MACHINE_AUTH: la máquina autenticada ya no está disponible' };
+      }
       container = (await this.createContainer({ key, image, role, sessionScoped, credential })) ?? undefined;
     }
     if (!container) {

@@ -80,6 +80,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
   const [flow, setFlow] = useState<FlowState | null>(null);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [unsticking, setUnsticking] = useState(false);
+  const [taskStatusFilter, setTaskStatusFilter] = useState<'all' | 'active' | 'pending'>('all');
 
   const orgToken = useAuthToken();
 
@@ -222,35 +223,27 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
   const activeTasksCount = tasks.filter((t) => ['running', 'assigned'].includes(t.status as string)).length;
   const pendingTasksCount = tasks.filter((t) => ['queued', 'pending'].includes(t.status as string)).length;
   
-  const calculatedTokens = useMemo(() => {
+  const { calculatedTokens, tokensIsEstimate } = useMemo(() => {
     const metaTokens = session.metadata?.tokens_used || session.metadata?.total_tokens;
     if (typeof metaTokens === 'number') {
-      if (metaTokens > 1000000) return `${(metaTokens / 1000000).toFixed(1)}M`;
-      if (metaTokens > 1000) return `${(metaTokens / 1000).toFixed(0)}k`;
-      return metaTokens.toString();
+      if (metaTokens > 1000000) return { calculatedTokens: `${(metaTokens / 1000000).toFixed(1)}M`, tokensIsEstimate: false };
+      if (metaTokens > 1000) return { calculatedTokens: `${(metaTokens / 1000).toFixed(0)}k`, tokensIsEstimate: false };
+      return { calculatedTokens: metaTokens.toString(), tokensIsEstimate: false };
     }
-    const taskCount = tasks.length || 4;
-    const iterationCount = iterations.length || 1;
-    const estimated = (iterationCount * 380000) + (taskCount * 90000) + 180000;
-    return `${(estimated / 1000000).toFixed(1)}M`;
+    if (tasks.length === 0 && iterations.length === 0) return { calculatedTokens: '—', tokensIsEstimate: true };
+    const estimated = (iterations.length * 380000) + (tasks.length * 90000) + 180000;
+    return { calculatedTokens: `~${(estimated / 1000000).toFixed(1)}M`, tokensIsEstimate: true };
   }, [session.metadata, tasks.length, iterations.length]);
 
   const avgProgress = useMemo(() => {
-    if (goals.length === 0) return 68;
+    if (goals.length === 0) return 0;
     const completedGoals = goals.filter((g) => ['completed', 'validated'].includes(g.status)).length;
     const workingGoals = goals.filter((g) => g.status === 'in_progress').length;
-    
-    // Weighted progress
     const scoreSum = goals.reduce((acc, g) => acc + (g.current_score ?? 0), 0);
     const avg = scoreSum / goals.length;
     const calc = Math.round(avg * 100);
-    
-    // Ensure realistic percentage if it is 0 but we have completed/in progress goals
-    if (calc === 0) {
-      if (completedGoals > 0 || workingGoals > 0) {
-        return Math.round(((completedGoals + workingGoals * 0.5) / goals.length) * 100);
-      }
-      return 68;
+    if (calc === 0 && (completedGoals > 0 || workingGoals > 0)) {
+      return Math.round(((completedGoals + workingGoals * 0.5) / goals.length) * 100);
     }
     return Math.min(Math.max(calc, 0), 100);
   }, [goals]);
@@ -316,22 +309,24 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
           </div>
 
           {/* Active Tasks KPI */}
-          <div className="flex flex-col rounded-xl border border-white/5 bg-[#0b1224]/40 p-2.5 min-w-[125px] h-[52px] justify-between relative overflow-hidden">
+          <button
+            onClick={() => { setBottomView('all_tasks'); setTaskStatusFilter('active'); }}
+            className="flex flex-col rounded-xl border border-white/5 bg-[#0b1224]/40 p-2.5 min-w-[125px] h-[52px] justify-between relative overflow-hidden hover:border-blue-500/30 hover:bg-blue-500/5 transition-all text-left"
+          >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5">
                 <Activity className="h-3.5 w-3.5 text-blue-400 shrink-0" />
                 <span className="text-[9px] font-mono text-zinc-500 uppercase tracking-wider">Tareas ejec.</span>
               </div>
-              {/* Mini pulse wave */}
               <svg className="w-10 h-3 text-blue-400/70" viewBox="0 0 60 16" fill="none">
                 <path d="M0 8h12l3-6 4 12 3-8 3 4 5-2 2 4h16" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" className="flowing" />
               </svg>
             </div>
             <div className="flex items-baseline gap-1 mt-0.5">
-              <span className="text-sm font-bold text-zinc-100">{activeTasksCount || 8}</span>
+              <span className="text-sm font-bold text-zinc-100">{activeTasksCount}</span>
               <span className="text-[9px] text-blue-400 font-medium">activas</span>
             </div>
-          </div>
+          </button>
 
           {/* Tokens KPI */}
           <div className="flex flex-col rounded-xl border border-white/5 bg-[#0b1224]/40 p-2.5 min-w-[115px] h-[52px] justify-between">
@@ -341,7 +336,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
             </div>
             <div className="flex items-baseline gap-1 mt-0.5">
               <span className="text-sm font-bold text-zinc-100">{calculatedTokens}</span>
-              <span className="text-[9px] text-purple-400 font-medium">hoy</span>
+              <span className="text-[9px] text-purple-400 font-medium">{tokensIsEstimate ? 'estimado' : 'real'}</span>
             </div>
           </div>
 
@@ -690,28 +685,37 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
               </div>
 
               <div className="flex-1 flex items-center justify-center py-4 gap-12">
-                <div className="flex flex-col items-center">
+                <button
+                  onClick={() => { setBottomView('all_tasks'); setTaskStatusFilter('active'); }}
+                  className="flex flex-col items-center hover:opacity-70 transition-opacity"
+                >
                   <span className="text-4xl font-extrabold text-blue-400 font-mono tracking-tight">
-                    {activeTasksCount || 8}
+                    {activeTasksCount}
                   </span>
                   <span className="text-[9.5px] font-mono text-zinc-500 uppercase tracking-wider mt-1">
                     activas
                   </span>
-                </div>
+                </button>
                 <div className="h-8 w-px bg-white/5" />
-                <div className="flex flex-col items-center">
+                <button
+                  onClick={() => { setBottomView('all_tasks'); setTaskStatusFilter('pending'); }}
+                  className="flex flex-col items-center hover:opacity-70 transition-opacity"
+                >
                   <span className="text-4xl font-extrabold text-zinc-400 font-mono tracking-tight">
-                    {pendingTasksCount || 14}
+                    {pendingTasksCount}
                   </span>
                   <span className="text-[9.5px] font-mono text-zinc-500 uppercase tracking-wider mt-1">
                     pendientes
                   </span>
-                </div>
+                </button>
               </div>
-              
-              <div className="text-[9.5px] text-center text-zinc-600 font-mono">
-                {tasks.length || 22} tareas técnicas registradas en total
-              </div>
+
+              <button
+                onClick={() => { setBottomView('all_tasks'); setTaskStatusFilter('all'); }}
+                className="text-[9.5px] text-center text-zinc-600 hover:text-zinc-400 font-mono transition-colors"
+              >
+                {tasks.length} tareas técnicas registradas en total
+              </button>
             </div>
 
             {/* COLUMN 3: Tareas del humano */}
@@ -838,11 +842,31 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
                 <Activity className="h-[18px] w-[18px] text-cyan-400" />
                 <h3 className="text-xs font-semibold text-zinc-100">Registro de tareas de agentes</h3>
               </div>
-              <span className="text-[9px] font-mono text-zinc-500">{tasks.length} tareas técnicas</span>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-0.5 bg-zinc-950/80 rounded-lg p-0.5 border border-white/5">
+                  {(['all', 'active', 'pending'] as const).map((f) => (
+                    <button
+                      key={f}
+                      onClick={() => setTaskStatusFilter(f)}
+                      className={cn(
+                        'px-2 py-0.5 text-[9px] font-mono rounded-md transition-all',
+                        taskStatusFilter === f ? 'bg-[#0b1224] text-cyan-400 border border-white/5' : 'text-zinc-600 hover:text-zinc-400',
+                      )}
+                    >
+                      {f === 'all' ? 'todas' : f === 'active' ? 'activas' : 'pendientes'}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-[9px] font-mono text-zinc-500">{tasks.length} tareas técnicas</span>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[300px] overflow-y-auto pr-1">
-              {tasks.map((t: any) => {
+              {tasks.filter((t: any) => {
+                if (taskStatusFilter === 'active') return ['running', 'assigned'].includes(t.status as string);
+                if (taskStatusFilter === 'pending') return ['queued', 'pending'].includes(t.status as string);
+                return true;
+              }).map((t: any) => {
                 const statusColor: Record<string, string> = {
                   queued:       'text-zinc-500 border-zinc-800 bg-zinc-900/10',
                   assigned:     'text-cyan-400 border-cyan-500/20 bg-cyan-500/5',
@@ -980,9 +1004,17 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
                 );
               })}
 
-              {tasks.length === 0 && (
+              {tasks.filter((t: any) => {
+                if (taskStatusFilter === 'active') return ['running', 'assigned'].includes(t.status as string);
+                if (taskStatusFilter === 'pending') return ['queued', 'pending'].includes(t.status as string);
+                return true;
+              }).length === 0 && (
                 <div className="col-span-2 text-center py-8">
-                  <p className="text-xs text-zinc-600 font-mono">Sin tareas técnicas disponibles</p>
+                  <p className="text-xs text-zinc-600 font-mono">
+                    {taskStatusFilter === 'all' ? 'Sin tareas técnicas disponibles' :
+                     taskStatusFilter === 'active' ? 'Sin tareas activas en este momento' :
+                     'Sin tareas pendientes'}
+                  </p>
                 </div>
               )}
             </div>

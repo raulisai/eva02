@@ -26,5 +26,20 @@ export async function coreFetch<T = unknown>(path: string, init?: RequestInit): 
     const body = await res.text();
     throw new Error(body || `Request failed: ${res.status}`);
   }
-  return res.json() as Promise<T>;
+
+  // Successful mutations may legitimately return 204 or an empty body. Calling
+  // Response.json() in those cases throws "Unexpected end of JSON input" and
+  // turns a successful backend action into a dashboard runtime error.
+  if (res.status === 204 || res.headers.get('content-length') === '0') {
+    return undefined as T;
+  }
+
+  const body = await res.text();
+  if (!body.trim()) return undefined as T;
+
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    throw new Error(`Invalid JSON response from EVA Core (${res.status})`);
+  }
 }

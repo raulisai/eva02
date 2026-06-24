@@ -116,6 +116,35 @@ export class DevProjectManagerService {
     private readonly sessionService: DevSessionService,
   ) {}
 
+  async previewPlan(description: string, orgId: string): Promise<NorthStarResult> {
+    const prompt = `El usuario quiere construir el siguiente producto:\n\n"${description}"\n\nGenera la North Star, Definition of Done y goals iniciales.`;
+    const result = await this.modelRouter.generate(prompt, {
+      orgId,
+      budget: 'balanced',
+      systemPrompt: NORTH_STAR_SYSTEM,
+      responseFormat: 'json',
+      temperature: 0.3,
+      maxTokens: 4096,
+    });
+    const parsed = extractJson<NorthStarResult>(result.text);
+    if (!parsed.northStar || !Array.isArray(parsed.goals)) {
+      throw new Error('PM Agent: respuesta de plan inválida');
+    }
+    parsed.goals = parsed.goals.map((g, gi) => ({
+      ...g,
+      successCriteria: (g.successCriteria ?? []).map((c, ci) => ({
+        id: (c as SuccessCriterion).id ?? `sc-${gi}-${ci}`,
+        description: (c as SuccessCriterion).description ?? String(c),
+        verifiable: (c as SuccessCriterion).verifiable ?? true,
+      })),
+    }));
+    const validTiers: TeamTier[] = ['small', 'medium', 'large'];
+    if (!validTiers.includes(parsed.teamTier as TeamTier)) {
+      parsed.teamTier = parsed.goals.length <= 2 ? 'small' : parsed.goals.length <= 4 ? 'medium' : 'large';
+    }
+    return parsed;
+  }
+
   async generateNorthStarAndGoals(session: DevSession): Promise<NorthStarResult> {
     const prompt = `El usuario quiere construir el siguiente producto:\n\n"${session.original_prompt}"\n\nGenera la North Star, Definition of Done y goals iniciales.`;
 

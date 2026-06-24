@@ -659,6 +659,15 @@ export class DevSessionService {
       .eq('org_id', orgId);
   }
 
+  /** Touch updated_at on an in-flight task so the stuck-detection threshold resets. */
+  async touchStudioTask(taskId: string, orgId: string): Promise<void> {
+    await this.db.admin
+      .from('dev_tasks')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', taskId)
+      .eq('org_id', orgId);
+  }
+
   /**
    * Tasks currently in `assigned` or `running` state that have not had their
    * `updated_at` touched for more than `staleMs` — i.e. they're frozen mid-flight
