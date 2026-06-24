@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { Plus, Code2, Loader2, ChevronRight } from 'lucide-react';
+import { Plus, Code2, Loader2, ChevronRight, Trash2 } from 'lucide-react';
 import { devStudioApi } from '@/lib/dev-studio-api';
 import type { DevSession } from '@/lib/dev-studio-types';
 import { SessionStatusBadge } from '@/components/dev-studio/session-status-badge';
@@ -15,10 +15,21 @@ export default function DevStudioPage() {
   const [showNew, setShowNew] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [title, setTitle] = useState('');
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     devStudioApi.listSessions().then(setSessions).finally(() => setLoading(false));
   }, []);
+
+  async function handleDelete(id: string) {
+    setDeletingId(id);
+    try {
+      await devStudioApi.deleteSession(id);
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -121,8 +132,15 @@ export default function DevStudioPage() {
           <p className="text-[9px] font-mono uppercase tracking-widest text-zinc-700 px-1">
             Finalizadas — {done.length}
           </p>
-          <div className="opacity-50">
-            {done.map((s) => <SessionRow key={s.id} session={s} />)}
+          <div className="opacity-60 space-y-1.5">
+            {done.map((s) => (
+              <SessionRow
+                key={s.id}
+                session={s}
+                onDelete={handleDelete}
+                deleting={deletingId === s.id}
+              />
+            ))}
           </div>
         </section>
       )}
@@ -144,38 +162,81 @@ export default function DevStudioPage() {
   );
 }
 
-function SessionRow({ session }: { session: DevSession }) {
+function SessionRow({
+  session,
+  onDelete,
+  deleting,
+}: {
+  session: DevSession;
+  onDelete?: (id: string) => void;
+  deleting?: boolean;
+}) {
   const router = useRouter();
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const isActive = ['running', 'planning', 'awaiting_goals_approval'].includes(session.status);
+  const isDone = ['completed', 'cancelled', 'failed'].includes(session.status);
 
   return (
-    <button
-      onClick={() => router.push(`/dev-studio/sessions/${session.id}`)}
-      className="w-full flex items-center gap-3 rounded-md border border-zinc-800 bg-zinc-900/60 px-4 py-3 text-left hover:border-zinc-700 hover:bg-zinc-900 transition-colors group"
-    >
-      <div className="relative shrink-0">
-        <div className={`h-1.5 w-1.5 rounded-full ${isActive ? 'bg-cyan-400' : 'bg-zinc-700'}`} />
-        {isActive && (
-          <div className="absolute inset-0 rounded-full bg-cyan-400 animate-ping opacity-50" />
-        )}
-      </div>
-
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-zinc-200 truncate">{session.title}</span>
-          <SessionStatusBadge status={session.status} />
+    <div className="relative group">
+      <button
+        onClick={() => router.push(`/dev-studio/sessions/${session.id}`)}
+        className="w-full flex items-center gap-3 rounded-md border border-zinc-800 bg-zinc-900/60 px-4 py-3 text-left hover:border-zinc-700 hover:bg-zinc-900 transition-colors"
+      >
+        <div className="relative shrink-0">
+          <div className={`h-1.5 w-1.5 rounded-full ${isActive ? 'bg-cyan-400' : 'bg-zinc-700'}`} />
+          {isActive && (
+            <div className="absolute inset-0 rounded-full bg-cyan-400 animate-ping opacity-50" />
+          )}
         </div>
-        {session.north_star && (
-          <p className="text-[11px] text-zinc-600 truncate mt-0.5 italic">&quot;{session.north_star}&quot;</p>
-        )}
-      </div>
 
-      <div className="flex items-center gap-2 shrink-0">
-        <span className="text-[10px] text-zinc-700">
-          {new Date(session.created_at).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' })}
-        </span>
-        <ChevronRight className="h-3.5 w-3.5 text-zinc-700 group-hover:text-zinc-400 transition-colors" />
-      </div>
-    </button>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-zinc-200 truncate">{session.title}</span>
+            <SessionStatusBadge status={session.status} />
+          </div>
+          {session.north_star && (
+            <p className="text-[11px] text-zinc-600 truncate mt-0.5 italic">&quot;{session.north_star}&quot;</p>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-[10px] text-zinc-700">
+            {new Date(session.created_at).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' })}
+          </span>
+          <ChevronRight className="h-3.5 w-3.5 text-zinc-700 group-hover:text-zinc-400 transition-colors" />
+        </div>
+      </button>
+
+      {/* Delete button — only for terminal sessions */}
+      {isDone && onDelete && (
+        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+          {confirmDelete ? (
+            <>
+              <button
+                onClick={(e) => { e.stopPropagation(); onDelete(session.id); setConfirmDelete(false); }}
+                disabled={deleting}
+                className="flex items-center gap-1 rounded px-2 py-1 text-[10px] font-mono bg-red-500/15 border border-red-500/30 text-red-400 hover:bg-red-500/25 transition-colors disabled:opacity-40"
+              >
+                {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : '¿Eliminar?'}
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); setConfirmDelete(false); }}
+                className="rounded px-2 py-1 text-[10px] font-mono text-zinc-500 hover:text-zinc-300 transition-colors"
+              >
+                No
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
+              className="opacity-0 group-hover:opacity-100 rounded p-1 text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-all"
+              title="Eliminar sesión"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

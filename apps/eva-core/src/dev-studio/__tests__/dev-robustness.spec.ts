@@ -71,3 +71,52 @@ describe('ClaudeCodeRunnerService auth-error detection', () => {
     expect(isAuthError('')).toBe(false);
   });
 });
+
+describe('ClaudeCodeRunnerService OAuth URL extraction', () => {
+  const extract = (text: string) => ClaudeCodeRunnerService.extractOAuthUrlFromOutput(text);
+  const query =
+    'client_id=d-testclient&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback' +
+    '&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code' +
+    '&code_challenge=testChallenge_123&code_challenge_method=S256&state=testState_456';
+
+  it('extracts a complete Claude OAuth URL from plain output', () => {
+    const url = extract(`Open this URL:\nhttps://claude.ai/oauth/authorize?${query}\nPaste code here >`);
+    expect(url).toBe(`https://claude.ai/oauth/authorize?${query}`);
+  });
+
+  it('reconstructs a line-wrapped OAuth URL before the code prompt', () => {
+    const output = `https://claude.ai/oauth/authorize?client_id=d-testclient&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback
+&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code
+&code_challenge=testChallenge_123&code_challenge_method=S256&state=testState_456 Paste code here if prompted >`;
+    expect(extract(output)).toBe(`https://claude.ai/oauth/authorize?${query}`);
+  });
+
+  it('uses OSC hyperlink targets when terminal output hides the raw URL', () => {
+    const hidden = `\x1b]8;;https://claude.ai/oauth/authorize?${query}\x07open auth link\x1b]8;;\x07`;
+    expect(extract(`${hidden}\nPaste code here >`)).toBe(`https://claude.ai/oauth/authorize?${query}`);
+  });
+
+  it('rebuilds the authorize URL when the CLI prints only the query fragment', () => {
+    expect(extract(`${query} Paste code here if prompted >`)).toBe(`https://claude.ai/oauth/authorize?${query}`);
+  });
+});
+
+describe('ClaudeCodeRunnerService OAuth code submission', () => {
+  it('treats duplicate code submits as accepted once the code is in flight', () => {
+    const svc = new ClaudeCodeRunnerService();
+    const writes: string[] = [];
+    const pendingOAuth = (svc as unknown as { pendingOAuth: Map<string, unknown> }).pendingOAuth;
+    pendingOAuth.set('agent1', {
+      proc: { stdin: { write: (text: string) => { writes.push(text); } } },
+      orgId: 'org1',
+      fullBuf: '',
+      state: { status: 'waiting_for_code', url: null, configured: false, error: null },
+      onUrl: null,
+      onError: null,
+    });
+
+    expect(svc.submitOAuthCode('agent1', 'abc123')).toBe(true);
+    expect(svc.submitOAuthCode('agent1', 'abc123')).toBe(true);
+    expect(writes).toEqual(['abc123\n']);
+  });
+});

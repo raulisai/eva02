@@ -63,6 +63,8 @@ export function AgentTerminal({ taskId, orgToken, onClose }: AgentTerminalProps)
       cursorBlink: true,
       scrollback: 5000,
       allowProposedApi: true,
+      // xterm manages its own gutters — don't add CSS padding on top
+      scrollOnUserInput: true,
     });
 
     const fit = new FitAddon();
@@ -87,9 +89,12 @@ export function AgentTerminal({ taskId, orgToken, onClose }: AgentTerminalProps)
       attach(socket, taskId);
     });
 
-    socket.on('sandbox.attached', () => {
+    socket.on('sandbox.attached', ({ taskId: tid }: { taskId: string }) => {
       setStatus('connected');
       term.write('\r\n\x1b[1;36m── EVA Sandbox Terminal ──\x1b[0m\r\n');
+      // Tell the server the real terminal dimensions immediately after attach.
+      const { cols, rows } = term;
+      if (cols && rows) socket.emit('sandbox.resize', { taskId: tid, cols, rows });
     });
 
     socket.on('sandbox.output', ({ data, initial }: { data: string; initial?: boolean }) => {
@@ -116,8 +121,16 @@ export function AgentTerminal({ taskId, orgToken, onClose }: AgentTerminalProps)
       }
     });
 
-    // Resize observer
-    const ro = new ResizeObserver(() => fit.fit());
+    // Emit resize after xterm finishes fitting so the server shell matches.
+    const emitResize = () => {
+      const { cols, rows } = term;
+      if (socketRef.current?.connected && taskId && cols && rows) {
+        socketRef.current.emit('sandbox.resize', { taskId, cols, rows });
+      }
+    };
+
+    // Resize observer — refit on container resize and notify the server.
+    const ro = new ResizeObserver(() => { fit.fit(); emitResize(); });
     ro.observe(containerRef.current);
 
     return () => {
@@ -143,7 +156,7 @@ export function AgentTerminal({ taskId, orgToken, onClose }: AgentTerminalProps)
 
   return (
     <div className={`flex flex-col bg-[#0a0a0f] rounded-xl overflow-hidden border border-slate-700 ${
-      fullscreen ? 'fixed inset-4 z-50' : 'h-80'
+      fullscreen ? 'fixed inset-4 z-50' : 'h-[22rem] min-h-0'
     }`}>
       {/* Terminal toolbar */}
       <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-900 border-b border-slate-700 shrink-0">
@@ -182,8 +195,8 @@ export function AgentTerminal({ taskId, orgToken, onClose }: AgentTerminalProps)
         </div>
       </div>
 
-      {/* xterm container */}
-      <div ref={containerRef} className="flex-1 p-2" />
+      {/* xterm container — no padding: xterm manages its own gutters via terminalOptions */}
+      <div ref={containerRef} className="flex-1 min-h-0 overflow-hidden" />
     </div>
   );
 }

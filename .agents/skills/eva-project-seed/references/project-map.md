@@ -98,7 +98,7 @@ Key Documentation References:
 - Soul/private context: `POST /agent/soul/private-context` stores legacy encrypted user-only context for model prompting.
 - Profile Hub: `/agent/profile` exposes `GET /overview`, `POST /facts`, `POST /private-items`, `POST /private-items/:id/reveal`, and suggestion accept/dismiss endpoints for structured user profile data and encrypted vault items.
 - Dev control: `/dev-control/projects`, `/dev-control/dev-tasks`, `/dev-control/claude-code/sessions`, build/test runs, roadmap suggestion.
-- Dev Studio: `/dev-studio` sessions, goals, iterations, agents, machine lifecycle, events, flow state, and human provisioning endpoints.
+- Dev Studio: `/dev-studio` sessions, goals, iterations, agents, machine lifecycle, events, flow state, and human provisioning endpoints. Claude Code machine OAuth uses `claude auth login` inside the agent container, extracts wrapped/OSC/query-fragment auth URLs, accepts pasted auth codes, and persists the captured credential for the org.
 - Wear: `/wear-fast-path/token`, `/wear-fast-path/request`, `/wear-fast-path/policy`; `/request` forwards disallowed/core-needed work with request metadata, including location context when provided by the device.
 - WebSocket: Socket.io namespace/path `/eva`, has `ping`, auth token checked in gateway.
 

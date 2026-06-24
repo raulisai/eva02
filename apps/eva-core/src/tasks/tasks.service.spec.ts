@@ -248,5 +248,27 @@ describe('TasksService', () => {
         expect.objectContaining({ type: 'task.created', orgId: MOCK_ORG_ID, taskId: MOCK_TASK_ID })
       );
     });
+
+    it('same-status transition is a no-op (idempotent)', async () => {
+      const task = makeTask({ status: 'planning' });
+      repo.findByIdOrThrow.mockResolvedValue(task);
+
+      const result = await service.transition(MOCK_TASK_ID, MOCK_ORG_ID, 'planning');
+
+      expect(result).toBe(task); // returns the same object, no DB write
+      expect(repo.updateStatus).not.toHaveBeenCalled();
+      expect(events.publish).not.toHaveBeenCalled();
+    });
+
+    it('running→running no-op does not trigger any event', async () => {
+      const task = makeTask({ status: 'running' });
+      repo.findByIdOrThrow.mockResolvedValue(task);
+
+      const result = await service.transition(MOCK_TASK_ID, MOCK_ORG_ID, 'running');
+
+      expect(result).toBe(task);
+      expect(repo.updateStatus).not.toHaveBeenCalled();
+      expect(events.publish).not.toHaveBeenCalled();
+    });
   });
 });

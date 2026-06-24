@@ -4,7 +4,7 @@ import { useEffect, useState, lazy, Suspense } from 'react';
 import {
   X, GitBranch, CheckCircle2, Clock, Terminal,
   ChevronDown, ChevronRight, Eye, EyeOff, Check, Star, Wrench,
-  ExternalLink, Loader2, ShieldCheck,
+  ExternalLink, Loader2, ShieldCheck, RefreshCw,
 } from 'lucide-react';
 import type { AgentRole, ClaudeAuthOption } from '@/lib/dev-studio-types';
 import { AGENT_ROLE_EMOJI } from '@/lib/dev-studio-types';
@@ -72,6 +72,7 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
   const [booting, setBooting] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [checkingAuth, setCheckingAuth] = useState(false);
 
   // Poll agent detail every 4 s
   useEffect(() => {
@@ -124,9 +125,25 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
   const failed = studioTasks.filter((t) => ['failed', 'cancelled'].includes(t.status as string));
   const pending = studioTasks.filter((t) => !['approved', 'merged', 'completed', 'failed', 'cancelled'].includes(t.status as string));
   const current = studioTasks.find((t) => ['running', 'assigned'].includes(t.status as string));
+  // When nothing is actively running, surface needs_review/blocked/queued in the header too
+  const pendingHighlight = !current
+    ? (studioTasks.find((t) => ['needs_review', 'blocked'].includes(t.status as string))
+       ?? studioTasks.find((t) => t.status === 'queued'))
+    : null;
 
   const activeBackingId = activeTask ? (activeTask.id as string) : null;
   const agentStatus = (agent?.status as string) ?? 'idle';
+
+  // Stuck detection: use the most recent live step timestamp if available (more
+  // accurate than heartbeat alone — Claude Code events update dev_events continuously).
+  // Falls back to dev_agents.last_heartbeat_at. Threshold: 5 min with no activity.
+  const lastHeartbeatAt = agent?.last_heartbeat_at as string | null;
+  const lastLiveStepAt = liveSteps.length > 0 ? (liveSteps[liveSteps.length - 1]?.created_at as string | null) : null;
+  const lastActivityAt = lastLiveStepAt ?? lastHeartbeatAt;
+  const stuckMs = agentStatus === 'running' && lastActivityAt
+    ? Date.now() - new Date(lastActivityAt).getTime()
+    : null;
+  const isStuck = (stuckMs ?? 0) > 5 * 60 * 1000;
 
   // Latest live step from always-on poll
   const lastLiveStep = liveSteps.length > 0 ? liveSteps[liveSteps.length - 1] : null;
@@ -162,6 +179,18 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
             </div>
             {current ? (
               <p className="text-xs text-emerald-400 truncate mt-0.5">⚡ {current.title as string}</p>
+            ) : pendingHighlight ? (
+              <p className={cn(
+                'text-xs truncate mt-0.5',
+                (pendingHighlight.status as string) === 'needs_review' ? 'text-purple-400'
+                : (pendingHighlight.status as string) === 'blocked' ? 'text-red-400'
+                : 'text-blue-400',
+              )}>
+                {(pendingHighlight.status as string) === 'needs_review' ? '📋'
+                 : (pendingHighlight.status as string) === 'blocked' ? '⛔'
+                 : '⏳'}
+                {' '}{pendingHighlight.title as string}
+              </p>
             ) : activeTask ? (
               <p className="text-xs text-amber-400 mt-0.5">preparando…</p>
             ) : (
@@ -182,6 +211,16 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
             </span>
             <span className="text-[11px] text-emerald-300 truncate font-mono">
               {stepSummary(liveActivity.content)}
+            </span>
+          </div>
+        )}
+
+        {/* Stuck warning — no task_events or heartbeat for > 5 min while supposedly running */}
+        {isStuck && stuckMs != null && (
+          <div className="mt-2 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-1.5">
+            <Clock className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+            <span className="text-[11px] text-amber-300">
+              Sin actividad por {Math.floor(stuckMs / 60000)} min — posiblemente atascado. Usa el botón ↺ del diagrama para desatascar.
             </span>
           </div>
         )}
@@ -258,15 +297,54 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
                     )}
                   </div>
                   {machine.authOk !== true && !connecting && (
-                    <button
-                      onClick={() => setConnecting(true)}
-                      className="shrink-0 text-[10px] font-mono px-2.5 py-1 rounded border border-cyan-500/40 text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 transition-colors"
-                    >
-                      {machine.authOk === false ? 'Reconectar' : 'Conectar'}
-                    </button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {/* Quick re-check: detects manual `claude auth login` without full reconnect */}
+                      <button
+                        onClick={async () => {
+                          setCheckingAuth(true);
+                          try {
+                            await devStudioApi.checkAgentAuth(sessionId, role);
+                            const d = await devStudioApi.getAgentDetail(sessionId, role);
+                            setDetail(d);
+                          } finally {
+                            setCheckingAuth(false);
+                          }
+                        }}
+                        disabled={checkingAuth}
+                        title="Verificar si ya se autenticó en la terminal"
+                        className="text-zinc-600 hover:text-zinc-400 transition-colors"
+                      >
+                        <RefreshCw className={cn('h-3.5 w-3.5', checkingAuth && 'animate-spin')} />
+                      </button>
+                      <button
+                        onClick={() => setConnecting(true)}
+                        className="text-[10px] font-mono px-2.5 py-1 rounded border border-cyan-500/40 text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 transition-colors"
+                      >
+                        {machine.authOk === false ? 'Reconectar' : 'Conectar'}
+                      </button>
+                    </div>
                   )}
                   {machine.authOk === true && (
-                    <span className="shrink-0 text-[10px] font-mono text-emerald-400">🔑</span>
+                    <>
+                      <span className="shrink-0 text-[10px] font-mono text-emerald-400">🔑</span>
+                      <button
+                        onClick={async () => {
+                          setCheckingAuth(true);
+                          try {
+                            await devStudioApi.checkAgentAuth(sessionId, role);
+                            const d = await devStudioApi.getAgentDetail(sessionId, role);
+                            setDetail(d);
+                          } finally {
+                            setCheckingAuth(false);
+                          }
+                        }}
+                        disabled={checkingAuth}
+                        title="Re-verificar auth ahora"
+                        className="shrink-0 text-zinc-600 hover:text-zinc-400 transition-colors ml-1"
+                      >
+                        <RefreshCw className={cn('h-3 w-3', checkingAuth && 'animate-spin')} />
+                      </button>
+                    </>
                   )}
                 </div>
 
@@ -320,9 +398,15 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
               </Section>
             )}
 
-            {pending.filter((t) => t !== current).length > 0 && (
+            {!current && pendingHighlight && (pendingHighlight.status as string) === 'needs_review' && (
+              <Section title="En revisión" icon={<span className="w-2 h-2 rounded-full bg-purple-400" />}>
+                <TaskCard task={pendingHighlight} />
+              </Section>
+            )}
+
+            {pending.filter((t) => t !== current && t !== pendingHighlight).length > 0 && (
               <Section title="Pendientes">
-                {pending.filter((t) => t !== current).map((t) => (
+                {pending.filter((t) => t !== current && t !== pendingHighlight).map((t) => (
                   <TaskCard key={t.id as string} task={t} />
                 ))}
               </Section>
@@ -544,7 +628,8 @@ function ConnectClaudeCodeForm({
 
   // OAuth URL flow state
   const [oauthUrl, setOauthUrl] = useState<string | null>(null);
-  const [oauthStatus, setOauthStatus] = useState<'idle' | 'starting' | 'waiting' | 'done' | 'error'>('idle');
+  const [oauthStatus, setOauthStatus] = useState<'idle' | 'starting' | 'waiting_for_code' | 'submitting_code' | 'waiting' | 'done' | 'error' | 'use_terminal'>('idle');
+  const [oauthCode, setOauthCode] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -561,9 +646,9 @@ function ConnectClaudeCodeForm({
       .catch(() => {});
   }, []);
 
-  // Poll for OAuth completion once the URL is visible.
+  // Poll for OAuth completion once the URL is visible (waiting_for_code or waiting states).
   useEffect(() => {
-    if (oauthStatus !== 'waiting') return;
+    if (oauthStatus !== 'waiting' && oauthStatus !== 'waiting_for_code') return;
     let alive = true;
     const iv = setInterval(async () => {
       try {
@@ -573,13 +658,19 @@ function ConnectClaudeCodeForm({
           clearInterval(iv);
           setOauthStatus('done');
           setTimeout(onSuccess, 1200);
+        } else if (s.status === 'waiting_for_code' && s.url) {
+          // Backend captured the URL — show code-entry UI
+          setOauthUrl(s.url);
+          setOauthStatus('waiting_for_code');
+        } else if (s.status === 'waiting_callback') {
+          setOauthStatus('waiting');
         } else if (s.status === 'failed') {
           clearInterval(iv);
           setOauthStatus('error');
           setError(s.error ?? 'La autenticación falló');
         }
       } catch { /* retry */ }
-    }, 2500);
+    }, 2000);
     return () => { alive = false; clearInterval(iv); };
   }, [oauthStatus, sessionId, role, onSuccess]);
 
@@ -588,14 +679,40 @@ function ConnectClaudeCodeForm({
   // Start the server-side OAuth flow (for oauth method)
   async function startOAuth() {
     setOauthStatus('starting');
+    setOauthCode('');
     setError(null);
     try {
       const r = await devStudioApi.startOAuthFlow(sessionId, role);
-      setOauthUrl(r.url);
-      setOauthStatus('waiting');
+      if ((r as { useTerminal?: boolean }).useTerminal || !(r as { ok?: boolean }).ok) {
+        setOauthStatus('use_terminal');
+        setError((r as { error?: string }).error ?? null);
+        return;
+      }
+      const url = (r as { url: string | null }).url;
+      if (url) {
+        setOauthUrl(url);
+        // Start in waiting_for_code — user visits URL and pastes back the code
+        setOauthStatus('waiting_for_code');
+      } else {
+        // URL not ready yet — poll for it
+        setOauthStatus('waiting_for_code');
+      }
     } catch (e) {
       setOauthStatus('error');
       setError((e as Error).message || 'No se pudo iniciar el flujo OAuth');
+    }
+  }
+
+  async function submitCode() {
+    if (!oauthCode.trim()) return;
+    setOauthStatus('submitting_code');
+    setError(null);
+    try {
+      await devStudioApi.submitOAuthCode(sessionId, role, oauthCode.trim());
+      setOauthStatus('waiting');
+    } catch (e) {
+      setOauthStatus('waiting_for_code');
+      setError((e as Error).message || 'Error enviando el código');
     }
   }
 
@@ -685,49 +802,108 @@ function ConnectClaudeCodeForm({
           {oauthStatus === 'starting' && (
             <div className="flex items-center gap-2 text-[10px] text-zinc-400">
               <Loader2 className="h-3 w-3 animate-spin text-cyan-400" />
-              Iniciando claude setup-token en la máquina…
+              Iniciando <code className="font-mono">claude auth login</code> en la máquina…
             </div>
           )}
 
-          {(oauthStatus === 'waiting' || oauthStatus === 'done') && oauthUrl && (
+          {/* ── Step 1: URL ready — user must visit it and get a code ── */}
+          {(oauthStatus === 'waiting_for_code' || oauthStatus === 'submitting_code') && (
             <div className="space-y-2">
-              <div className="rounded border border-amber-500/20 bg-amber-500/5 px-2.5 py-2 space-y-1.5">
-                <p className="text-[10px] font-semibold text-amber-300">
-                  Abre este enlace en tu navegador para autenticarte:
+              {oauthUrl ? (
+                <div className="rounded border border-amber-500/20 bg-amber-500/5 px-2.5 py-2 space-y-1.5">
+                  <p className="text-[10px] font-semibold text-amber-300">
+                    1. Abre este enlace en tu navegador:
+                  </p>
+                  <a
+                    href={oauthUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-start gap-1.5 text-[10px] font-mono text-cyan-400 hover:text-cyan-300 break-all"
+                  >
+                    <ExternalLink className="h-3 w-3 shrink-0 mt-0.5" />
+                    {oauthUrl}
+                  </a>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 text-[10px] text-zinc-400">
+                  <Loader2 className="h-3 w-3 animate-spin text-cyan-400" />
+                  Esperando URL de autenticación…
+                </div>
+              )}
+              <div className="space-y-1">
+                <p className="text-[10px] text-zinc-400">
+                  2. Inicia sesión con tu cuenta de Claude. Cuando el navegador muestre un código, pégalo aquí:
                 </p>
-                <a
-                  href={oauthUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-start gap-1.5 text-[10px] font-mono text-cyan-400 hover:text-cyan-300 break-all"
-                >
-                  <ExternalLink className="h-3 w-3 shrink-0 mt-0.5" />
-                  {oauthUrl}
-                </a>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={oauthCode}
+                    onChange={(e) => setOauthCode(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void submitCode(); }}
+                    placeholder="Pega el código de autorización aquí…"
+                    className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-[10px] font-mono text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
+                  />
+                  <button
+                    onClick={() => void submitCode()}
+                    disabled={!oauthCode.trim() || oauthStatus === 'submitting_code'}
+                    className="rounded border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1.5 text-[10px] font-mono text-cyan-400 hover:bg-cyan-500/20 disabled:opacity-40 transition-colors shrink-0"
+                  >
+                    {oauthStatus === 'submitting_code' ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Enviar'}
+                  </button>
+                </div>
+                {error && <p className="text-[9px] font-mono text-red-400">{error}</p>}
               </div>
-
-              {oauthStatus === 'waiting' && (
-                <div className="flex items-center gap-2 text-[10px] text-zinc-500">
-                  <Loader2 className="h-3 w-3 animate-spin text-cyan-400 shrink-0" />
-                  Esperando que completes la autenticación en el navegador…
-                </div>
-              )}
-              {oauthStatus === 'done' && (
-                <div className="flex items-center gap-2 text-[10px] text-emerald-400">
-                  <ShieldCheck className="h-3.5 w-3.5" />
-                  ¡Conectado! Cerrando formulario…
-                </div>
-              )}
             </div>
           )}
 
-          {oauthStatus === 'error' && (
-            <button
-              onClick={() => { setOauthStatus('idle'); setError(null); setOauthUrl(null); }}
-              className="w-full rounded border border-zinc-800 bg-zinc-950 py-1.5 text-xs font-mono text-zinc-400 hover:border-zinc-700 transition-colors"
-            >
-              Reintentar
-            </button>
+          {/* ── Step 2: code submitted — waiting for token ── */}
+          {oauthStatus === 'waiting' && (
+            <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+              <Loader2 className="h-3 w-3 animate-spin text-cyan-400 shrink-0" />
+              Verificando código con Anthropic…
+            </div>
+          )}
+
+          {oauthStatus === 'done' && (
+            <div className="flex items-center gap-2 text-[10px] text-emerald-400">
+              <ShieldCheck className="h-3.5 w-3.5" />
+              ¡Conectado! Cerrando formulario…
+            </div>
+          )}
+
+          {(oauthStatus === 'error' || oauthStatus === 'use_terminal') && (
+            <div className="space-y-2">
+              {/* Primary action: terminal guide */}
+              <div className="rounded border border-cyan-500/20 bg-cyan-500/5 px-2.5 py-2.5 space-y-2">
+                <div className="flex items-center gap-1.5">
+                  <Terminal className="h-3.5 w-3.5 text-cyan-400 shrink-0" />
+                  <p className="text-[11px] font-semibold text-cyan-300">Conecta vía Terminal del agente</p>
+                </div>
+                <p className="text-[10px] text-zinc-400">
+                  Abre la pestaña <span className="font-semibold text-zinc-200">Terminal</span> de arriba,
+                  ejecuta este comando y sigue las instrucciones en pantalla:
+                </p>
+                <code className="block text-[10px] font-mono text-cyan-400 bg-black/50 rounded px-2.5 py-1.5 select-all cursor-text">
+                  claude auth login
+                </code>
+                <p className="text-[10px] text-zinc-500">
+                  Aparecerá una URL — ábrela en el navegador para autenticar tu cuenta de Claude.
+                  Cuando termines, haz click en <span className="text-zinc-300 font-semibold">Re-verificar</span> (el ícono ↺ junto al estado de autenticación).
+                </p>
+                {error && (
+                  <details className="mt-1">
+                    <summary className="text-[9px] text-zinc-700 cursor-pointer hover:text-zinc-500">Ver detalles del error</summary>
+                    <p className="text-[9px] font-mono text-zinc-600 mt-1 whitespace-pre-wrap break-all">{error}</p>
+                  </details>
+                )}
+              </div>
+              <button
+                onClick={() => { setOauthStatus('idle'); setError(null); setOauthUrl(null); }}
+                className="w-full rounded border border-zinc-800 bg-zinc-950 py-1.5 text-[10px] font-mono text-zinc-500 hover:border-zinc-700 hover:text-zinc-400 transition-colors"
+              >
+                Reintentar flujo automático
+              </button>
+            </div>
           )}
         </div>
       )}

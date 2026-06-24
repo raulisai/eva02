@@ -167,7 +167,7 @@ export interface FlowState {
   iterationObjective: string | null;
   agents: FlowAgentState[];
   handoffs: FlowHandoff[];
-  stuck: { role: string; reason: string; sinceMs: number | null; taskTitle: string | null } | null;
+  stuck: { role: string; reason: string; sinceMs: number | null; taskTitle: string | null; lastError?: string | null } | null;
 }
 
 export interface ClaudeAuthOption {

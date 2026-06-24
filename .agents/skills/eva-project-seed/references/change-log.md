@@ -2,6 +2,10 @@
 
 Newest first. Every use of `$eva-project-seed` must add one `C:` and one `P:` entry. Keep it compact and exact.
 
+### 2026-06-24 07:47Z
+C: dev-studio/claude-oauth: make automated Claude Code auth URL capture tolerate wrapped terminal output, OSC hyperlinks, and query-fragment output; pass no-color/wide-terminal env into `docker exec`; avoid blank-code Enter at the prompt and accept duplicate/tardy code submits when already in flight/configured; files=apps/eva-core/src/dev-studio/claude-code-runner.service.ts,apps/eva-core/src/dev-studio/dev-studio.controller.ts,apps/eva-core/src/dev-studio/__tests__/dev-robustness.spec.ts,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=npm test --workspace @eva/core -- src/dev-studio/__tests__/dev-robustness.spec.ts --runInBand; npm run build --workspace @eva/core
+P: pending/improve -> run a live Dev Studio agent-machine OAuth smoke with real Claude Code and confirm the automatic flow reaches code entry, accepts the pasted code once, and does not fall back to the terminal
+
 ### 2026-06-21 08:17Z
 C: whatsapp/runtime: route explicit WhatsApp screenshots/reads/sends deterministically, classify screenshots as immediate and sends as approval, block WhatsApp public-research fallback, and enforce adaptive tool subsets for JSON decisions; files=apps/eva-core/src/agent/tier.ts,apps/eva-core/src/agent/agent-runner.service.ts,apps/eva-core/src/agent/agent-loop.service.ts,apps/eva-core/src/agent/__tests__/agent-runner.service.spec.ts,apps/eva-core/src/agent/__tests__/agent-loop.service.spec.ts,docs/architecture.md,docs/backlog.md,.agents/skills/eva-project-seed/references/project-map.md; tests=cd apps/eva-core && npm test -- --runInBand src/agent/__tests__/agent-runner.service.spec.ts src/agent/__tests__/agent-loop.service.spec.ts src/integrations/__tests__/whatsapp-web.service.spec.ts (177 passed); npm run build; npm run lint
 P: pending/improve -> run the live WhatsApp screenshot/read/send smoke with the persistent local profile and confirm the action log contains no agent-loop, skills, browser_navigate, or web_search entries

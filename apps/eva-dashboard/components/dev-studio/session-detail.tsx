@@ -15,14 +15,15 @@ import {
   Activity,
   Cpu,
   Layers,
-  Check,
   AlertTriangle,
   Eye,
   EyeOff,
   CheckCircle,
-  ChevronRight,
   ClipboardList,
   User,
+  Users,
+  RotateCcw,
+  Trash2,
 } from 'lucide-react';
 import { devStudioApi } from '@/lib/dev-studio-api';
 import type {
@@ -33,13 +34,21 @@ import type {
   DevMergeProposal,
   DevEvent,
   DevIteration,
+  FlowState,
 } from '@/lib/dev-studio-types';
 import { useAuthToken } from '@/hooks/use-auth-token';
 import { SessionStatusBadge } from './session-status-badge';
 import { SessionTimeline } from './session-timeline';
 import { MergeProposalPanel } from './merge-proposal-panel';
 import { AgentFlowDiagram } from './agent-flow-diagram';
+import { TaskDetailPanel } from './task-detail-panel';
 import { cn } from '@/lib/utils';
+
+const ROLE_DISPLAY: Record<string, string> = {
+  project_manager: 'PM', architect: 'Architect', backend: 'Backend',
+  frontend: 'Frontend', full_stack: 'Full Stack', testing: 'Testing',
+  deployment: 'Deployment', reviewer: 'Reviewer',
+};
 
 interface SessionDetailProps {
   session: DevSession;
@@ -67,12 +76,16 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
   const [submittingTaskId, setSubmittingTaskId] = useState<string | null>(null);
   const [taskResponses, setTaskResponses] = useState<Record<string, string>>({});
   const [showSensitive, setShowSensitive] = useState<Record<string, boolean>>({});
+  const [selectedTask, setSelectedTask] = useState<Record<string, unknown> | null>(null);
+  const [flow, setFlow] = useState<FlowState | null>(null);
+  const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
+  const [unsticking, setUnsticking] = useState(false);
 
   const orgToken = useAuthToken();
 
   const refresh = useCallback(async () => {
     try {
-      const [g, ht, ag, mp, ev, it, tk, sList] = await Promise.all([
+      const [g, ht, ag, mp, ev, it, tk, sList, fl] = await Promise.all([
         devStudioApi.listGoals(session.id),
         devStudioApi.listHumanTasks(session.id),
         devStudioApi.listAgents(session.id),
@@ -81,6 +94,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
         devStudioApi.listIterations(session.id),
         devStudioApi.listTasks(session.id),
         devStudioApi.listSessions(),
+        devStudioApi.getFlowState(session.id).catch(() => null),
       ]);
       setGoals(g);
       setHumanTasks(ht);
@@ -90,6 +104,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
       setIterations(it);
       setTasks(tk);
       setSessions(sList);
+      if (fl) setFlow(fl);
       
       const updated = await devStudioApi.getSession(session.id);
       setSession(updated);
@@ -444,6 +459,60 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
           </div>
         )}
 
+        {/* ── Stuck alert banner — shown when flow.stuck has a reason ─────── */}
+        {flow?.stuck && session.status === 'running' && (
+          <div className="flex items-start gap-3 rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 shadow-[0_0_24px_-4px_rgba(239,68,68,0.2)]">
+            <AlertTriangle className="h-5 w-5 text-red-400 shrink-0 mt-0.5 animate-pulse" />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h4 className="text-xs font-bold text-red-300">
+                  Sesión atascada — {flow.stuck.reason}
+                </h4>
+                {flow.stuck.role !== 'human' && (
+                  <span className="text-[9px] font-mono bg-red-500/10 border border-red-500/20 text-red-400 px-1.5 py-0.5 rounded uppercase">
+                    {ROLE_DISPLAY[flow.stuck.role] ?? flow.stuck.role}
+                  </span>
+                )}
+                {flow.stuck.sinceMs != null && (
+                  <span className="text-[9px] font-mono text-red-500/70">
+                    {Math.round(flow.stuck.sinceMs / 60000)}m sin avance
+                  </span>
+                )}
+              </div>
+              {flow.stuck.taskTitle && (
+                <p className="text-[10px] text-zinc-500 mt-0.5 truncate">
+                  Tarea: &ldquo;{flow.stuck.taskTitle}&rdquo;
+                </p>
+              )}
+              {(flow.stuck as { lastError?: string | null }).lastError && (
+                <p className="text-[10px] font-mono text-red-400/80 mt-1 line-clamp-2">
+                  {(flow.stuck as { lastError: string }).lastError}
+                </p>
+              )}
+            </div>
+            {flow.stuck.role !== 'human' && (
+              <button
+                onClick={async () => {
+                  setUnsticking(true);
+                  try {
+                    const r = await devStudioApi.unstickSession(session.id);
+                    await refresh();
+                    if (r.requeued === 0) alert('No hay tareas atascadas que re-encolar en este momento.');
+                  } finally {
+                    setUnsticking(false);
+                  }
+                }}
+                disabled={unsticking}
+                className="shrink-0 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold bg-red-500/20 border border-red-500/30 text-red-300 hover:bg-red-500/30 disabled:opacity-40 transition-all"
+              >
+                {unsticking
+                  ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Desatascando…</>
+                  : <><RotateCcw className="h-3.5 w-3.5" /> Desatacar sesión</>}
+              </button>
+            )}
+          </div>
+        )}
+
         {/* 1. Flow Diagram Container (Center) */}
         <section className="relative">
           <AgentFlowDiagram
@@ -451,6 +520,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
             sessionId={session.id}
             orgToken={orgToken ?? ''}
             sessionStatus={session.status}
+            onAgentDeleted={refresh}
           />
 
           {/* Steer command form below diagram */}
@@ -783,47 +853,128 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
                   failed:       'text-red-400 border-red-500/20 bg-red-500/5',
                   cancelled:    'text-zinc-700 border-zinc-800 bg-zinc-950',
                 };
-                
-                const isExpanded = expandedTaskId === t.id;
+
+                const status = t.status as string;
+                const isFailedOrCancelled = ['failed', 'cancelled'].includes(status);
+                const isActive = ['running', 'assigned'].includes(status);
+
+                // Check if this task is the stuck one
+                const stuckAgent = flow?.stuck;
+                const isStuck = stuckAgent && stuckAgent.taskTitle === (t.title as string);
+
+                // Resolve assigned agent name
+                const assignedAgent = t.assigned_agent_id
+                  ? agents.find((a) => a.id === t.assigned_agent_id)
+                  : agents.find((a) => a.role === (t.role as string));
+                const agentName = assignedAgent?.name ?? (ROLE_DISPLAY[t.role as string] ?? t.role);
+
+                // Collaborators: other unique roles active in the same iteration
+                const collaboratorNames: string[] = t.iteration_id
+                  ? tasks
+                      .filter((other: any) => other.iteration_id === t.iteration_id && other.role !== t.role)
+                      .reduce((acc: string[], other: any) => {
+                        const role = other.role as string;
+                        if (role && !acc.includes(role)) acc.push(role);
+                        return acc;
+                      }, [])
+                      .slice(0, 3)
+                      .map((role: string) => agents.find((a) => a.role === role)?.name ?? ROLE_DISPLAY[role] ?? role)
+                  : [];
 
                 return (
                   <div
-                    key={t.id}
-                    className="flex flex-col rounded-lg border border-white/5 bg-[#090d16]/40 p-3 hover:border-zinc-800 cursor-pointer transition-all"
-                    onClick={() => setExpandedTaskId(isExpanded ? null : t.id)}
+                    key={t.id as string}
+                    className={cn(
+                      'group flex flex-col rounded-lg border bg-[#090d16]/40 p-3 transition-all cursor-pointer',
+                      isStuck ? 'border-amber-500/30 hover:border-amber-500/50' : 'border-white/5 hover:border-zinc-700',
+                    )}
+                    onClick={() => setSelectedTask(t)}
                   >
                     <div className="flex items-start gap-3 justify-between">
                       <div className="min-w-0 flex-1 leading-snug">
-                        <p className="text-[11px] font-semibold text-zinc-200 truncate">{t.title}</p>
-                        <div className="flex items-center gap-1.5 mt-1 font-mono text-[9px] text-zinc-500">
-                          <span className="uppercase tracking-wider">{t.role}</span>
-                          {t.branch_name && <span className="text-zinc-700">· {t.branch_name}</span>}
-                        </div>
-                      </div>
-                      <span className={cn("text-[9px] font-mono border rounded px-1.5 py-0.5 capitalize shrink-0 select-none", statusColor[t.status] ?? 'text-zinc-400 border-zinc-800 bg-zinc-900/20')}>
-                        {t.status}
-                      </span>
-                    </div>
+                        <p className="text-[11px] font-semibold text-zinc-200 truncate">{t.title as string}</p>
 
-                    {isExpanded && (
-                      <div className="mt-2 pl-3 border-l border-white/5 py-1 text-[9.5px] text-zinc-500 leading-normal animate-fade-in font-mono space-y-1">
-                        {t.id && <p>Task ID: {t.id}</p>}
-                        {t.created_at && <p>Creada: {new Date(t.created_at).toLocaleString()}</p>}
-                        {t.updated_at && <p>Actualizada: {new Date(t.updated_at).toLocaleString()}</p>}
-                        {Array.isArray(t.acceptance_criteria) && t.acceptance_criteria.length > 0 && (
-                          <div className="pt-1 space-y-0.5">
-                            <p className="text-zinc-600">Criterios:</p>
-                            {t.acceptance_criteria.map((c: any, i: number) => (
-                              <p key={i} className="text-zinc-500 font-sans">· {typeof c === 'string' ? c : c.description}</p>
-                            ))}
+                        {/* Blocking hint */}
+                        {isStuck && stuckAgent && (
+                          <div className="flex items-center gap-1 mt-1">
+                            <AlertTriangle className="h-2.5 w-2.5 text-amber-400 shrink-0" />
+                            <span className="text-[9px] text-amber-400 font-mono truncate">
+                              {stuckAgent.reason}
+                              {stuckAgent.sinceMs != null && ` · ${Math.round(stuckAgent.sinceMs / 60000)}m`}
+                            </span>
                           </div>
                         )}
-                        {t.result_summary && (
-                          <p className={cn('font-sans pt-1', t.status === 'failed' ? 'text-red-400' : 'text-zinc-400')}>
-                            {t.status === 'failed' ? 'Error: ' : 'Resultado: '}{t.result_summary}
-                          </p>
+
+                        {/* Assigned to */}
+                        <div className="flex items-center gap-1 mt-1.5">
+                          <User className="h-2.5 w-2.5 text-cyan-500/70 shrink-0" />
+                          <span className="text-[9.5px] text-cyan-400/80 font-medium truncate">{agentName}</span>
+                        </div>
+
+                        {/* Working with collaborators */}
+                        {collaboratorNames.length > 0 && (
+                          <div className="flex items-center gap-1 mt-1">
+                            <Users className="h-2.5 w-2.5 text-zinc-600 shrink-0" />
+                            <span className="text-[9px] text-zinc-500 font-mono truncate">
+                              con {collaboratorNames.join(', ')}
+                            </span>
+                          </div>
                         )}
+
+                        {/* Role + branch */}
+                        <div className="flex items-center gap-1.5 mt-1 font-mono text-[9px] text-zinc-600">
+                          <span className="uppercase tracking-wider">{ROLE_DISPLAY[t.role as string] ?? t.role}</span>
+                          {t.branch_name && <span className="text-zinc-700">· {t.branch_name as string}</span>}
+                        </div>
                       </div>
+
+                      <div className="flex flex-col items-end gap-1.5 shrink-0">
+                        <span className={cn('text-[9px] font-mono border rounded px-1.5 py-0.5 capitalize select-none', statusColor[status] ?? 'text-zinc-400 border-zinc-800 bg-zinc-900/20')}>
+                          {status}
+                        </span>
+
+                        {/* Action buttons — visible on hover */}
+                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          {isFailedOrCancelled && (
+                            <button
+                              title="Reintentar"
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                await devStudioApi.retryTask(t.id as string);
+                                await refresh();
+                              }}
+                              className="p-1 rounded text-zinc-600 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
+                            >
+                              <RotateCcw className="h-3 w-3" />
+                            </button>
+                          )}
+                          <button
+                            title="Eliminar tarea"
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (!confirm(`¿Eliminar "${t.title}"?`)) return;
+                              setDeletingTaskId(t.id as string);
+                              try {
+                                await devStudioApi.deleteTask(t.id as string);
+                                await refresh();
+                              } finally {
+                                setDeletingTaskId(null);
+                              }
+                            }}
+                            disabled={deletingTaskId === t.id}
+                            className="p-1 rounded text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Inline result summary for failed tasks */}
+                    {status === 'failed' && t.result_summary && (
+                      <p className="mt-2 text-[9.5px] text-red-400/80 font-mono line-clamp-2 border-t border-red-500/10 pt-1.5">
+                        {t.result_summary as string}
+                      </p>
                     )}
                   </div>
                 );
@@ -847,6 +998,18 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
           <span className="text-[9.5px] font-mono text-zinc-600 uppercase tracking-wide">Branch:</span>
           <span className="text-[10px] font-mono text-cyan-400/80">{session.session_branch}</span>
         </footer>
+      )}
+
+      {/* ── Task Detail Panel ────────────────────────────────────────────────── */}
+      {selectedTask && (
+        <TaskDetailPanel
+          task={selectedTask}
+          sessionId={session.id}
+          stuckInfo={flow?.stuck ?? null}
+          onClose={() => setSelectedTask(null)}
+          onRetry={() => { void refresh(); }}
+          onDelete={() => { void refresh(); }}
+        />
       )}
     </div>
   );

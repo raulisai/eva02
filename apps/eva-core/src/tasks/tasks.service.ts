@@ -67,6 +67,10 @@ export class TasksService {
   ): Promise<Task> {
     const task = await this.repo.findByIdOrThrow(taskId, orgId);
 
+    // Idempotent: same-status is a no-op — prevents planning→planning explosions
+    // when a task is picked up by two concurrent workers or re-queued on restart.
+    if (task.status === nextStatus) return task;
+
     if (!isValidTransition(task.status, nextStatus)) {
       throw new BadRequestException(
         `Cannot transition task from '${task.status}' to '${nextStatus}'`,

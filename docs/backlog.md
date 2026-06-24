@@ -31,6 +31,7 @@ Síntoma: una tarea (búsqueda de canción) reenviaba el mismo mensaje a Telegra
 - [x] **Validación de token al guardar**: `verifyToken()` corre `claude -p` 1-turn en contenedor efímero; `POST .../claude-code/credential` rechaza con 400 si el token es claramente inválido (no bloquea por fallos de infra).
 - [x] **`verifyAuth()` por máquina**: tras bootear una máquina de código, el orquestador verifica login dentro del contenedor y guarda `metadata.machine.authOk` + emite `dev.agent.machine{auth_ok|auth_failed}`. UI: chip "🔑 logueado / token inválido" en el panel del agente.
 - [x] **AUTH_FAILED tipado**: `run()` detecta errores de auth (regex) y los marca; el orquestador reabre el provisioning `claude_code_auth` y re-encola la task en vez de un blocker genérico; `handleAgentFailure` es idempotente respecto al provisioning.
+- [x] **OAuth automático tolerante a terminal**: `claude auth login` ahora corre con env vars dentro de `docker exec` (`TERM=dumb`, `NO_COLOR`, `COLUMNS=4096`) y el runner reconstruye URLs OAuth completas desde salida envuelta, OSC hyperlinks o query fragments antes de caer al modo terminal manual; no envía Enter automático al prompt de código y acepta submits duplicados/tardíos si el código ya está en vuelo o la credencial ya se guardó.
 
 **Debuggability (P2):**
 - [x] **`claude.exit` inspeccionable**: cada run de Claude Code emite a `dev_events` su exit (ok/auth_failed/error) con image, container y cola del stderr.

@@ -5,14 +5,29 @@ import { DevSessionService } from '../dev-session.service';
  * per edge, stuck detection) by stubbing the data-access methods. No DB.
  */
 function makeService(): DevSessionService {
-  // Fake admin client: only dev_iterations.maybeSingle() is hit by getFlowState.
-  const admin = {
-    from: () => ({
-      select: () => ({
-        eq: () => ({ maybeSingle: async () => ({ data: { objective: 'Construir el MVP', started_at: '2026-06-19T00:00:00Z' } }) }),
-      }),
-    }),
+  // Chainable query builder that returns empty results for everything
+  // EXCEPT dev_iterations (which returns the test objective via maybeSingle).
+  // getFlowState hits dev_iterations (maybeSingle) and potentially dev_events (.in/.limit).
+  const makeChain = (tableName?: string): any => {
+    const terminal = {
+      data: tableName === 'dev_iterations'
+        ? { objective: 'Construir el MVP', started_at: '2026-06-19T00:00:00Z' }
+        : [],
+      error: null,
+    };
+    const chain: any = {
+      select: () => chain,
+      eq:     () => chain,
+      in:     () => chain,
+      not:    () => chain,
+      filter: () => chain,
+      order:  () => chain,
+      limit:  () => Promise.resolve({ data: [], error: null }),
+      maybeSingle: () => Promise.resolve({ data: terminal.data, error: null }),
+    };
+    return chain;
   };
+  const admin = { from: (table: string) => makeChain(table) };
   const db = { admin } as unknown as ConstructorParameters<typeof DevSessionService>[0];
   const events = {} as ConstructorParameters<typeof DevSessionService>[1];
   return new DevSessionService(db, events);

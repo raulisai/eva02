@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Get, HttpCode, HttpStatus, Param,
+  Body, Controller, Delete, Get, HttpCode, HttpStatus, Param,
   ParseUUIDPipe, Post, Req, Query, BadRequestException, NotFoundException,
 } from '@nestjs/common';
 import { AuthenticatedRequest } from '../common/types';
@@ -74,6 +74,16 @@ export class DevStudioController {
     return result;
   }
 
+  @Delete('sessions/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deleteSession(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthenticatedRequest) {
+    try {
+      await this.sessions.deleteSession(id, req.user.orgId);
+    } catch (err) {
+      throw new BadRequestException((err as Error).message);
+    }
+  }
+
   @Post('sessions/:id/steer')
   @HttpCode(HttpStatus.ACCEPTED)
   async steerSession(
@@ -139,6 +149,48 @@ export class DevStudioController {
     return this.sessions.listStudioTasks(id, req.user.orgId, status);
   }
 
+  @Post('tasks/:id/retry')
+  @HttpCode(HttpStatus.OK)
+  async retryTask(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthenticatedRequest) {
+    const { orgId } = req.user;
+    const task = await this.sessions.retryStudioTask(id, orgId);
+    const sessionId = task?.session_id as string | undefined;
+    if (sessionId) void this.orchestrator.tick(sessionId, orgId);
+    return { ok: true, task };
+  }
+
+  @Delete('tasks/:id')
+  @HttpCode(HttpStatus.OK)
+  async deleteTask(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthenticatedRequest) {
+    await this.sessions.deleteStudioTask(id, req.user.orgId);
+    return { ok: true };
+  }
+
+  @Get('tasks/:id/events')
+  getTaskEvents(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('limit') limit: string | undefined,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.sessions.listTaskEvents(id, req.user.orgId, limit ? parseInt(limit, 10) : 100);
+  }
+
+  /**
+   * Force-requeue all tasks currently frozen in `assigned` or `running` for a
+   * session. Designed for the "Desatasca" button in the UI when tasks are
+   * visibly stuck and the heartbeat hasn't recovered them yet.
+   * Safe to call at any time — requeued tasks will be re-dispatched on the
+   * next tick, which this endpoint triggers immediately.
+   */
+  @Post('sessions/:id/unstick')
+  @HttpCode(HttpStatus.OK)
+  async unstickSession(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthenticatedRequest) {
+    const { orgId } = req.user;
+    const result = await this.sessions.unstickSession(id, orgId);
+    void this.orchestrator.tick(id, orgId);
+    return { ok: true, ...result };
+  }
+
   // ── Human Tasks ───────────────────────────────────────────────────────────
 
   @Get('sessions/:id/human-tasks')
@@ -182,6 +234,15 @@ export class DevStudioController {
     return this.sessions.listAgents(id, req.user.orgId);
   }
 
+  @Delete('agents/:id')
+  @HttpCode(HttpStatus.OK)
+  async deleteAgent(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthenticatedRequest) {
+    const { orgId } = req.user;
+    await this.claudeCode.destroyMachine(id).catch(() => undefined);
+    await this.sessions.deleteAgent(id, orgId);
+    return { ok: true };
+  }
+
   /**
    * Live flow state for the diagram: per-agent current task + stuck timing, the
    * last instruction on each communication edge, and a "where is it stuck" hint.
@@ -223,6 +284,46 @@ export class DevStudioController {
     return detail;
   }
 
+  /**
+   * Re-check Claude Code auth state for an agent's machine without running a
+   * full task. Detects both env-var tokens AND credentials written by manual
+   * `claude auth login`, then persists the result to dev_agents.metadata.
+   */
+  @Post('sessions/:id/agents/:role/machine/check-auth')
+  @HttpCode(HttpStatus.OK)
+  async checkAgentAuth(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('role') role: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const { orgId } = req.user;
+    const agent = await this.sessions.getAgent(id, orgId, role);
+    if (!agent) return { ok: false, authOk: false, error: 'Agente no encontrado' };
+
+    // If the machine isn't in the in-memory map, try to boot/reconnect it first.
+    if (!this.claudeCode.hasContainer(agent.id)) {
+      await this.claudeCode.bootMachine({ orgId, key: agent.id, role });
+    }
+
+    const check = await this.claudeCode.verifyAuth(orgId, agent.id);
+
+    // Persist the result so the UI badge updates without a full session tick.
+    const existing = (agent.metadata ?? {}) as Record<string, unknown>;
+    await this.sessions.updateAgentStatus(agent.id, orgId, agent.status ?? 'idle', {
+      metadata: {
+        ...existing,
+        machine: {
+          ...((existing.machine ?? {}) as Record<string, unknown>),
+          authOk: check.ok,
+          authError: check.error ?? null,
+          checkedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    return { ok: check.ok, authOk: check.ok, error: check.error ?? null };
+  }
+
   /** Manually (re)boot an agent's machine — lets the user spin it up on demand. */
   @Post('sessions/:id/agents/:role/machine/boot')
   @HttpCode(HttpStatus.ACCEPTED)
@@ -260,14 +361,20 @@ export class DevStudioController {
   ) {
     const { orgId } = req.user;
     const agent = await this.sessions.ensureAgent({ orgId, sessionId: id, role, name: `${role} Agent` });
+
     // Boot the machine if it isn't already up — OAuth needs a running container.
     if (!this.claudeCode.hasContainer(agent.id)) {
       const boot = await this.claudeCode.bootMachine({ orgId, key: agent.id, role });
       if (!boot.ok) throw new BadRequestException(`No se pudo levantar la máquina: ${boot.error}`);
     }
+
     const result = await this.claudeCode.startOAuthFlow(orgId, agent.id);
-    if ('error' in result) throw new BadRequestException(result.error);
-    return { url: result.url, agentId: agent.id };
+    if ('error' in result) {
+      // Return structured error so the UI can decide to show the terminal instead.
+      // Use 200 with ok:false rather than 400 so the frontend can read the message.
+      return { ok: false, url: null, agentId: agent.id, error: result.error, useTerminal: true };
+    }
+    return { ok: true, url: result.url, agentId: agent.id, error: null, useTerminal: false };
   }
 
   /** Poll the OAuth flow status after startAgentOAuth. */
@@ -298,6 +405,32 @@ export class DevStudioController {
       void this.orchestrator.tick(id, orgId);
     }
     return state;
+  }
+
+  /**
+   * Submit the authorization code obtained after visiting the OAuth URL.
+   * The code is piped to the running `claude auth login` process so it can
+   * exchange it for a token without the user needing to use the terminal.
+   */
+  @Post('sessions/:id/agents/:role/machine/oauth/code')
+  @HttpCode(HttpStatus.OK)
+  async submitAgentOAuthCode(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('role') role: string,
+    @Body() body: { code: string },
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const { orgId } = req.user;
+    const agent = await this.sessions.getAgent(id, orgId, role);
+    if (!agent) throw new NotFoundException('Agente no encontrado');
+    if (!body?.code?.trim()) throw new BadRequestException('El campo `code` es requerido');
+    const ok = this.claudeCode.submitOAuthCode(agent.id, body.code.trim());
+    if (!ok) {
+      const configured = await this.claudeCode.hasCredential(orgId);
+      if (configured) return { ok: true, alreadyConfigured: true };
+      throw new BadRequestException('No hay un flujo OAuth activo esperando el código. Reinicia el flujo.');
+    }
+    return { ok: true };
   }
 
   /**

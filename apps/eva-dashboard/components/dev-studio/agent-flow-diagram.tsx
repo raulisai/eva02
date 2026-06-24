@@ -16,6 +16,7 @@ import {
   User,
   Wrench,
   AlertTriangle,
+  Trash2,
 } from 'lucide-react';
 
 // ── Role metadata ─────────────────────────────────────────────────────────────
@@ -234,10 +235,12 @@ interface AgentFlowDiagramProps {
   sessionId: string;
   orgToken: string;
   sessionStatus: string;
+  onAgentDeleted?: () => void;
 }
 
-export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus }: AgentFlowDiagramProps) {
+export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus, onAgentDeleted }: AgentFlowDiagramProps) {
   const [selectedRole, setSelectedRole] = useState<AgentRole | null>(null);
+  const [deletingAgentId, setDeletingAgentId] = useState<string | null>(null);
   const [flow, setFlow] = useState<FlowState | null>(null);
 
   const isActive = ['running', 'planning', 'awaiting_goals_approval'].includes(sessionStatus);
@@ -529,6 +532,27 @@ export function AgentFlowDiagram({ agents, sessionId, orgToken, sessionStatus }:
                       <div className="absolute -top-1 -right-1 flex h-[18px] w-[18px] items-center justify-center rounded-full bg-cyan-950 border border-cyan-500/50 shadow-[0_0_8px_rgba(34,211,238,0.5)] animate-fade-in">
                         <span className="flex h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
                       </div>
+                    )}
+                    {/* Delete agent button — visible on hover, not for human node */}
+                    {clickable && agent && (
+                      <button
+                        title="Eliminar agente"
+                        className="absolute bottom-1 right-1 opacity-0 group-hover:opacity-100 p-0.5 rounded text-zinc-700 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          if (!confirm(`¿Eliminar agente ${meta.label}?`)) return;
+                          setDeletingAgentId(agent.id);
+                          try {
+                            await devStudioApi.deleteAgent(agent.id);
+                            onAgentDeleted?.();
+                          } finally {
+                            setDeletingAgentId(null);
+                          }
+                        }}
+                        disabled={deletingAgentId === agent.id}
+                      >
+                        <Trash2 className="h-2.5 w-2.5" />
+                      </button>
                     )}
                   </div>
                 </foreignObject>

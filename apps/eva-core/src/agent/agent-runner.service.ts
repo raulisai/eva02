@@ -384,8 +384,15 @@ export class AgentRunnerService implements OnApplicationBootstrap {
           await this.events.publish({ type: 'task.created', orgId: task.org_id, taskId: task.id, payload: { taskId: task.id, resumed_from_checkpoint: true } });
           this.logger.log(`Re-queued checkpointed ${task.status} task ${task.id}: "${task.title}"`);
         } else {
-          await this.failSafely(task.org_id, task.id, 'La tarea quedó incompleta al reiniciar el proceso.');
-          this.logger.warn(`Failed stuck ${task.status} task ${task.id}: "${task.title}"`);
+          // No trajectory — restart from scratch rather than killing the task.
+          // The description is intact so the agent re-runs it cleanly.
+          await this.db.admin
+            .from('tasks')
+            .update({ status: 'pending', started_at: null, error: null })
+            .eq('id', task.id)
+            .eq('org_id', task.org_id);
+          await this.events.publish({ type: 'task.created', orgId: task.org_id, taskId: task.id, payload: { taskId: task.id, title: task.title } });
+          this.logger.warn(`Restarted orphaned ${task.status} task ${task.id}: "${task.title}"`);
         }
       }
     } catch (err) {
@@ -3306,6 +3313,36 @@ Responde directamente al usuario en español, con un tono amable y natural.
     this.crossChannelCtx.delete(taskId); // prevent Map leaks on failure
     try {
       const current = await this.tasks.getTask(taskId, orgId);
+
+      // Transient LLM errors (503/429/high-demand) → re-queue with backoff instead
+      // of burning a permanent failure. Max 3 auto-retries per task.
+      const isTransientLlm = /503|high demand|unavailable|overload|rate.?limit|429/i.test(message);
+      const LLM_RETRY_MAX = 3;
+      if (isTransientLlm && !['completed', 'failed', 'cancelled'].includes(current.status)) {
+        const retryCount = ((current.metadata?.llm_retry_count as number) ?? 0);
+        if (retryCount < LLM_RETRY_MAX) {
+          const nextCount = retryCount + 1;
+          const delaySec = nextCount * 30; // 30s → 60s → 90s
+          this.logger.warn(`LLM transient error (retry ${nextCount}/${LLM_RETRY_MAX}) task ${taskId} — re-queuing in ${delaySec}s`);
+          await this.db.admin
+            .from('tasks')
+            .update({
+              status: 'pending',
+              started_at: null,
+              error: null,
+              metadata: { ...current.metadata, llm_retry_count: nextCount, llm_retry_at: new Date().toISOString() },
+            })
+            .eq('id', taskId)
+            .eq('org_id', orgId);
+          setTimeout(() => {
+            this.events.publish({ type: 'task.created', orgId, taskId, payload: { taskId, title: current.title } })
+              .catch((e: Error) => this.logger.warn(`LLM retry re-queue failed: ${e.message}`));
+          }, delaySec * 1000);
+          return;
+        }
+        message = `LLM no disponible después de ${LLM_RETRY_MAX} reintentos automáticos (${message.slice(0, 100)})`;
+      }
+
       if (current.status === 'pending') await this.tasks.transition(taskId, orgId, 'planning');
       const refreshed = await this.tasks.getTask(taskId, orgId);
       // planning, running and waiting_for_approval can all fail directly

@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, Optional, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { spawn, execFile, ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -14,6 +14,7 @@ const execFileAsync = promisify(execFile);
 const CONTAINER_GRACE_MS = 5 * 60 * 1000;
 
 const CREDENTIAL_PROVIDER = 'claude_code';
+const CLAUDE_OAUTH_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
 
 /** Auth methods the user can choose the first time a code agent needs Claude Code. */
 export type ClaudeAuthMethod = 'oauth' | 'api_key' | 'org';
@@ -78,7 +79,7 @@ export interface AuthCheckResult {
   authFailed?: boolean;
 }
 
-export type OAuthStatus = 'scanning_url' | 'waiting_callback' | 'completed' | 'failed';
+export type OAuthStatus = 'scanning_url' | 'waiting_for_code' | 'waiting_callback' | 'completed' | 'failed';
 
 export interface OAuthFlowState {
   status: OAuthStatus;
@@ -93,6 +94,8 @@ interface PendingOAuth {
   proc: ChildProcess;
   orgId: string;
   state: OAuthFlowState;
+  /** Accumulated raw output (ANSI-stripped) for multi-line URL reconstruction. */
+  fullBuf: string;
   /** Resolve the startOAuthFlow() promise once we have a URL. */
   onUrl: ((url: string) => void) | null;
   onError: ((err: string) => void) | null;
@@ -159,7 +162,7 @@ interface ClaudeContainer {
 }
 
 @Injectable()
-export class ClaudeCodeRunnerService implements OnModuleDestroy {
+export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ClaudeCodeRunnerService.name);
   private dockerOk: boolean | null = null;
 
@@ -178,10 +181,55 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
 
   constructor(@Optional() private readonly integrations?: IntegrationsService) {}
 
+  /**
+   * On startup, scan Docker for any `eva-agent-*` containers that survived a
+   * process restart and register them so terminal attach and task runs work
+   * immediately without waiting for a full session re-boot.
+   */
+  async onModuleInit(): Promise<void> {
+    if (!(await this.dockerAvailable())) return;
+    try {
+      const { stdout } = await execFileAsync('docker', [
+        'ps', '--filter', 'name=eva-agent-', '--format', '{{.Names}}\t{{.Image}}',
+      ], { timeout: 10_000, env: process.env });
+
+      for (const line of stdout.split('\n')) {
+        const [name, image] = line.trim().split('\t');
+        if (!name || !image) continue;
+        // Deterministic names: eva-agent-{uuid32} — extract key from name
+        const m = /^eva-agent-([0-9a-f]{32})$/.exec(name);
+        if (!m) continue;
+        // Reconstruct UUID with dashes: 8-4-4-4-12
+        const h = m[1];
+        const key = `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+        if (this.containers.has(key)) continue;
+        this.containers.set(key, {
+          name, image, hostDir: '', role: undefined,
+          hasToken: true, sessionScoped: true, shells: new Map(),
+        });
+        this.logger.log(`[init] Reconnected orphaned container ${name} → key ${key.slice(0,8)}`);
+      }
+    } catch {
+      // Docker not available or no matching containers — silently skip
+    }
+  }
+
   async onModuleDestroy(): Promise<void> {
     for (const [taskId] of this.containers) {
       await this.destroyContainer(taskId).catch(() => undefined);
     }
+  }
+
+  // ── Deterministic naming ───────────────────────────────────────────────────
+
+  /**
+   * Stable container name derived from the agent key (dev_agents.id).
+   * Using a fixed name lets us reconnect to the same container after a
+   * process restart without scanning Docker or storing the name elsewhere.
+   * Format: eva-agent-{uuid32}  (32 hex chars, no dashes — Docker allows it).
+   */
+  private deterministicContainerName(key: string): string {
+    return `eva-agent-${key.replace(/-/g, '').slice(0, 32)}`;
   }
 
   // ── Credentials ──────────────────────────────────────────────────────────
@@ -229,6 +277,51 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     return !!text && ClaudeCodeRunnerService.AUTH_ERR_RE.test(text);
   }
 
+  static extractOAuthUrlFromOutput(output: string): string | null {
+    const normalized = this.normalizeTerminalOutput(output);
+    const compact = this.trimOAuthPrompt(normalized.replace(/\s+/g, ''));
+
+    for (const text of [normalized, compact]) {
+      const match = /https:\/\/[a-z0-9.%-]*(?:anthropic\.com|claude\.ai)[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*/i.exec(text);
+      const candidate = match ? this.cleanOAuthUrlCandidate(match[0]) : null;
+      if (candidate) return candidate;
+    }
+
+    const fragment = /(?:client_id=)?[A-Za-z0-9._~-]+&response_type=code&redirect_uri=https%3A%2F%2Fplatform\.claude\.com%2Foauth%2Fcode%2Fcallback[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*/i.exec(compact);
+    if (!fragment) return null;
+
+    const query = fragment[0].startsWith('client_id=') ? fragment[0] : `client_id=${fragment[0]}`;
+    return this.cleanOAuthUrlCandidate(`${CLAUDE_OAUTH_AUTHORIZE_URL}?${query}`);
+  }
+
+  private static normalizeTerminalOutput(output: string): string {
+    return output
+      .replace(/\x1b]8;;([^\x07\x1b]*)(?:\x07|\x1b\\)(.*?)\x1b]8;;(?:\x07|\x1b\\)/gs, '$1 $2')
+      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+      .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+      .replace(/\x1b[@-Z\\-_]/g, '')
+      .replace(/\r/g, '\n');
+  }
+
+  private static trimOAuthPrompt(value: string): string {
+    const promptMatch = /(?:Pastecodehere|Enter(?:the)?code|Code>)/i.exec(value);
+    return promptMatch ? value.slice(0, promptMatch.index) : value;
+  }
+
+  private static cleanOAuthUrlCandidate(raw: string): string | null {
+    const trimmed = this.trimOAuthPrompt(raw).replace(/[),.;]+$/, '');
+    try {
+      const url = new URL(trimmed);
+      const hasCodeGrant =
+        url.searchParams.get('response_type') === 'code' &&
+        url.searchParams.has('redirect_uri') &&
+        url.searchParams.has('code_challenge');
+      return hasCodeGrant ? url.toString() : null;
+    } catch {
+      return null;
+    }
+  }
+
   // ── OAuth device-code flow ──────────────────────────────────────────────────
 
   /**
@@ -243,46 +336,144 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     const c = this.containers.get(key);
     if (!c) return { error: 'La máquina del agente no está activa. Levántala primero.' };
 
+    // Verify the container is actually running before trying exec.
+    try {
+      const { stdout: runState } = await execFileAsync('docker', [
+        'inspect', '--format', '{{.State.Running}}', c.name,
+      ], { timeout: 5_000, env: process.env });
+      if (runState.trim() !== 'true') {
+        return { error: `El contenedor ${c.name} no está corriendo. Reinicia la máquina del agente.` };
+      }
+    } catch {
+      return { error: `No se puede acceder al contenedor ${c.name}. ¿Está Docker disponible?` };
+    }
+
+    // Verify claude is installed in the container.
+    try {
+      await execFileAsync('docker', ['exec', c.name, 'claude', '--version'], { timeout: 8_000, env: process.env });
+    } catch {
+      return { error: 'El binario `claude` no está instalado en la imagen del agente. Reconstruye la imagen con `./docker/agents/build.sh`.' };
+    }
+
     // Cancel any previous pending flow for this key.
     const prev = this.pendingOAuth.get(key);
     if (prev) {
-      prev.proc.kill('SIGKILL');
+      try { prev.proc.kill('SIGKILL'); } catch { /* already dead */ }
       this.pendingOAuth.delete(key);
     }
 
+    // Pre-seed Claude Code's config to skip the first-run interactive wizard.
+    // Without this, `claude auth login` starts an Ink TUI that waits for keyboard
+    // input we can't provide without a real PTY.
+    try {
+      await execFileAsync('docker', [
+        'exec', c.name, 'sh', '-c',
+        [
+          'mkdir -p ~/.config/@anthropic-ai/claude-code ~/.claude',
+          `printf '%s' '{"theme":"dark","hasCompletedOnboarding":true,"enabledFeatures":[]}' > ~/.config/@anthropic-ai/claude-code/settings.json`,
+          `printf '%s' '{"theme":"dark","hasCompletedOnboarding":true,"enabledFeatures":[]}' > ~/.claude/settings.json`,
+        ].join(' && '),
+      ], { timeout: 10_000, env: process.env });
+    } catch (e) {
+      this.logger.warn(`[oauth:${key}] config pre-seed failed (non-fatal): ${(e as Error).message.slice(0, 80)}`);
+    }
+
     return new Promise<{ url: string } | { error: string }>((resolve) => {
-      // claude setup-token: prints auth URL, waits for user to authenticate, then
-      // prints the resulting OAuth token to stdout.
+      // Pass `-i` so the container gets a connected stdin pipe — without it some
+      // Claude CLI versions detect "no tty" and switch to a mode that never prints
+      // the URL. Also strip ANSI codes so the URL regex works on Ink-rendered output.
       const proc = spawn(
         'docker',
-        ['exec', '-i', c.name, 'claude', 'setup-token'],
-        { env: process.env },
+        [
+          'exec', '-i',
+          '-e', 'TERM=dumb',
+          '-e', 'NO_COLOR=1',
+          '-e', 'CI=1',
+          '-e', 'FORCE_COLOR=0',
+          '-e', 'CLAUDE_CODE_DISABLE_TUI=1',
+          '-e', 'COLUMNS=4096',
+          '-e', 'LINES=40',
+          c.name,
+          'claude', 'auth', 'login',
+        ],
+        { env: { ...process.env, TERM: 'dumb', NO_COLOR: '1', CI: '1', FORCE_COLOR: '0', CLAUDE_CODE_DISABLE_TUI: '1' } },
       );
 
       const pending: PendingOAuth = {
         proc,
         orgId,
+        fullBuf: '',
         state: { status: 'scanning_url', url: null, configured: false, error: null },
         onUrl: (url) => resolve({ url }),
         onError: (err) => resolve({ error: err }),
       };
       this.pendingOAuth.set(key, pending);
 
-      // Regexes that cover known Anthropic / Claude auth URL patterns.
-      const URL_RE = /https:\/\/(?:claude\.ai|anthropic\.com|auth\.anthropic\.com)[^\s"'\])]*/;
-      // OAuth setup tokens: sk-ant-oat01-… (long alphanumeric with underscores/dashes).
       const TOKEN_RE = /sk-ant-[A-Za-z0-9_-]{30,}/;
+      // Detect the "Paste code here" prompt that Claude Code shows in code-grant flow
+      const CODE_PROMPT_RE = /paste\s+code\s+here|enter\s+(?:the\s+)?code|code\s*>/i;
 
-      let buf = '';
+      let lineBuf = '';
+
+      const tryFindUrl = () => {
+        if (pending.state.status !== 'scanning_url') return;
+        const url = ClaudeCodeRunnerService.extractOAuthUrlFromOutput(pending.fullBuf);
+        if (url) {
+          this.logger.log(`[oauth:${key}] URL encontrada: ${url.slice(0, 80)}…`);
+          pending.state.url = url;
+          pending.state.status = 'waiting_for_code';
+          pending.onUrl?.(url);
+          pending.onUrl = null; pending.onError = null;
+        }
+      };
+
       const onChunk = (chunk: Buffer) => {
-        buf += chunk.toString('utf8');
+        const raw = chunk.toString('utf8');
+        const clean = ClaudeCodeRunnerService.normalizeTerminalOutput(raw);
+        pending.fullBuf += clean;
+        lineBuf += clean;
+
+        // Process complete lines for logging + token detection
         let nl: number;
-        while ((nl = buf.indexOf('\n')) !== -1) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
+        while ((nl = lineBuf.indexOf('\n')) !== -1) {
+          const line = lineBuf.slice(0, nl).trim();
+          lineBuf = lineBuf.slice(nl + 1);
           if (!line) continue;
           this.logger.debug(`[oauth:${key}] ${line}`);
-          this.handleOAuthLine(key, pending, line, URL_RE, TOKEN_RE);
+
+          // Token on its own line (completed flow where code was already sent)
+          if (TOKEN_RE.test(line) && pending.state.status === 'waiting_callback') {
+            const tm = TOKEN_RE.exec(line);
+            if (tm) this.handleOAuthToken(key, pending, tm[0]);
+          }
+        }
+
+        // After every chunk: try to extract the URL from the full buffer
+        tryFindUrl();
+
+        // Detect "Paste code here" prompt — the URL should have been found by now
+        if (pending.state.status === 'scanning_url' && CODE_PROMPT_RE.test(clean)) {
+          // We haven't found the URL yet but the process is asking for the code.
+          // Try one more time with a broader window then fall through.
+          tryFindUrl();
+          if (pending.state.status === 'scanning_url') {
+            // URL wasn't captured — resolve with a best-effort fragment so the
+            // user at least knows to open the terminal.
+            const snippet = pending.fullBuf.replace(/\s+/g, ' ').slice(-400);
+            pending.onError?.(
+              `La URL fue generada pero no pudo capturarse completa.\n` +
+              `Usa la pestaña Terminal del agente → ejecuta: claude auth login\n` +
+              `Salida hasta ahora: ${snippet}`,
+            );
+            pending.onUrl = null; pending.onError = null;
+          }
+        }
+
+        // Detect token in the accumulated buffer (waiting_callback state)
+        if (pending.state.status === 'waiting_callback' || pending.state.status === 'waiting_for_code') {
+          TOKEN_RE.lastIndex = 0;
+          const tm = TOKEN_RE.exec(pending.fullBuf);
+          if (tm) this.handleOAuthToken(key, pending, tm[0]);
         }
       };
 
@@ -290,8 +481,8 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
       proc.stderr?.on('data', onChunk);
 
       proc.on('error', (err) => {
-        if (pending.state.status === 'scanning_url') {
-          pending.onError?.(`Error al iniciar claude setup-token: ${err.message}`);
+        if (pending.state.status === 'scanning_url' || pending.state.status === 'waiting_for_code') {
+          pending.onError?.(`Error ejecutando claude auth login: ${err.message}`);
           pending.onUrl = null; pending.onError = null;
         }
         pending.state.status = 'failed';
@@ -300,8 +491,14 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
       });
 
       proc.on('close', (code) => {
-        if (pending.state.status === 'waiting_callback' || pending.state.status === 'scanning_url') {
-          const msg = `claude setup-token finalizó inesperadamente (código ${code})`;
+        // Final flush — try to grab URL if we haven't yet
+        if (pending.state.status === 'scanning_url') tryFindUrl();
+
+        if (pending.state.status === 'scanning_url' || pending.state.status === 'waiting_callback') {
+          const snippet = pending.fullBuf.replace(/\s+/g, ' ').slice(-300);
+          const msg = code === 127
+            ? 'Comando `claude` no encontrado. Reconstruye la imagen del agente con `./docker/agents/build.sh`.'
+            : `claude auth login finalizó inesperadamente (código ${code}).\nÚltima salida: ${snippet}`;
           if (pending.state.status === 'scanning_url') {
             pending.onError?.(msg);
             pending.onUrl = null; pending.onError = null;
@@ -309,16 +506,21 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
           pending.state.status = 'failed';
           pending.state.error = msg;
         }
-        // Keep the entry briefly so pollOAuthResult can read the final status.
-        setTimeout(() => { this.pendingOAuth.delete(key); }, 30_000);
+        setTimeout(() => { this.pendingOAuth.delete(key); }, 60_000);
       });
 
-      // If no URL appears within 30 s, give up.
+      // Timeout: 30 s is enough for the URL to appear.
       setTimeout(() => {
         if (pending.state.status === 'scanning_url') {
-          pending.onError?.('No se recibió URL de autenticación en 30 s — verifica que la imagen tenga Claude Code instalado.');
+          const snippet = pending.fullBuf.replace(/\s+/g, ' ').slice(-400);
+          this.logger.warn(`[oauth:${key}] timeout. fullBuf tail: ${snippet}`);
+          pending.onError?.(
+            `La CLI de Claude Code no devolvió una URL capturada.\n` +
+            `Usa la pestaña Terminal del agente → ejecuta: claude auth login\n` +
+            (snippet ? `Salida recibida: ${snippet}` : 'No se recibió ninguna salida.'),
+          );
           pending.onUrl = null; pending.onError = null;
-          proc.kill('SIGKILL');
+          try { proc.kill('SIGKILL'); } catch { /* already dead */ }
           pending.state.status = 'failed';
           pending.state.error = 'Timeout esperando URL';
           this.pendingOAuth.delete(key);
@@ -327,41 +529,38 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     });
   }
 
-  private handleOAuthLine(
-    key: string,
-    pending: PendingOAuth,
-    line: string,
-    URL_RE: RegExp,
-    TOKEN_RE: RegExp,
-  ): void {
-    if (pending.state.status === 'scanning_url') {
-      const m = URL_RE.exec(line);
-      if (m) {
-        pending.state.url = m[0];
-        pending.state.status = 'waiting_callback';
-        pending.onUrl?.(pending.state.url);
-        pending.onUrl = null;
-        pending.onError = null;
-        return;
-      }
+  /**
+   * Submit the authorization code obtained after visiting the OAuth URL.
+   * Writes the code to the running `claude auth login` process's stdin so it
+   * can exchange it for a token.
+   */
+  submitOAuthCode(key: string, code: string): boolean {
+    const pending = this.pendingOAuth.get(key);
+    if (!pending) return false;
+    if (pending.state.status === 'waiting_callback' || pending.state.status === 'completed') return true;
+    if (pending.state.status !== 'waiting_for_code') return false;
+    pending.state.status = 'waiting_callback';
+    try {
+      pending.proc.stdin?.write(code.trim() + '\n');
+      this.logger.log(`[oauth:${key}] code submitted (${code.length} chars)`);
+      return true;
+    } catch (e) {
+      this.logger.warn(`[oauth:${key}] failed to write code to stdin: ${(e as Error).message}`);
+      return false;
     }
+  }
 
-    if (pending.state.status === 'waiting_callback') {
-      const m = TOKEN_RE.exec(line);
-      if (m) {
-        const token = m[0];
-        pending.state.status = 'completed';
-        pending.state.configured = true;
-        // Async — fire and forget; UI will detect via pollOAuthResult.
-        void this.saveCredential(pending.orgId, 'oauth', token).then(() => {
-          this.logger.log(`[oauth:${key}] token guardado para org ${pending.orgId}`);
-        }).catch((e) => {
-          this.logger.warn(`[oauth:${key}] error guardando token: ${(e as Error).message}`);
-          pending.state.error = 'Token recibido pero no se pudo guardar: ' + (e as Error).message;
-          pending.state.configured = false;
-        });
-      }
-    }
+  private handleOAuthToken(key: string, pending: PendingOAuth, token: string): void {
+    if (pending.state.status === 'completed') return; // already done
+    pending.state.status = 'completed';
+    pending.state.configured = true;
+    void this.saveCredential(pending.orgId, 'oauth', token).then(() => {
+      this.logger.log(`[oauth:${key}] token guardado para org ${pending.orgId}`);
+    }).catch((e) => {
+      this.logger.warn(`[oauth:${key}] error guardando token: ${(e as Error).message}`);
+      pending.state.error = 'Token recibido pero no se pudo guardar: ' + (e as Error).message;
+      pending.state.configured = false;
+    });
   }
 
   /** Returns the current state of an in-flight or recently-completed OAuth flow. */
@@ -389,11 +588,81 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     );
   }
 
-  /** Verify the credential works inside an already-booted machine (by key). */
+  /**
+   * Check whether a running container already has Claude credentials — either
+   * via the env var injected at creation time, or via a credentials file written
+   * by `claude auth login` run manually in the terminal.
+   * This does NOT probe the API; it's a fast local check.
+   */
+  async checkContainerHasAuth(containerName: string): Promise<boolean> {
+    try {
+      const { stdout } = await execFileAsync('docker', [
+        'exec', containerName, 'sh', '-c',
+        // Check all known credential locations without making network calls.
+        'printf "%s" "${CLAUDE_CODE_OAUTH_TOKEN:+ENV}${ANTHROPIC_API_KEY:+ENV}"; ' +
+        'test -f ~/.config/@anthropic-ai/claude-code/.credentials.json && printf FILE; ' +
+        'test -f ~/.claude/.credentials.json && printf FILE2',
+      ], { timeout: 8_000, env: process.env });
+      return stdout.trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Inject the org credential into a running container by writing it to the
+   * Claude credentials file. Used when reconnecting to a container that was
+   * created without a credential (or whose env var was lost after a host restart).
+   */
+  private async injectCredentialIntoContainer(containerName: string, credential: StoredClaudeCredential): Promise<void> {
+    const envVar = this.envVarFor(credential.method);
+    try {
+      // Write to both known credential paths for broad compatibility.
+      const credJson = JSON.stringify(
+        credential.method === 'api_key'
+          ? { type: 'api_key', api_key: credential.token }
+          : { type: 'oauth', access_token: credential.token, token_type: 'Bearer' }
+      );
+      await execFileAsync('docker', [
+        'exec', containerName, 'sh', '-c',
+        [
+          'mkdir -p ~/.config/@anthropic-ai/claude-code',
+          `printf '%s' '${credJson.replace(/'/g, "'\\''")}'  > ~/.config/@anthropic-ai/claude-code/.credentials.json`,
+          'mkdir -p ~/.claude',
+          `printf '%s' '${credJson.replace(/'/g, "'\\''")}'  > ~/.claude/.credentials.json`,
+        ].join(' && '),
+      ], { timeout: 10_000, env: process.env });
+      this.logger.log(`[cred] Injected ${envVar} into container ${containerName}`);
+    } catch (e) {
+      this.logger.warn(`[cred] Failed to inject credential into ${containerName}: ${(e as Error).message.slice(0, 120)}`);
+    }
+  }
+
+  /**
+   * Verify the credential works inside an already-booted machine (by key).
+   * Checks ACTUAL container auth state rather than the creation-time `hasToken`
+   * flag, so it correctly detects manual `claude auth login` sessions.
+   */
   async verifyAuth(orgId: string, key: string): Promise<AuthCheckResult> {
-    const c = this.containers.get(key);
+    let c = this.containers.get(key);
     if (!c) return { ok: false, error: 'NO_MACHINE' };
-    if (!c.hasToken) return { ok: false, authFailed: true, error: 'NO_TOKEN: la máquina se levantó sin credencial' };
+
+    // If the container says hasToken=false, check the actual state — the user
+    // may have authenticated manually via `claude auth login` in the terminal.
+    const hasAuth = c.hasToken || await this.checkContainerHasAuth(c.name);
+    if (!hasAuth) {
+      // No auth found in container — try to inject from org credential if available.
+      const credential = await this.resolveCredential(orgId);
+      if (credential) {
+        await this.injectCredentialIntoContainer(c.name, credential);
+        c.hasToken = true;
+      } else {
+        return { ok: false, authFailed: true, error: 'NO_TOKEN: la máquina no tiene credencial. Usa el Terminal para ejecutar `claude auth login`.' };
+      }
+    } else if (!c.hasToken) {
+      c.hasToken = true; // update flag to reflect reality
+    }
+
     return this.probe(['exec', c.name], process.env);
   }
 
@@ -465,7 +734,21 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
 
     const existing = this.containers.get(opts.key);
     if (existing) {
-      emit('ready', `Máquina ya activa (${existing.image})`);
+      // Container is live (either original boot or recovered by onModuleInit).
+      // Ensure the credential is present — it may not have been injected if the
+      // container was reconnected from a bare Docker scan at startup.
+      if (!existing.hasToken) {
+        const cred = await this.resolveCredential(opts.orgId);
+        if (cred) {
+          await this.injectCredentialIntoContainer(existing.name, cred);
+          existing.hasToken = true;
+          emit('ready', `Máquina ya activa (${existing.image}) — credencial re-inyectada`);
+        } else {
+          emit('ready', `Máquina ya activa (${existing.image}) — sin credencial configurada`);
+        }
+      } else {
+        emit('ready', `Máquina ya activa (${existing.image})`);
+      }
       return { ok: true, containerName: existing.name, image: existing.image };
     }
 
@@ -551,9 +834,21 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
       return { ok: false, text: '', error: 'No se pudo crear el contenedor de Claude Code' };
     }
 
+    // Re-inject credential via docker exec -e so the token is always present,
+    // even when connecting to a container that was created before the credential
+    // existed, or after a Docker Engine / process restart.
+    const execEnv: NodeJS.ProcessEnv = { ...process.env };
+    const execEnvArgs: string[] = [];
+    if (credential) {
+      const envVar = this.envVarFor(credential.method);
+      execEnv[envVar] = credential.token;
+      execEnvArgs.push('-e', envVar); // pass-through from childEnv, not from argv
+    }
+
     const execArgs = [
       'exec',
       '-w', '/work',
+      ...execEnvArgs,
       container.name,
       'claude',
       '-p', fullPrompt,
@@ -563,7 +858,7 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
       '--max-turns', String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
     ];
 
-    const result = await this.spawnAndStream(execArgs, process.env, opts);
+    const result = await this.spawnAndStream(execArgs, execEnv, opts);
     // Surface auth failures distinctly so the orchestrator can reopen provisioning
     // instead of treating an expired token as a generic task failure.
     if (!result.ok && this.isAuthError(result.error)) {
@@ -576,7 +871,18 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     return result;
   }
 
-  /** Create a long-lived named container with the role's image + optional token. */
+  /**
+   * Create a long-lived named container with the role's image + optional token.
+   *
+   * Uses a DETERMINISTIC name (`eva-agent-{key32}`) so we can always reconnect
+   * to the same container after a process restart, without scanning Docker or
+   * storing the container name in the DB.
+   *
+   * If a container with that name already exists:
+   *  - Running → reconnect (register in map, inject credential if needed).
+   *  - Stopped → `docker start` then reconnect.
+   *  - Otherwise → create a fresh container.
+   */
   private async createContainer(input: {
     key: string;
     image: string;
@@ -585,14 +891,59 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     credential: StoredClaudeCredential | null;
   }): Promise<ClaudeContainer | null> {
     const { key, image, role, sessionScoped, credential } = input;
+
+    // 1. Already tracked in-memory — return immediately.
     const existing = this.containers.get(key);
     if (existing) {
       if (existing.reapTimer) { clearTimeout(existing.reapTimer); existing.reapTimer = undefined; }
       return existing;
     }
 
+    // 2. Deterministic name so we can reconnect across restarts.
+    const name = this.deterministicContainerName(key);
+
+    // 3. Check Docker for an existing container with this name.
+    try {
+      const { stdout } = await execFileAsync('docker', [
+        'inspect', '--format', '{{.State.Running}}\t{{.Config.Image}}', name,
+      ], { timeout: 8_000, env: process.env });
+      const [running, existingImage] = stdout.trim().split('\t');
+
+      if (running === 'false') {
+        // Container exists but stopped — restart it.
+        this.logger.log(`[boot] Restarting stopped container ${name}`);
+        await execFileAsync('docker', ['start', name], { timeout: 30_000, env: process.env });
+      }
+
+      if (running === 'true' || running === 'false') {
+        // Container is now running — register it.
+        const container: ClaudeContainer = {
+          name,
+          hostDir: '',   // tmpdir is gone after restart; /work is still mounted inside
+          image: existingImage?.trim() || image,
+          role,
+          hasToken: Boolean(credential), // will be verified/updated by verifyAuth
+          sessionScoped,
+          shells: new Map(),
+        };
+        this.containers.set(key, container);
+        this.logger.log(`[boot] Reconnected to existing container ${name} (key ${key.slice(0, 8)})`);
+
+        // Re-inject credential into the container (covers the case where the
+        // container was created before a credential existed, or if the env var
+        // is lost after a Docker Engine restart).
+        if (credential) {
+          await this.injectCredentialIntoContainer(name, credential);
+          container.hasToken = true;
+        }
+        return container;
+      }
+    } catch {
+      // inspect failed → container doesn't exist, fall through to create.
+    }
+
+    // 4. Create a fresh container.
     const spec = machineSpecForRole(role ?? 'backend');
-    const name = `eva-agent-${(role ?? 'agent').slice(0, 10)}-${key.slice(0, 8)}-${Date.now().toString(36)}`;
     const hostDir = await mkdtemp(join(tmpdir(), 'eva-agent-'));
 
     const envVar = credential ? this.envVarFor(credential.method) : null;
@@ -619,6 +970,12 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
       return null;
     }
 
+    // Also write credentials file so auth survives Docker Engine restarts
+    // (env vars DO persist, but this is a belt-and-suspenders guard).
+    if (credential) {
+      await this.injectCredentialIntoContainer(name, credential).catch(() => undefined);
+    }
+
     const container: ClaudeContainer = {
       name, hostDir, image, role, hasToken: Boolean(envVar), sessionScoped, shells: new Map(),
     };
@@ -641,7 +998,10 @@ export class ClaudeCodeRunnerService implements OnModuleDestroy {
     if (container.reapTimer) clearTimeout(container.reapTimer);
     for (const shell of container.shells.values()) shell.close();
     await execFileAsync('docker', ['rm', '-f', container.name], { timeout: 20_000 }).catch(() => undefined);
-    await rm(container.hostDir, { recursive: true, force: true }).catch(() => undefined);
+    // hostDir may be empty when the container was reconnected after a restart.
+    if (container.hostDir) {
+      await rm(container.hostDir, { recursive: true, force: true }).catch(() => undefined);
+    }
     this.logger.log(`agent container for ${key} destroyed`);
   }
 

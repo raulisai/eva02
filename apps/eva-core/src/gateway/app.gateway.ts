@@ -214,4 +214,28 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     (client.data as { attachedKey?: string }).attachedKey = undefined;
     client.emit('sandbox.detached', {});
   }
+
+  /**
+   * Notify the shell of new terminal dimensions. The client emits this whenever
+   * xterm.js resizes so the shell's COLUMNS/LINES match the visible viewport.
+   * Without it, TUI apps (like Claude Code) position cursors assuming a default
+   * 80-column width and text overlaps when the real width differs.
+   *
+   * Client sends: { taskId: string, cols: number, rows: number }
+   */
+  @SubscribeMessage('sandbox.resize')
+  handleSandboxResize(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { taskId: string; cols: number; rows: number },
+  ) {
+    if ((client.data as { attachedKey?: string }).attachedKey !== payload.taskId) return;
+    const { cols, rows } = payload;
+    if (!cols || !rows || cols < 10 || rows < 4) return; // sanity guard
+    // Write stty resize command to the shell. The PTY running inside `script`
+    // picks up the new dimensions for all subsequent output.
+    const stream = this.resolveShellStream(payload.taskId, 0);
+    if (stream) {
+      stream.write(`stty cols ${cols} rows ${rows}\r`);
+    }
+  }
 }

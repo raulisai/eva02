@@ -43,6 +43,12 @@ const HEARTBEAT_MS = 2 * 60 * 1000;
 const SESSION_STALE_MS = 3 * 60 * 1000;
 const ITERATION_STALE_MS = 15 * 60 * 1000;
 
+// How long a task can sit in `assigned`/`running` without a status update before
+// the orchestrator considers it a silent crash and auto-requeues it.
+// 8 minutes is generous enough for slow Claude Code runs but short enough to
+// unblock a session within one or two heartbeat cycles.
+const TASK_STUCK_MS = 8 * 60 * 1000;
+
 @Injectable()
 export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DevOrchestratorService.name);
@@ -256,12 +262,44 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
     }
 
     // ── 4. Check active tasks for this goal ───────────────────────────────────
-    const activeTasks = await this.sessionService.listStudioTasks(sessionId, orgId, 'running');
-    const queuedTasks = await this.sessionService.listStudioTasks(sessionId, orgId, 'queued');
-    const assignedTasks = await this.sessionService.listStudioTasks(sessionId, orgId, 'assigned');
+    const [activeTasks, queuedTasks, assignedTasks] = await Promise.all([
+      this.sessionService.listStudioTasks(sessionId, orgId, 'running'),
+      this.sessionService.listStudioTasks(sessionId, orgId, 'queued'),
+      this.sessionService.listStudioTasks(sessionId, orgId, 'assigned'),
+    ]);
 
     if (activeTasks.length > 0 || assignedTasks.length > 0) {
-      // Tasks are running — monitor only
+      // Before declaring "in flight", check whether any of these tasks have been
+      // frozen for too long without a status update — that's a silent crash.
+      const stuckTasks = await this.sessionService.listStuckInFlightTasks(sessionId, orgId, TASK_STUCK_MS);
+
+      if (stuckTasks.length > 0) {
+        // Auto-requeue: mark frozen tasks as queued and reset their agent status.
+        this.logger.warn(
+          `[tick] ${stuckTasks.length} task(s) stuck in ${[...new Set(stuckTasks.map((t) => t.status))].join('/')} ` +
+          `for >${Math.round(TASK_STUCK_MS / 60_000)}min — auto-requeuing: ${stuckTasks.map((t) => t.title.slice(0, 40)).join(', ')}`,
+        );
+
+        for (const t of stuckTasks) {
+          await this.sessionService.updateStudioTaskStatus(t.id, orgId, 'queued', {
+            result_summary: `Auto-recolada: sin actividad durante ${Math.round(TASK_STUCK_MS / 60_000)} minutos (estado previo: ${t.status}).`,
+          });
+          await this.sessionService.logEvent({
+            orgId, sessionId, eventType: 'task.stuck_requeued',
+            message: `[${t.role}] Tarea "${t.title}" re-encolada automáticamente — sin avance desde ${new Date(t.updated_at).toLocaleTimeString()}.`,
+            taskId: t.id,
+          });
+          // Reset agent to idle so it can pick up the re-queued task
+          const agentRecord = await this.sessionService.getAgent(sessionId, orgId, t.role).catch(() => null);
+          if (agentRecord) {
+            await this.sessionService.updateAgentStatus(agentRecord.id, orgId, 'idle', { current_task_id: null });
+          }
+        }
+        // Re-enter tick: now there should be queued tasks to dispatch
+        return this._tick(sessionId, orgId);
+      }
+
+      // Tasks genuinely in-flight — monitor only
       return { action: 'waiting', message: `${activeTasks.length + assignedTasks.length} task(s) in flight` };
     }
 
@@ -697,7 +735,19 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
       if (!iterRow) return;
 
       await this.sessionService.updateStudioTaskStatus(taskId, orgId, 'assigned');
-      await this.runAgentTask(session, orgId, taskId, prompt, role, iterRow as DevIteration).catch(() => undefined);
+      try {
+        await this.runAgentTask(session, orgId, taskId, prompt, role, iterRow as DevIteration);
+      } catch (err) {
+        // Explicitly mark as failed so the task doesn't stay frozen in `assigned`.
+        const errMsg = (err as Error).message;
+        this.logger.error(`runWaveFromQueued: task ${taskId} threw: ${errMsg}`);
+        await this.sessionService.updateStudioTaskStatus(taskId, orgId, 'failed', { result_summary: errMsg }).catch(() => undefined);
+        await this.sessionService.logEvent({
+          orgId, sessionId: session.id, eventType: 'task.failed',
+          message: `[${role}] Error al ejecutar tarea (re-dispatch): ${errMsg.slice(0, 300)}`,
+          taskId,
+        }).catch(() => undefined);
+      }
       dispatched++;
     }));
     return dispatched;
@@ -782,6 +832,30 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
     role: AgentRole,
     iteration: DevIteration,
   ): Promise<boolean> {
+    // ── Guard: code roles REQUIRE Claude Code — never fall back to agent loop ──
+    // The agent loop lacks filesystem tooling and can't write production code.
+    // If the credential is missing, requeue the task and surface the provisioning
+    // panel so the user can connect Claude Code before the task runs.
+    if (CODE_ROLES.has(role)) {
+      const hasCred = await this.claudeCode.hasCredential(orgId);
+      if (!hasCred) {
+        await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'queued', {
+          result_summary: 'En espera de credencial de Claude Code. Conecta Claude Code para continuar.',
+        });
+        await this.sessionService.logEvent({
+          orgId, sessionId: session.id, eventType: 'task.blocked_no_credential',
+          message: `[${role}] Tarea re-encolada: falta credencial de Claude Code.`,
+          iterationId: iteration.id, taskId: studioTaskId,
+        });
+        const agentRecord = await this.sessionService.getAgent(session.id, orgId, role).catch(() => null);
+        if (agentRecord) {
+          await this.sessionService.updateAgentStatus(agentRecord.id, orgId, 'blocked', { current_task_id: null });
+        }
+        await this.ensureClaudeCodeProvisioningTask(session, orgId, iteration);
+        return false;
+      }
+    }
+
     // Build role-specific context
     const roleSystemPrompt = AGENT_SYSTEM_PROMPTS[role] ?? AGENT_SYSTEM_PROMPTS.backend;
     const roleContext = [
@@ -813,7 +887,13 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
       .select()
       .single();
 
-    if (!backingTask) return false;
+    if (!backingTask) {
+      // Mark as failed so the task doesn't stay frozen in `assigned`.
+      await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'failed', {
+        result_summary: 'Error interno: no se pudo crear la tarea de respaldo en la base de datos.',
+      });
+      return false;
+    }
 
     const backingTaskId = (backingTask as { id: string }).id;
     await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'running');

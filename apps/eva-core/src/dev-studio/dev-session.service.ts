@@ -140,6 +140,27 @@ export class DevSessionService {
     return this.transition(sessionId, orgId, 'cancelled');
   }
 
+  async deleteSession(sessionId: string, orgId: string): Promise<void> {
+    const TERMINAL = ['completed', 'failed', 'cancelled'] as const;
+    const { data: session, error: fetchErr } = await this.db.admin
+      .from('dev_sessions')
+      .select('id, status')
+      .eq('id', sessionId)
+      .eq('org_id', orgId)
+      .maybeSingle();
+
+    if (fetchErr || !session) throw new Error('Sesión no encontrada.');
+    if (!TERMINAL.includes((session as { status: string }).status as typeof TERMINAL[number])) {
+      throw new Error('Solo se pueden eliminar sesiones completadas, fallidas o canceladas. Cancela primero la sesión.');
+    }
+
+    // Delete child rows in order (FK-safe; DB cascades handle the rest if configured).
+    for (const table of ['dev_tasks', 'dev_events', 'dev_human_tasks', 'dev_merge_proposals', 'dev_agents', 'dev_iterations', 'dev_goals'] as const) {
+      await this.db.admin.from(table).delete().eq('session_id', sessionId).eq('org_id', orgId);
+    }
+    await this.db.admin.from('dev_sessions').delete().eq('id', sessionId).eq('org_id', orgId);
+  }
+
   // ── Goals ─────────────────────────────────────────────────────────────────
 
   async createGoal(input: {
@@ -633,9 +654,73 @@ export class DevSessionService {
   async updateStudioTaskStatus(taskId: string, orgId: string, status: string, extras: Record<string, unknown> = {}): Promise<void> {
     await this.db.admin
       .from('dev_tasks')
-      .update({ status, ...extras })
+      .update({ status, updated_at: new Date().toISOString(), ...extras })
       .eq('id', taskId)
       .eq('org_id', orgId);
+  }
+
+  /**
+   * Tasks currently in `assigned` or `running` state that have not had their
+   * `updated_at` touched for more than `staleMs` — i.e. they're frozen mid-flight
+   * due to a crash, auth failure swallowed silently, or a Docker hang.
+   * Returns enough info to requeue them and surface the reason in the UI.
+   */
+  async listStuckInFlightTasks(
+    sessionId: string,
+    orgId: string,
+    staleMs: number,
+  ): Promise<Array<{ id: string; title: string; status: string; role: string; updated_at: string; result_summary: string | null }>> {
+    const cutoff = new Date(Date.now() - staleMs).toISOString();
+    const { data } = await this.db.admin
+      .from('dev_tasks')
+      .select('id, title, status, role, updated_at, result_summary')
+      .eq('session_id', sessionId)
+      .eq('org_id', orgId)
+      .in('status', ['assigned', 'running'])
+      .lt('updated_at', cutoff);
+    return (data ?? []) as Array<{ id: string; title: string; status: string; role: string; updated_at: string; result_summary: string | null }>;
+  }
+
+  async retryStudioTask(taskId: string, orgId: string): Promise<Record<string, unknown>> {
+    const { data, error } = await this.db.admin
+      .from('dev_tasks')
+      .update({ status: 'queued', result_summary: null, assigned_agent_id: null, updated_at: new Date().toISOString() })
+      .eq('id', taskId)
+      .eq('org_id', orgId)
+      .select()
+      .single();
+    if (error) this.fail('dev_tasks.retry', error);
+    return data as Record<string, unknown>;
+  }
+
+  async deleteStudioTask(taskId: string, orgId: string): Promise<void> {
+    const { error } = await this.db.admin
+      .from('dev_tasks')
+      .delete()
+      .eq('id', taskId)
+      .eq('org_id', orgId);
+    if (error) this.fail('dev_tasks.delete', error);
+  }
+
+  async deleteAgent(agentId: string, orgId: string): Promise<void> {
+    const { error } = await this.db.admin
+      .from('dev_agents')
+      .delete()
+      .eq('id', agentId)
+      .eq('org_id', orgId);
+    if (error) this.fail('dev_agents.delete', error);
+  }
+
+  async listTaskEvents(taskId: string, orgId: string, limit = 100): Promise<unknown[]> {
+    const { data, error } = await this.db.admin
+      .from('dev_events')
+      .select('*')
+      .eq('task_id', taskId)
+      .eq('org_id', orgId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) this.fail('dev_events.listByTask', error);
+    return data ?? [];
   }
 
   /** Studio tasks of an iteration (for building real evaluation outputs). */
@@ -714,6 +799,44 @@ export class DevSessionService {
       .in('status', ['assigned', 'running'])
       .select('id');
     return ((data ?? []) as unknown[]).length;
+  }
+
+  /**
+   * Force-requeue ALL tasks stuck in `assigned` or `running` for a session,
+   * regardless of age. Intended for the "Desatasca la sesión" button in the UI.
+   * Returns the count of tasks requeued and the agent roles that were reset.
+   */
+  async unstickSession(sessionId: string, orgId: string): Promise<{ requeued: number; roles: string[] }> {
+    const { data } = await this.db.admin
+      .from('dev_tasks')
+      .update({ status: 'queued', updated_at: new Date().toISOString(), result_summary: null })
+      .eq('session_id', sessionId)
+      .eq('org_id', orgId)
+      .in('status', ['assigned', 'running'])
+      .select('id, role');
+
+    const rows = (data ?? []) as Array<{ id: string; role: string }>;
+    const roles = [...new Set(rows.map((r) => r.role))];
+
+    // Also reset any agent whose status is 'blocked' or 'failed' to 'idle'
+    if (roles.length > 0) {
+      await this.db.admin
+        .from('dev_agents')
+        .update({ status: 'idle', current_task_id: null, updated_at: new Date().toISOString() })
+        .eq('session_id', sessionId)
+        .eq('org_id', orgId)
+        .in('role', roles);
+    }
+
+    // Log one event summarising what was unstuck
+    if (rows.length > 0) {
+      await this.logEvent({
+        orgId, sessionId, eventType: 'session.unstuck',
+        message: `${rows.length} tarea(s) en [${roles.join(', ')}] re-encoladas manualmente por bloqueo.`,
+      });
+    }
+
+    return { requeued: rows.length, roles };
   }
 
   /**
@@ -845,7 +968,7 @@ export class DevSessionService {
       lastUpdateAt: string | null; stuckMs: number | null;
     }>;
     handoffs: Array<{ from: string; to: string; instruction: string; at: string | null; taskId: string | null; status: string }>;
-    stuck: { role: string; reason: string; sinceMs: number | null; taskTitle: string | null } | null;
+    stuck: { role: string; reason: string; sinceMs: number | null; taskTitle: string | null; lastError: string | null } | null;
   }> {
     const [session, agents, tasks] = await Promise.all([
       this.findById(sessionId, orgId),
@@ -927,23 +1050,51 @@ export class DevSessionService {
     }
 
     // Where is it stuck? Priority: blocked/failed agent → waiting on human → slow agent.
-    const STUCK_THRESHOLD_MS = 90_000;
-    let stuck: { role: string; reason: string; sinceMs: number | null; taskTitle: string | null } | null = null;
+    // Also fetch the last error/event for frozen tasks so the UI can show the root cause.
+    const STUCK_THRESHOLD_MS = 90_000; // 1.5 min — enough for one API round-trip to be obvious
+    let stuck: { role: string; reason: string; sinceMs: number | null; taskTitle: string | null; lastError: string | null } | null = null;
+
+    // Gather last error from dev_events for any task that looks stuck
+    const frozenTaskIds = agentRows
+      .filter((a) => (a.stuckMs ?? 0) > STUCK_THRESHOLD_MS && a.currentTaskId)
+      .map((a) => a.currentTaskId as string);
+
+    let lastErrorByTaskId: Record<string, string> = {};
+    if (frozenTaskIds.length > 0) {
+      const { data: errorEvents } = await this.db.admin
+        .from('dev_events')
+        .select('task_id, message, event_type, created_at')
+        .eq('session_id', sessionId)
+        .eq('org_id', orgId)
+        .in('task_id', frozenTaskIds)
+        .in('event_type', ['task.failed', 'claude.exit_error', 'agent.blocked', 'iteration.error'])
+        .order('created_at', { ascending: false })
+        .limit(20);
+      for (const ev of (errorEvents ?? []) as Array<{ task_id: string; message: string }>) {
+        if (!lastErrorByTaskId[ev.task_id]) lastErrorByTaskId[ev.task_id] = ev.message;
+      }
+    }
+
     const blocked = agentRows.find((a) => a.status === 'blocked' || a.status === 'failed');
     if (blocked) {
+      const lastError = blocked.currentTaskId ? (lastErrorByTaskId[blocked.currentTaskId] ?? null) : null;
       stuck = {
         role: blocked.role,
         reason: blocked.status === 'failed' ? 'tarea fallida' : 'bloqueado — requiere intervención',
         sinceMs: blocked.stuckMs,
         taskTitle: blocked.currentTaskTitle,
+        lastError,
       };
     } else if (session && session.status.startsWith('waiting_for_human')) {
-      stuck = { role: 'human', reason: 'esperando acción humana', sinceMs: null, taskTitle: null };
+      stuck = { role: 'human', reason: 'esperando acción humana', sinceMs: null, taskTitle: null, lastError: null };
     } else {
       const slow = agentRows
         .filter((a) => (a.stuckMs ?? 0) > STUCK_THRESHOLD_MS)
         .sort((x, y) => (y.stuckMs ?? 0) - (x.stuckMs ?? 0))[0];
-      if (slow) stuck = { role: slow.role, reason: 'sin avance reciente', sinceMs: slow.stuckMs, taskTitle: slow.currentTaskTitle };
+      if (slow) {
+        const lastError = slow.currentTaskId ? (lastErrorByTaskId[slow.currentTaskId] ?? null) : null;
+        stuck = { role: slow.role, reason: 'sin avance reciente — posible bloqueo silencioso', sinceMs: slow.stuckMs, taskTitle: slow.currentTaskTitle, lastError };
+      }
     }
 
     return { assigner, iterationObjective, agents: agentRows, handoffs, stuck };

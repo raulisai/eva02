@@ -889,7 +889,7 @@ export class AgentLoopService {
         '- CLIs disponibles (sin `apt install`): git · curl · wget · jq · sqlite3 · ffmpeg · yt-dlp · zip/tar/gzip · rsync · imagemagick (convert/identify) · grep · sed · awk · find · file · pandoc (si disponible)',
         '- Lenguajes: python3 (con pip3) · node/npm · bash · go · gcc/g++ (si imagen eva-sandbox)',
         '- Python pre-instalado (sin pip): pandas · numpy · requests · pillow · bs4 · openpyxl · fpdf2 · reportlab · yfinance · lxml · markdown · python-dateutil · yt-dlp',
-        '- Descubrimiento: ejecuta `which <cmd>` o `<cmd> --version` ANTES de asumir que algo no está. `pip3 list | grep X` para Python. NUNCA declares que algo es imposible sin verificar primero.',
+        '- Descubrimiento y provisioning (flujo ensure_tool): (1) VERIFICA: `which cmd` / `python3 -c "import X"` / `pip3 show X`. (2) Si no está: instala UNA vez con `pip3 install X` (Python), `npm install -g X` (Node) o `apt-get install -y X` (sistema) — usa `{"network":true}` en code_execute. (3) CONFIRMA: vuelve a verificar que funciona. Si falla la instalación, usa la librería pre-instalada equivalente. NUNCA repitas la misma instalación.',
         '- Composición: escribe un script en /work con code_execute → ejecútalo con terminal_run. Inicia un servidor en session=1 → prueba desde session=0. Encadena pipes en bash para procesar datos sin Python.',
         '- REGLA: si una herramienta específica falla, bash+curl/jq/python puede cubrir casi cualquier necesidad. SIEMPRE hay una ruta alternativa.',
       );
@@ -1001,14 +1001,14 @@ export class AgentLoopService {
         : []),
       ...(has('code_execute')
         ? [
-            '- SANDBOX libs disponibles (sin pip install): pandas, numpy, requests, pillow, beautifulsoup4, openpyxl, python-dateutil, yt-dlp, reportlab, fpdf2, yfinance, lxml, markdown. PDF: usa `from fpdf import FPDF` (fpdf2) o `from reportlab.platypus import SimpleDocTemplate`. Si falla el import, cambia a la otra — NUNCA pip install más de una vez.',
+            '- SANDBOX libs pre-instaladas (úsalas directamente sin pip install): pandas, numpy, requests, pillow, beautifulsoup4, openpyxl, python-dateutil, yt-dlp, reportlab, fpdf2, yfinance, lxml, markdown. PDF: usa `from fpdf import FPDF` (fpdf2) o `from reportlab.platypus import SimpleDocTemplate`. Si falla el import, cambia a la otra. Para libs NO pre-instaladas: usa el flujo ensure_tool (verificar → instalar una vez con network:true → confirmar).',
             ...(has('telegram_send_file')
               ? ['- Reportes/archivos: crea en /work → verifica `os.path.getsize("/work/archivo.pdf") > 0` → envía con telegram_send_file. No uses bytes PDF con offsets hardcodeados.']
               : []),
           ]
         : []),
       '- ANTE ERROR — diagnóstico antes de rendirte: (1) ¿arg incorrecto? corrígelo. (2) ¿comando no encontrado? ejecuta `which X` para verificar. (3) ¿lib Python faltante? busca equivalente en la lista pre-instalada. (4) ¿API caída? usa curl/requests para llamar directamente o busca alternativa pública. (5) ¿enfoque equivocado? cambia de ángulo: lo que no logras con web_search, hazlo con code_execute+requests; lo que no logras con Python, hazlo con bash+jq/sqlite3/awk; lo que no logras con terminal_run, hazlo con code_execute python subprocess. SIEMPRE hay una ruta alternativa — declara imposibilidad solo después de agotar al menos 2 enfoques distintos.',
-      '- PROHIBIDO pip/npm install en loop: si `pip install X` falla, NO lo repitas. Usa una librería pre-instalada equivalente del sandbox (ver bloque SANDBOX arriba). Gastar más de 1 paso en pip install es un ciclo de estancamiento.',
+      '- Instalación de dependencias: PRIMERO verifica que no está (`pip3 show X`, `which X`). Si falta, instala UNA vez (necesita `{"network":true}`). Verifica que funcionó antes de usarlo. Si falla la instalación, usa equivalente pre-instalado. NUNCA instales el mismo paquete dos veces — es ciclo de estancamiento.',
       '- Nunca declares éxito con salida parcial, timeout o un proceso aún corriendo: verifica con una ejecución/lectura antes de final_answer.',
       '- NUNCA inventes salida que ninguna herramienta produjo (datos, contenidos de archivo, respuestas de API). Reportar un bloqueo honesto siempre vale más que un resultado fabricado.',
       ...(has('skill_save')
@@ -1055,7 +1055,7 @@ export class AgentLoopService {
       );
       if (stepsLeft <= Math.max(3, missingRequirements.length + 1)) {
         blocks.push(
-          'MODO ENTREGA FINAL: deja de investigar. Usa los hallazgos disponibles, crea los archivos faltantes y envialos. Si el PDF falla por librerias externas, genera un PDF minimo sin dependencias externas o usa herramientas del sistema ya instaladas; NO intentes pip/npm install.',
+          'MODO ENTREGA FINAL: deja de investigar. Usa los hallazgos disponibles, crea los archivos faltantes y envíalos. Si el PDF falla por librerías, usa las pre-instaladas (reportlab, fpdf2) — no reinstales lo que ya está disponible.',
         );
       }
     }
@@ -1160,13 +1160,20 @@ export class AgentLoopService {
   private detectStall(steps: AgentLoopStep[]): string | null {
     if (steps.length < 3) return null;
 
-    // pip/npm install loop: ≥2 intentos de instalar algo en los últimos 4 pasos.
-    const PIP_RE = /\bpip\s+install\b|\bnpm\s+install\b|\bapt(-get)?\s+install\b/i;
-    const recentInstallAttempts = steps.slice(-4).filter(
-      (s) => PIP_RE.test(JSON.stringify(s.args)),
-    );
-    if (recentInstallAttempts.length >= 2) {
-      return 'CICLO pip install detectado: intentaste instalar paquetes ≥2 veces. Las librerías necesarias ya están pre-instaladas en el sandbox (reportlab, fpdf2, pandas, pillow…). Usa una de ellas directamente sin pip install.';
+    // pip/npm install loop: mismo paquete instalado ≥2 veces en los últimos 5 pasos.
+    // Una instalación de un paquete nuevo es legítima; reinstalar el mismo es el ciclo.
+    const PKG_RE = /\b(?:pip3?\s+install|npm\s+install(?:\s+-g)?|apt(?:-get)?\s+install(?:\s+-y)?)\s+([\w@/.:-]+)/i;
+    const pkgCounts = new Map<string, number>();
+    for (const s of steps.slice(-5)) {
+      const m = PKG_RE.exec(JSON.stringify(s.args));
+      if (m) {
+        const pkg = m[1].toLowerCase().replace(/['"]/g, '');
+        const cnt = (pkgCounts.get(pkg) ?? 0) + 1;
+        pkgCounts.set(pkg, cnt);
+        if (cnt >= 2) {
+          return `CICLO pip install detectado: intentaste instalar '${pkg}' ≥2 veces sin éxito. Usa una librería pre-instalada equivalente (reportlab, fpdf2, pandas, pillow…) o cambia de estrategia.`;
+        }
+      }
     }
 
     // Firma semántica: tool + prefijo normalizado de la observación.

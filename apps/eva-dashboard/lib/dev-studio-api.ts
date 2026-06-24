@@ -31,6 +31,9 @@ export const devStudioApi = {
   cancelSession: (id: string) =>
     coreFetch<DevSession>(`${BASE}/sessions/${id}/cancel`, { method: 'POST', body: '{}' }),
 
+  deleteSession: (id: string) =>
+    coreFetch<void>(`${BASE}/sessions/${id}`, { method: 'DELETE' }),
+
   steerSession: (id: string, message: string) =>
     coreFetch<{ accepted: boolean }>(`${BASE}/sessions/${id}/steer`, { method: 'POST', body: JSON.stringify({ message }) }),
 
@@ -62,6 +65,15 @@ export const devStudioApi = {
     return coreFetch<Record<string, unknown>[]>(`${BASE}/sessions/${sessionId}/tasks${qs}`);
   },
 
+  retryTask: (taskId: string) =>
+    coreFetch<{ ok: boolean; task: Record<string, unknown> }>(`${BASE}/tasks/${taskId}/retry`, { method: 'POST', body: '{}' }),
+
+  deleteTask: (taskId: string) =>
+    coreFetch<{ ok: boolean }>(`${BASE}/tasks/${taskId}`, { method: 'DELETE' }),
+
+  listTaskEvents: (taskId: string, limit = 60) =>
+    coreFetch<Record<string, unknown>[]>(`${BASE}/tasks/${taskId}/events?limit=${limit}`),
+
   // Human Tasks
   listHumanTasks: (sessionId: string, status?: string) => {
     const qs = status ? `?status=${status}` : '';
@@ -81,6 +93,9 @@ export const devStudioApi = {
   listAgents: (sessionId: string) =>
     coreFetch<DevAgent[]>(`${BASE}/sessions/${sessionId}/agents`),
 
+  deleteAgent: (agentId: string) =>
+    coreFetch<{ ok: boolean }>(`${BASE}/agents/${agentId}`, { method: 'DELETE' }),
+
   getFlowState: (sessionId: string) =>
     coreFetch<FlowState>(`${BASE}/sessions/${sessionId}/flow`),
 
@@ -93,6 +108,19 @@ export const devStudioApi = {
   bootAgentMachine: (sessionId: string, role: string) =>
     coreFetch<{ agentId: string; ok: boolean; image?: string; containerName?: string; error?: string }>(
       `${BASE}/sessions/${sessionId}/agents/${role}/machine/boot`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  checkAgentAuth: (sessionId: string, role: string) =>
+    coreFetch<{ ok: boolean; authOk: boolean; error?: string | null }>(
+      `${BASE}/sessions/${sessionId}/agents/${role}/machine/check-auth`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  /** Force-requeue all frozen tasks and immediately re-tick the session. */
+  unstickSession: (sessionId: string) =>
+    coreFetch<{ ok: boolean; requeued: number; roles: string[] }>(
+      `${BASE}/sessions/${sessionId}/unstick`,
       { method: 'POST', body: '{}' },
     ),
 
@@ -109,9 +137,12 @@ export const devStudioApi = {
       body: JSON.stringify({ method, token }),
     }),
 
-  /** Start an OAuth device-code flow in the agent's machine. Returns the auth URL. */
+  /** Start an OAuth device-code flow in the agent's machine.
+   *  Returns { ok:true, url } on success or { ok:false, useTerminal:true, error } when
+   *  the automated flow can't get a URL and the user should run claude auth login manually.
+   */
   startOAuthFlow: (sessionId: string, role: string) =>
-    coreFetch<{ url: string; agentId: string }>(
+    coreFetch<{ ok: boolean; url: string | null; agentId: string; error: string | null; useTerminal: boolean }>(
       `${BASE}/sessions/${sessionId}/agents/${role}/machine/oauth/start`,
       { method: 'POST', body: '{}' },
     ),
@@ -119,11 +150,18 @@ export const devStudioApi = {
   /** Poll whether the OAuth flow completed and the token was saved. */
   pollOAuthStatus: (sessionId: string, role: string) =>
     coreFetch<{
-      status: 'scanning_url' | 'waiting_callback' | 'completed' | 'failed' | 'idle';
+      status: 'scanning_url' | 'waiting_for_code' | 'waiting_callback' | 'completed' | 'failed' | 'idle';
       configured: boolean;
       url: string | null;
       error: string | null;
     }>(`${BASE}/sessions/${sessionId}/agents/${role}/machine/oauth/status`),
+
+  /** Submit the auth code received after visiting the OAuth URL. */
+  submitOAuthCode: (sessionId: string, role: string, code: string) =>
+    coreFetch<{ ok: boolean }>(
+      `${BASE}/sessions/${sessionId}/agents/${role}/machine/oauth/code`,
+      { method: 'POST', body: JSON.stringify({ code }) },
+    ),
 
   // Events
   listEvents: (sessionId: string, limit?: number) => {
