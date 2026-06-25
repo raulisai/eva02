@@ -8,11 +8,23 @@ import { DevSessionService } from './dev-session.service';
 import { DevProjectManagerService } from './dev-project-manager.service';
 import { DevArchitectService } from './dev-architect.service';
 import { ClaudeCodeRunnerService, CLAUDE_AUTH_OPTIONS } from './claude-code-runner.service';
+import { GithubService, GithubNotConnectedError } from './github/github.service';
 import { ApprovalsService } from '../approvals/approvals.service';
 import {
   DevSession, DevGoal, DevIteration, AGENT_SYSTEM_PROMPTS,
   AgentRole, DevGoalStatus, TeamTier, TEAM_TIER_CONFIG,
+  DevMergeProposal, SuccessCriterion,
 } from './dev-studio.types';
+import { agentBranchName, agentGitIdentity, slugify } from './dev-studio.utils';
+
+/** GitHub repo context resolved for a session (git flow enabled). */
+interface SessionRepoContext {
+  owner: string;
+  repo: string;
+  repoUrl: string;
+  integrationBranch: string;
+  token: string;
+}
 
 // Max iterations per goal before stopping and asking user
 const MAX_ITERATIONS_PER_GOAL = 10;
@@ -67,6 +79,7 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
     private readonly architect: DevArchitectService,
     private readonly approvals: ApprovalsService,
     private readonly claudeCode: ClaudeCodeRunnerService,
+    private readonly github: GithubService,
   ) {}
 
   onModuleInit() {
@@ -89,6 +102,16 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
       if (payload.sessionId) {
         await this.tickSafe(payload.sessionId, event.orgId);
       }
+    });
+
+    // Release gate: when a release-merge approval is resolved, merge develop→main
+    // (approved) or close the release PR (rejected). Non-release approvals are ignored.
+    this.events.on('approval.resolved' as any, async (event) => {
+      const payload = event.payload as { approvalId?: string; status?: string };
+      if (!payload.approvalId) return;
+      await this.handleReleaseApprovalResolved(payload.approvalId, payload.status ?? '', event.orgId).catch((err) =>
+        this.logger.error(`Release approval handler failed: ${(err as Error).message}`),
+      );
     });
 
     // Auto-start sessions created via the chat gate (explicit trigger without handshake)
@@ -232,6 +255,8 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
     // ── 1. All goals complete? ────────────────────────────────────────────────
     if (goals.length > 0 && incompleteGoals.length === 0) {
       await this.sessionService.transition(sessionId, orgId, 'ready_for_release');
+      // Open the release PR (develop → main) and gate it through the Approval Engine.
+      await this.prepareReleasePr(session, orgId);
       const closeMessage = await this.pm.generateSessionCloseMessage(session, goals);
       await this.sessionService.logEvent({ orgId, sessionId, eventType: 'session.goals_complete', message: closeMessage });
       await this.emitToSession(orgId, sessionId, 'dev.goals_complete', { sessionId, message: closeMessage });
@@ -739,6 +764,410 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /**
+   * Resolve the GitHub repo context for a session and ensure the integration
+   * branch (develop) exists. Returns null when the session has no repo configured
+   * (git flow disabled — back-compat for older sessions). Throws
+   * GithubNotConnectedError when a repo is set but the org has no GitHub token, so
+   * the caller can surface the connect panel.
+   */
+  private async resolveSessionRepoContext(
+    session: DevSession,
+    orgId: string,
+  ): Promise<SessionRepoContext | null> {
+    if (!session.repo_url) return null;
+    const token = await this.github.requireToken(orgId); // throws GithubNotConnectedError
+    const { owner, repo } = GithubService.parseRepoUrl(session.repo_url);
+    const integrationBranch = session.integration_branch || 'develop';
+    const baseBranch = session.base_branch || 'main';
+    try {
+      await this.github.ensureBranch(orgId, owner, repo, integrationBranch, baseBranch);
+    } catch (err) {
+      // base_branch may not match the repo default (e.g. master) — retry from the
+      // repo's actual default branch before giving up.
+      const info = await this.github.getRepo(orgId, owner, repo).catch(() => null);
+      if (info?.defaultBranch && info.defaultBranch !== baseBranch) {
+        await this.github.ensureBranch(orgId, owner, repo, integrationBranch, info.defaultBranch);
+      } else {
+        throw err;
+      }
+    }
+    return { owner, repo, repoUrl: session.repo_url, integrationBranch, token };
+  }
+
+  /** Surface a human task asking the user to connect GitHub (mirrors Claude Code provisioning). */
+  private async ensureGithubProvisioningTask(
+    session: DevSession,
+    orgId: string,
+    iteration: DevIteration,
+  ): Promise<void> {
+    const pending = await this.sessionService.listHumanTasks(session.id, orgId, 'pending');
+    const exists = pending.some((t) => (t.instructions as Record<string, unknown> | undefined)?.kind === 'github_connect');
+    if (exists) return;
+
+    await this.sessionService.createHumanTask({
+      orgId,
+      sessionId: session.id,
+      iterationId: iteration.id,
+      title: 'Conectar GitHub para versionar el trabajo de los agentes',
+      description:
+        'Cada agente crea su propia rama, commitea con su identidad y abre un Pull Request hacia develop. ' +
+        'Conecta un token de GitHub (fine-grained PAT con permisos contents:write y pull_requests:write) en ' +
+        'Integraciones › Credenciales › GitHub.',
+      requiredOutput: 'Token de GitHub conectado a nivel organización',
+      sensitive: true,
+      instructions: { kind: 'github_connect', provider: 'github' },
+    });
+
+    await this.sessionService.transition(session.id, orgId, 'waiting_for_human_setup');
+    await this.sessionService.logEvent({
+      orgId, sessionId: session.id, eventType: 'agent.blocked',
+      message: 'Esperando conexión de GitHub para versionar el trabajo de los agentes.',
+      iterationId: iteration.id,
+    });
+    await this.emitToSession(orgId, session.id, 'dev.human_task.created', {
+      sessionId: session.id, kind: 'github_connect',
+    });
+  }
+
+  /**
+   * Open the feature PR (head → develop), record it as a merge proposal, and run
+   * the Architect's review. On approve the architect merges to develop; on
+   * changes_requested the task is flagged so the goal re-iterates. PR/review
+   * failures are surfaced as events and never crash the task.
+   */
+  private async openAndReviewFeaturePr(args: {
+    session: DevSession; orgId: string; studioTaskId: string; role: AgentRole;
+    iteration: DevIteration; repoCtx: SessionRepoContext; branch: string;
+    headSha?: string; taskPrompt: string;
+  }): Promise<void> {
+    const { session, orgId, studioTaskId, role, iteration, repoCtx, branch, headSha, taskPrompt } = args;
+    try {
+      let pr = await this.github
+        .findOpenPullRequest(orgId, repoCtx.owner, repoCtx.repo, branch, repoCtx.integrationBranch)
+        .catch(() => null);
+      if (!pr) {
+        pr = await this.github.createPullRequest(orgId, repoCtx.owner, repoCtx.repo, {
+          head: branch,
+          base: repoCtx.integrationBranch,
+          title: `[${role}] ${taskPrompt.split('\n')[0].slice(0, 72)}`,
+          body: `PR automático del agente **${role}** (Dev Studio).\n\nRama \`${branch}\` → \`${repoCtx.integrationBranch}\`.`,
+        });
+      }
+
+      const files = await this.github
+        .getPullRequestFiles(orgId, repoCtx.owner, repoCtx.repo, pr.number)
+        .catch(() => []);
+      const diffSummary = files
+        .slice(0, 30)
+        .map((f) => `${f.status} ${f.filename} (+${f.additions}/-${f.deletions})`)
+        .join('\n');
+
+      const { data: taskRow } = await this.db.admin
+        .from('dev_tasks')
+        .select('acceptance_criteria, test_result, title')
+        .eq('id', studioTaskId)
+        .eq('org_id', orgId)
+        .maybeSingle();
+      const acceptance = (taskRow?.acceptance_criteria as SuccessCriterion[]) ?? [];
+      const testResult = (taskRow?.test_result as Record<string, unknown>) ?? undefined;
+
+      const review = await this.architect.reviewPullRequest({
+        orgId,
+        taskTitle: (taskRow?.title as string) ?? taskPrompt.slice(0, 60),
+        taskPrompt,
+        acceptanceCriteria: acceptance,
+        files,
+        testResult,
+      });
+
+      const proposal = await this.sessionService.createMergeProposal({
+        orgId, sessionId: session.id, taskId: studioTaskId,
+        sourceBranch: branch, targetBranch: repoCtx.integrationBranch,
+        diffSummary, riskLevel: review.riskLevel,
+        prNumber: pr.number, prUrl: pr.url, prState: pr.state, headSha, kind: 'feature',
+        testResult,
+      });
+
+      await this.sessionService.logEvent({
+        orgId, sessionId: session.id, eventType: 'dev.pr.opened',
+        message: `[${role}] PR #${pr.number} ${branch} → ${repoCtx.integrationBranch} — revisión: ${review.decision}`,
+        iterationId: iteration.id, taskId: studioTaskId,
+      });
+      await this.emitToSession(orgId, session.id, 'dev.pr.opened', {
+        sessionId: session.id, studioTaskId, prNumber: pr.number, prUrl: pr.url, branch, decision: review.decision,
+      });
+
+      if (review.decision === 'approve') {
+        const merge = await this.github.mergePullRequest(orgId, repoCtx.owner, repoCtx.repo, pr.number, 'squash');
+        if (merge.merged) {
+          await this.sessionService.updateMergeProposal(proposal.id, orgId, {
+            status: 'merged', pr_state: 'merged', reviewer_notes: review.summary,
+          });
+          await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'merged', {
+            result_summary: `Integrado a ${repoCtx.integrationBranch} (PR #${pr.number}).`,
+          });
+          await this.sessionService.logEvent({
+            orgId, sessionId: session.id, eventType: 'dev.pr.merged',
+            message: `[${role}] PR #${pr.number} integrado a ${repoCtx.integrationBranch}.`,
+            iterationId: iteration.id, taskId: studioTaskId,
+          });
+          await this.emitToSession(orgId, session.id, 'dev.pr.merged', {
+            sessionId: session.id, studioTaskId, prNumber: pr.number, targetBranch: repoCtx.integrationBranch,
+          });
+        } else {
+          await this.sessionService.updateMergeProposal(proposal.id, orgId, {
+            status: 'conflicted', reviewer_notes: merge.message ?? 'No mergeable (conflicto).',
+          });
+          await this.sessionService.logEvent({
+            orgId, sessionId: session.id, eventType: 'dev.pr.conflicted',
+            message: `[${role}] PR #${pr.number} no se integró automáticamente: ${(merge.message ?? '').slice(0, 160)}`,
+            iterationId: iteration.id, taskId: studioTaskId,
+          });
+        }
+      } else {
+        await this.sessionService.updateMergeProposal(proposal.id, orgId, {
+          status: 'rejected', reviewer_notes: review.notes ?? review.summary,
+        });
+        await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'changes_requested', {
+          result_summary: review.notes ?? review.summary,
+        });
+        await this.sessionService.logEvent({
+          orgId, sessionId: session.id, eventType: 'dev.pr.changes_requested',
+          message: `[${role}] PR #${pr.number}: cambios solicitados — ${(review.notes ?? review.summary).slice(0, 160)}`,
+          iterationId: iteration.id, taskId: studioTaskId,
+        });
+      }
+    } catch (err) {
+      await this.sessionService.logEvent({
+        orgId, sessionId: session.id, eventType: 'dev.pr.error',
+        message: `[${role}] Error en PR/review: ${(err as Error).message.slice(0, 200)}`,
+        iterationId: iteration.id, taskId: studioTaskId,
+      }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Human-approve a merge proposal. For a real GitHub PR this merges it (squash
+   * for feature → develop, merge commit for release → main); otherwise it just
+   * flips the proposal status. Release merges are reached through the Approval
+   * Engine (see prepareReleasePr / executeReleaseMerge).
+   */
+  async approveMergeProposal(proposalId: string, orgId: string, notes?: string): Promise<DevMergeProposal> {
+    const proposal = await this.sessionService.getMergeProposal(proposalId, orgId);
+    if (!proposal) throw new Error('Merge proposal not found');
+    // Release PRs (develop → main) are production actions: they merge ONLY through
+    // the Approval Engine (handleReleaseApprovalResolved), never via a direct button.
+    if (proposal.kind === 'release') {
+      throw new Error('Los releases a producción se aprueban en el panel de Approvals, no aquí.');
+    }
+    const session = await this.sessionService.findById(proposal.session_id, orgId);
+    if (proposal.pr_number && session?.repo_url) {
+      const { owner, repo } = GithubService.parseRepoUrl(session.repo_url);
+      // Only feature PRs reach here (release is guarded above) → squash into develop.
+      const merge = await this.github.mergePullRequest(orgId, owner, repo, proposal.pr_number, 'squash');
+      if (!merge.merged) {
+        return this.sessionService.updateMergeProposal(proposalId, orgId, {
+          status: 'conflicted', reviewer_notes: notes ?? merge.message ?? 'No mergeable',
+        });
+      }
+      await this.sessionService.logEvent({
+        orgId, sessionId: proposal.session_id, eventType: 'dev.pr.merged',
+        message: `PR #${proposal.pr_number} integrado a ${proposal.target_branch} (aprobación humana).`,
+      });
+      return this.sessionService.updateMergeProposal(proposalId, orgId, {
+        status: 'merged', pr_state: 'merged', reviewer_notes: notes,
+      });
+    }
+    return this.sessionService.updateMergeProposal(proposalId, orgId, { status: 'approved', reviewer_notes: notes });
+  }
+
+  /** Human-reject a merge proposal; closes the PR on GitHub when there is one. */
+  async rejectMergeProposal(proposalId: string, orgId: string, notes?: string): Promise<DevMergeProposal> {
+    const proposal = await this.sessionService.getMergeProposal(proposalId, orgId);
+    if (!proposal) throw new Error('Merge proposal not found');
+    const session = await this.sessionService.findById(proposal.session_id, orgId);
+    if (proposal.pr_number && session?.repo_url) {
+      const { owner, repo } = GithubService.parseRepoUrl(session.repo_url);
+      await this.github.closePullRequest(orgId, owner, repo, proposal.pr_number).catch(() => undefined);
+    }
+    return this.sessionService.updateMergeProposal(proposalId, orgId, {
+      status: 'rejected', pr_state: 'closed', reviewer_notes: notes,
+    });
+  }
+
+  /**
+   * Connect a GitHub repo to a session: either an existing repo (by URL) or a new
+   * one created via the API. Resolves the default branch, ensures the integration
+   * branch (develop) exists, and persists the coordinates on the session.
+   */
+  async connectRepo(
+    sessionId: string,
+    orgId: string,
+    opts: { repoUrl?: string; create?: boolean; name?: string; owner?: string; private?: boolean },
+  ): Promise<DevSession> {
+    const session = await this.sessionService.findByIdOrThrow(sessionId, orgId);
+    await this.github.requireToken(orgId); // surfaces GithubNotConnectedError if missing
+
+    let info;
+    if (opts.create) {
+      const name = opts.name?.trim() || slugify(session.title, 60);
+      info = await this.github.createRepo(orgId, { name, private: opts.private ?? true, org: opts.owner });
+    } else {
+      if (!opts.repoUrl) throw new Error('repoUrl requerido para conectar un repo existente');
+      const { owner, repo } = GithubService.parseRepoUrl(opts.repoUrl);
+      info = await this.github.getRepo(orgId, owner, repo);
+    }
+
+    await this.github.ensureBranch(orgId, info.owner, info.repo, 'develop', info.defaultBranch).catch(() => undefined);
+
+    const updated = await this.sessionService.setSessionRepo(sessionId, orgId, {
+      repoUrl: info.htmlUrl,
+      owner: info.owner,
+      repo: info.repo,
+      baseBranch: info.defaultBranch,
+      integrationBranch: 'develop',
+    });
+
+    await this.sessionService.logEvent({
+      orgId, sessionId, eventType: 'dev.repo.connected',
+      message: `Repo conectado: ${info.fullName} (default ${info.defaultBranch}, integración develop).`,
+    });
+    await this.emitToSession(orgId, sessionId, 'dev.repo.connected', {
+      sessionId, repoUrl: info.htmlUrl, owner: info.owner, repo: info.repo,
+    });
+    return updated;
+  }
+
+  // ── Release gate (develop → main, human-approved) ────────────────────────────
+
+  /**
+   * Open the release PR (develop → main) once all goals are complete and gate it
+   * through the Approval Engine (level 2) — this is the user's final review before
+   * production. Idempotent: skips when a release proposal is already in flight or
+   * when the session has no repo configured.
+   */
+  private async prepareReleasePr(session: DevSession, orgId: string): Promise<void> {
+    if (!session.repo_url) return;
+    // Require a GitHub token; if absent, feature work would already have surfaced github_connect.
+    try {
+      await this.github.requireToken(orgId);
+    } catch {
+      return;
+    }
+
+    const existing = await this.sessionService
+      .listMergeProposals(session.id, orgId)
+      .catch(() => [] as DevMergeProposal[]);
+    if (existing.some((p) => p.kind === 'release' && ['pending', 'approved'].includes(p.status))) return;
+
+    const { owner, repo } = GithubService.parseRepoUrl(session.repo_url);
+    const integrationBranch = session.integration_branch || 'develop';
+    const prodBranch = session.base_branch || 'main';
+
+    try {
+      let pr = await this.github.findOpenPullRequest(orgId, owner, repo, integrationBranch, prodBranch).catch(() => null);
+      if (!pr) {
+        pr = await this.github.createPullRequest(orgId, owner, repo, {
+          head: integrationBranch,
+          base: prodBranch,
+          title: `Release: ${session.title}`,
+          body: `Release de Dev Studio — integra \`${integrationBranch}\` → \`${prodBranch}\` (producción). Requiere aprobación humana.`,
+        });
+      }
+
+      const approval = await this.approvals.request(
+        {
+          action_type: 'dev_studio.release_merge',
+          level: 2,
+          payload: { sessionId: session.id, owner, repo, prNumber: pr.number, headSha: pr.head.sha, targetBranch: prodBranch },
+          summary: `Release a producción: ${session.title} (PR #${pr.number} ${integrationBranch} → ${prodBranch})`,
+          source: 'dev_manager',
+        } as any,
+        orgId,
+        session.user_id,
+      );
+
+      await this.sessionService.createMergeProposal({
+        orgId, sessionId: session.id,
+        sourceBranch: integrationBranch, targetBranch: prodBranch,
+        prNumber: pr.number, prUrl: pr.url, prState: pr.state, headSha: pr.head.sha,
+        kind: 'release', approvalId: approval.id,
+        diffSummary: `Release ${integrationBranch} → ${prodBranch}`, riskLevel: 'high',
+      });
+
+      await this.sessionService.logEvent({
+        orgId, sessionId: session.id, eventType: 'dev.release.requested',
+        message: `Release listo: PR #${pr.number} ${integrationBranch} → ${prodBranch}. Esperando tu aprobación para ir a prod.`,
+      });
+      await this.emitToSession(orgId, session.id, 'dev.release.requested', {
+        sessionId: session.id, prNumber: pr.number, prUrl: pr.url, approvalId: approval.id,
+      });
+    } catch (err) {
+      await this.sessionService.logEvent({
+        orgId, sessionId: session.id, eventType: 'dev.release.error',
+        message: `No se pudo preparar el release: ${(err as Error).message.slice(0, 200)}`,
+      }).catch(() => undefined);
+    }
+  }
+
+  /** React to a resolved release-merge approval: merge to prod (approved) or close the PR (rejected). */
+  private async handleReleaseApprovalResolved(approvalId: string, status: string, orgId: string): Promise<void> {
+    const proposal = await this.sessionService.getMergeProposalByApproval(approvalId, orgId);
+    if (!proposal || proposal.kind !== 'release') return; // not a dev-studio release approval
+    if (proposal.status === 'merged' || proposal.status === 'rejected') return; // already handled
+    const session = await this.sessionService.findById(proposal.session_id, orgId);
+
+    if (status === 'approved') {
+      await this.executeReleaseMerge(proposal, session, orgId, approvalId);
+      return;
+    }
+    if (status === 'rejected') {
+      if (proposal.pr_number && session?.repo_url) {
+        const { owner, repo } = GithubService.parseRepoUrl(session.repo_url);
+        await this.github.closePullRequest(orgId, owner, repo, proposal.pr_number).catch(() => undefined);
+      }
+      await this.sessionService.updateMergeProposal(proposal.id, orgId, { status: 'rejected', pr_state: 'closed' });
+      if (session) await this.sessionService.transition(session.id, orgId, 'running').catch(() => undefined);
+      await this.sessionService.logEvent({
+        orgId, sessionId: proposal.session_id, eventType: 'dev.release.rejected',
+        message: 'Release a producción rechazado; la sesión vuelve a trabajar.',
+      });
+    }
+  }
+
+  /** Merge develop → main after human approval, consuming the approval nonce once. */
+  private async executeReleaseMerge(
+    proposal: DevMergeProposal,
+    session: DevSession | null,
+    orgId: string,
+    approvalId: string,
+  ): Promise<void> {
+    // Consume the approval so the production merge can never run twice.
+    await this.approvals.consumeApproved(approvalId, orgId).catch(() => undefined);
+    if (!session?.repo_url || !proposal.pr_number) return;
+    const { owner, repo } = GithubService.parseRepoUrl(session.repo_url);
+    const merge = await this.github.mergePullRequest(orgId, owner, repo, proposal.pr_number, 'merge');
+
+    if (merge.merged) {
+      await this.sessionService.updateMergeProposal(proposal.id, orgId, { status: 'merged', pr_state: 'merged' });
+      await this.sessionService.transition(session.id, orgId, 'completed').catch(() => undefined);
+      await this.sessionService.logEvent({
+        orgId, sessionId: session.id, eventType: 'dev.release.merged',
+        message: `Release integrado a ${proposal.target_branch} (producción). PR #${proposal.pr_number}.`,
+      });
+      await this.emitToSession(orgId, session.id, 'dev.release.merged', {
+        sessionId: session.id, prNumber: proposal.pr_number, targetBranch: proposal.target_branch,
+      });
+    } else {
+      await this.sessionService.updateMergeProposal(proposal.id, orgId, { status: 'conflicted', reviewer_notes: merge.message });
+      await this.sessionService.logEvent({
+        orgId, sessionId: session.id, eventType: 'dev.release.conflicted',
+        message: `Release no se pudo integrar a ${proposal.target_branch}: ${(merge.message ?? '').slice(0, 160)}`,
+      });
+    }
+  }
+
   private async runWaveFromQueued(session: DevSession, orgId: string, tasks: Record<string, unknown>[]): Promise<number> {
     let dispatched = 0;
     const iterations = new Map<string, DevIteration>();
@@ -899,6 +1328,12 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
   ): Promise<boolean> {
     const agentRecord = await this.sessionService.getAgent(session.id, orgId, role);
 
+    // Git context for this run, resolved lazily inside the Claude Code branch and
+    // reused after success to commit + push the agent's work.
+    let repoCtx: SessionRepoContext | null = null;
+    let agentBranch: string | null = null;
+    let gitIdentity: { name: string; email: string } | null = null;
+
     // ── Guard: code roles REQUIRE Claude Code — never fall back to agent loop ──
     // The agent loop lacks filesystem tooling and can't write production code.
     // If the credential is missing, requeue the task and surface the provisioning
@@ -990,6 +1425,75 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
 
       let outcome: { ok: boolean; text?: string; authFailed?: boolean };
       if (useClaudeCode) {
+        // ── Real git: prepare the agent's branch in its machine before coding ──
+        try {
+          repoCtx = await this.resolveSessionRepoContext(session, orgId);
+        } catch (err) {
+          if (err instanceof GithubNotConnectedError) {
+            await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'queued', {
+              result_summary: 'En espera de conexión de GitHub. Conecta GitHub para versionar el trabajo.',
+            });
+            await this.sessionService.logEvent({
+              orgId, sessionId: session.id, eventType: 'task.blocked_no_github',
+              message: `[${role}] Tarea re-encolada: falta token de GitHub.`,
+              iterationId: iteration.id, taskId: studioTaskId,
+            });
+            if (agentRecord) await this.sessionService.updateAgentStatus(agentRecord.id, orgId, 'blocked', { current_task_id: null });
+            await this.ensureGithubProvisioningTask(session, orgId, iteration);
+            await this.tasks.transition(backingTaskId, orgId, 'failed', { error: 'GITHUB_NOT_CONNECTED' }).catch(() => undefined);
+            return false;
+          }
+          const gErr = (err as Error).message;
+          await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'failed', { result_summary: `GitHub: ${gErr}` });
+          await this.sessionService.logEvent({
+            orgId, sessionId: session.id, eventType: 'git.setup_failed',
+            message: `[${role}] No se pudo preparar el repo: ${gErr.slice(0, 200)}`,
+            iterationId: iteration.id, taskId: studioTaskId,
+          });
+          await this.tasks.transition(backingTaskId, orgId, 'failed', { error: gErr }).catch(() => undefined);
+          if (agentRecord) await this.sessionService.updateAgentStatus(agentRecord.id, orgId, 'failed', { current_task_id: null });
+          return false;
+        }
+
+        if (repoCtx && agentRecord) {
+          agentBranch = agentBranchName(agentRecord.name, prompt, iteration.number);
+          gitIdentity = agentGitIdentity(agentRecord);
+          await this.sessionService.updateAgentStatus(agentRecord.id, orgId, 'running', {
+            current_task_id: studioTaskId,
+            branch_name: agentBranch,
+            git_author_name: gitIdentity.name,
+            git_author_email: gitIdentity.email,
+          });
+          await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'running', { branch_name: agentBranch });
+
+          const setup = await this.claudeCode.setupAgentRepo({
+            orgId,
+            machineKey: agentRecord.id,
+            role,
+            repoUrl: repoCtx.repoUrl,
+            token: repoCtx.token,
+            branch: agentBranch,
+            baseBranch: repoCtx.integrationBranch,
+            identity: gitIdentity,
+          });
+          if (!setup.ok) {
+            await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, 'failed', { result_summary: `git setup: ${setup.error}` });
+            await this.sessionService.logEvent({
+              orgId, sessionId: session.id, eventType: 'git.setup_failed',
+              message: `[${role}] git setup falló: ${(setup.error ?? '').slice(0, 200)}`,
+              iterationId: iteration.id, taskId: studioTaskId,
+            });
+            await this.tasks.transition(backingTaskId, orgId, 'failed', { error: setup.error ?? 'git setup failed' }).catch(() => undefined);
+            if (agentRecord) await this.sessionService.updateAgentStatus(agentRecord.id, orgId, 'failed', { current_task_id: null });
+            return false;
+          }
+          await this.sessionService.logEvent({
+            orgId, sessionId: session.id, eventType: 'git.branch_ready',
+            message: `[${role}] Rama lista: ${agentBranch} (desde ${repoCtx.integrationBranch})`,
+            iterationId: iteration.id, taskId: studioTaskId,
+          });
+        }
+
         // Heartbeat: touch dev_tasks.updated_at periodically so the stuck-task
         // detector doesn't falsely requeue this task while Claude is still active.
         let lastHeartbeat = Date.now();
@@ -1062,6 +1566,43 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
 
       const success = outcome.ok;
       const resultSummary = outcome.text?.slice(0, 500) ?? '';
+
+      // Code work succeeded → commit + push the agent's branch under its identity,
+      // so the history shows real, attributable authorship per agent.
+      if (success && useClaudeCode && repoCtx && agentBranch && gitIdentity && agentRecord) {
+        const commitMsg = `[${role}] ${prompt.split('\n')[0].slice(0, 72)}`;
+        const push = await this.claudeCode.commitAndPushAgentRepo({
+          machineKey: agentRecord.id,
+          token: repoCtx.token,
+          branch: agentBranch,
+          message: commitMsg,
+          identity: gitIdentity,
+        });
+        if (push.ok && push.pushed) {
+          await this.sessionService.logEvent({
+            orgId, sessionId: session.id, eventType: 'git.pushed',
+            message: `[${role}] push ${agentBranch}${push.headSha ? ` @ ${push.headSha.slice(0, 7)}` : ''}`,
+            iterationId: iteration.id, taskId: studioTaskId,
+          });
+          // Open the PR (feature → develop) and let the architect review/merge it.
+          await this.openAndReviewFeaturePr({
+            session, orgId, studioTaskId, role, iteration, repoCtx,
+            branch: agentBranch, headSha: push.headSha, taskPrompt: prompt,
+          });
+        } else if (push.error === 'NO_CHANGES') {
+          await this.sessionService.logEvent({
+            orgId, sessionId: session.id, eventType: 'git.no_changes',
+            message: `[${role}] El agente no produjo cambios en archivos.`,
+            iterationId: iteration.id, taskId: studioTaskId,
+          });
+        } else {
+          await this.sessionService.logEvent({
+            orgId, sessionId: session.id, eventType: 'git.push_failed',
+            message: `[${role}] push falló: ${(push.error ?? '').slice(0, 200)}`,
+            iterationId: iteration.id, taskId: studioTaskId,
+          });
+        }
+      }
 
       await this.sessionService.updateStudioTaskStatus(studioTaskId, orgId, success ? 'needs_review' : 'failed', {
         result_summary: resultSummary,
@@ -1191,6 +1732,74 @@ export class DevOrchestratorService implements OnModuleInit, OnModuleDestroy {
       northStar: northStarResult.northStar,
       goalCount: northStarResult.goals.length,
     });
+  }
+
+  /**
+   * Start a session using a pre-approved plan from the planning wizard.
+   * Skips PM planning phase entirely — goals are seeded directly and approved.
+   */
+  async startSessionWithPreplan(
+    sessionId: string,
+    orgId: string,
+    preplan: {
+      northStar?: string;
+      teamTier?: TeamTier;
+      teamTierReason?: string;
+      definitionOfDone?: Array<{ id: string; description: string; verifiable: boolean }>;
+      goals: Array<{
+        title: string;
+        description: string;
+        priority: number;
+        successCriteria: Array<{ id: string; description: string; verifiable: boolean }>;
+      }>;
+    },
+  ): Promise<void> {
+    const session = await this.sessionService.findByIdOrThrow(sessionId, orgId);
+
+    await this.sessionService.transition(sessionId, orgId, 'planning');
+
+    const northStar = preplan.northStar ?? preplan.goals.map((g) => g.title).join(', ');
+    await this.sessionService.setNorthStar(sessionId, orgId, northStar, preplan.definitionOfDone ?? []);
+
+    const teamTier: TeamTier = preplan.teamTier ?? 'small';
+    await this.db.admin
+      .from('dev_sessions')
+      .update({
+        metadata: {
+          ...(session.metadata ?? {}),
+          teamTier,
+          teamTierReason: preplan.teamTierReason ?? 'Plan pre-aprobado por el usuario',
+          preplan: undefined,
+        },
+      })
+      .eq('id', sessionId)
+      .eq('org_id', orgId);
+
+    for (const goalDef of preplan.goals) {
+      await this.sessionService.createGoal({
+        orgId,
+        sessionId,
+        title: goalDef.title,
+        description: goalDef.description,
+        priority: goalDef.priority,
+        successCriteria: goalDef.successCriteria,
+      });
+    }
+
+    const goals = await this.sessionService.listGoals(sessionId, orgId);
+    await this.sessionService.approveGoals(sessionId, orgId, goals.map((g) => g.id));
+    await this.sessionService.transition(sessionId, orgId, 'running');
+
+    await this.sessionService.logEvent({
+      orgId, sessionId, eventType: 'session.running',
+      message: `Plan pre-aprobado. Tier: ${teamTier}. ${preplan.goals.length} goals creados y aprobados automáticamente.`,
+    });
+
+    await this.emitToSession(orgId, sessionId, 'dev.session.updated', {
+      sessionId, status: 'running', goalCount: goals.length,
+    });
+
+    void this.tickSafe(sessionId, orgId);
   }
 
   async approveGoalsAndRun(sessionId: string, orgId: string, goalIds: string[]): Promise<void> {

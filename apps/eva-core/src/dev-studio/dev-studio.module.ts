@@ -11,6 +11,7 @@ import { DevProjectManagerService } from './dev-project-manager.service';
 import { DevArchitectService } from './dev-architect.service';
 import { DevOrchestratorService } from './dev-orchestrator.service';
 import { ClaudeCodeRunnerService } from './claude-code-runner.service';
+import { GithubService } from './github/github.service';
 import { DevStudioController } from './dev-studio.controller';
 
 @Module({
@@ -30,7 +31,8 @@ import { DevStudioController } from './dev-studio.controller';
     DevArchitectService,
     DevOrchestratorService,
     ClaudeCodeRunnerService,
+    GithubService,
   ],
-  exports: [DevSessionService, DevOrchestratorService, ClaudeCodeRunnerService],
+  exports: [DevSessionService, DevOrchestratorService, ClaudeCodeRunnerService, GithubService],
 })
 export class DevStudioModule {}

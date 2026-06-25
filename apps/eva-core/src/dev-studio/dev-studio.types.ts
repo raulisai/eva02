@@ -121,6 +121,10 @@ export interface DevSession {
   repo_url: string | null;
   base_branch: string;
   session_branch: string | null;
+  repo_owner: string | null;
+  repo_name: string | null;
+  repo_provider: string;
+  integration_branch: string;
   current_goal_id: string | null;
   current_iteration_id: string | null;
   continuation_policy: ContinuationPolicy;
@@ -177,6 +181,9 @@ export interface DevAgent {
   current_task_id: string | null;
   branch_name: string | null;
   container_id: string | null;
+  git_author_name: string | null;
+  git_author_email: string | null;
+  github_login: string | null;
   budget: Record<string, unknown>;
   last_heartbeat_at: string | null;
   metadata: Record<string, unknown>;
@@ -213,6 +220,12 @@ export interface DevMergeProposal {
   risk_level: 'low' | 'medium' | 'high' | null;
   test_result: Record<string, unknown>;
   reviewer_notes: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  pr_state: string | null;
+  head_sha: string | null;
+  kind: 'feature' | 'release';
+  approval_id: string | null;
   created_at: string;
   updated_at: string;
 }

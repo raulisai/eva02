@@ -78,6 +78,13 @@ Cada agente del Dev Studio levanta **su propia máquina Docker** con una imagen 
 - Provisioning primera vez: el orquestador crea un human task `claude_code_auth` (instructions.kind) → la UI `ClaudeCodeAuthPanel` ofrece los 3 métodos; al guardar (`POST sessions/:id/claude-code/credential`) se verifica el human task y se reanuda el tick.
 - `EVA_CLAUDE_SANDBOX_IMAGE` — override de la imagen legacy de fallback.
 
+### Backing GitHub (repo real por sesión, migración 041)
+Todo el trabajo se versiona en **un repositorio GitHub**. Token a nivel org en `org_integrations` (kind=`credential`, provider=`github`; PAT fine-grained con `contents:write` + `pull_requests:write`) — leído por `GithubService` ([github/github.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/github/github.service.ts)), nunca logueado.
+- **Rama por agente con su nombre**: cada tarea de código clona el repo en el `/work` de la máquina del agente y hace `checkout -B agent/<nombre>/iter-N-<slug>` desde `origin/develop`, con **identidad git por agente** (autor por commit → se ve quién hizo cada cambio). Tras correr Claude: commit + push.
+- **PR → develop, aprobado por el arquitecto**: cada agente abre un PR `feature → develop`; el Architect (`reviewPullRequest`) lo aprueba (squash-merge a develop) o pide cambios. `dev_merge_proposals` registra el PR real (`pr_number/url/head_sha/kind`).
+- **Release → prod con tu aprobación**: al completar los goals se abre `develop → main` (kind=`release`) y se crea una **approval** (Approval Engine, level 2, `dev_studio.release_merge`); al aprobarla en el panel de Approvals se mergea a `main` y la sesión queda `completed`. El botón directo de approve/reject del panel de PRs **rehúsa** releases (solo Approvals).
+- Sin token GitHub → human task `github_connect`. La sesión guarda `repo_url/repo_owner/repo_name/base_branch/integration_branch` (`develop`). UI: indicador de fase, panel de conexión de repo, visor de código solo-lectura (árbol + archivo + diffs de PR) y tarjeta GitHub por agente.
+
 ## Task state machine
 ```
 pending → planning → running → completed

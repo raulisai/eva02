@@ -2,7 +2,7 @@
 
 import { useEffect, useState, lazy, Suspense } from 'react';
 import {
-  X, GitBranch, CheckCircle2, Clock, Terminal,
+  X, GitBranch, CheckCircle2, Clock, Terminal, Github,
   ChevronDown, ChevronRight, Eye, EyeOff, Check, Star, Wrench,
   ExternalLink, Loader2, ShieldCheck, RefreshCw,
 } from 'lucide-react';
@@ -362,6 +362,33 @@ export function AgentDetailPanel({ sessionId, role, orgToken, onClose }: AgentDe
                 )}
               </>
             )}
+          </div>
+        )}
+
+        {/* GitHub identity: branch + author + current task (who did what) */}
+        {isCodeRole && agent && (
+          <div className="mt-3 rounded-xl border border-white/5 bg-[#0b1224]/60 p-3 space-y-2">
+            <div className="flex items-center gap-2">
+              <Github className="h-3.5 w-3.5 text-zinc-400" />
+              <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-500">GitHub</span>
+            </div>
+            <div className="space-y-1 text-[11px] font-mono">
+              <div className="flex items-center gap-1.5">
+                <GitBranch className="h-3 w-3 text-zinc-600 shrink-0" />
+                <span className="text-zinc-300 truncate" title={agent.branch_name ? String(agent.branch_name) : undefined}>
+                  {agent.branch_name ? String(agent.branch_name) : 'sin rama asignada'}
+                </span>
+              </div>
+              {Boolean(agent.git_author_name) && (
+                <div className="text-zinc-500 truncate">
+                  autor: <span className="text-zinc-400">{String(agent.git_author_name)}</span>
+                  {agent.git_author_email ? <span className="text-zinc-700"> &lt;{String(agent.git_author_email)}&gt;</span> : null}
+                </div>
+              )}
+              <div className="text-zinc-500 truncate">
+                tarea: <span className="text-zinc-400">{current ? String(current.title) : 'ninguna'}</span>
+              </div>
+            </div>
           </div>
         )}
       </div>

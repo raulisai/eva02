@@ -7,6 +7,7 @@ import { DevSessionService } from './dev-session.service';
 import { DevOrchestratorService } from './dev-orchestrator.service';
 import { DevProjectManagerService } from './dev-project-manager.service';
 import { ClaudeCodeRunnerService, CLAUDE_AUTH_OPTIONS, ClaudeAuthMethod } from './claude-code-runner.service';
+import { GithubService } from './github/github.service';
 import { machineSpecForRole } from './agent-machines';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { PlanSessionDto } from './dto/plan-session.dto';
@@ -14,6 +15,7 @@ import { ApproveGoalsDto } from './dto/approve-goals.dto';
 import { SubmitHumanTaskDto } from './dto/submit-human-task.dto';
 import { SteerSessionDto } from './dto/steer-session.dto';
 import { MergeActionDto } from './dto/merge-action.dto';
+import { ConnectRepoDto } from './dto/connect-repo.dto';
 import { DevAgent } from './dev-studio.types';
 
 @Controller('dev-studio')
@@ -23,6 +25,7 @@ export class DevStudioController {
     private readonly orchestrator: DevOrchestratorService,
     private readonly claudeCode: ClaudeCodeRunnerService,
     private readonly pm: DevProjectManagerService,
+    private readonly github: GithubService,
   ) {}
 
   /**
@@ -87,10 +90,9 @@ export class DevStudioController {
       title,
       originalPrompt: dto.prompt,
       projectId: dto.project_id,
-      metadata: dto.preplan ? { preplan: dto.preplan } : undefined,
     });
-    // If a pre-approved plan was provided, auto-start the session immediately
-    if (dto.preplan?.autoApprove && dto.preplan?.goals?.length) {
+    // If a wizard pre-approved plan was provided, seed goals immediately and run
+    if (dto.preplan?.autoApprove && dto.preplan.goals?.length) {
       void this.orchestrator.startSessionWithPreplan(session.id, orgId, dto.preplan as any);
     }
     return session;
@@ -586,11 +588,8 @@ export class DevStudioController {
     @Body() dto: MergeActionDto,
     @Req() req: AuthenticatedRequest,
   ) {
-    const updated = await this.sessions.updateMergeProposal(id, req.user.orgId, {
-      status: 'approved',
-      reviewer_notes: dto.reviewer_notes,
-    });
-    return updated;
+    // Performs the real GitHub merge when the proposal is backed by a PR.
+    return this.orchestrator.approveMergeProposal(id, req.user.orgId, dto.reviewer_notes);
   }
 
   @Post('merge-proposals/:id/reject')
@@ -600,11 +599,80 @@ export class DevStudioController {
     @Body() dto: MergeActionDto,
     @Req() req: AuthenticatedRequest,
   ) {
-    const updated = await this.sessions.updateMergeProposal(id, req.user.orgId, {
-      status: 'rejected',
-      reviewer_notes: dto.reviewer_notes,
-    });
-    return updated;
+    // Closes the PR on GitHub when the proposal is backed by one.
+    return this.orchestrator.rejectMergeProposal(id, req.user.orgId, dto.reviewer_notes);
+  }
+
+  // ── GitHub connection + repo browsing ───────────────────────────────────────
+
+  /** Org-level GitHub token status (login + scopes) for the connection UI. */
+  @Get('github/status')
+  async githubStatus(@Req() req: AuthenticatedRequest) {
+    return this.github.validateToken(req.user.orgId);
+  }
+
+  /** Connect an existing repo (by URL) or create a new one, then bind it to the session. */
+  @Post('sessions/:id/repo/connect')
+  @HttpCode(HttpStatus.OK)
+  async connectRepo(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ConnectRepoDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    return this.orchestrator.connectRepo(id, req.user.orgId, dto);
+  }
+
+  /** Read-only file tree for a branch (defaults to the integration branch). */
+  @Get('sessions/:id/repo/tree')
+  async repoTree(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('ref') ref: string | undefined,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const session = await this.sessions.findByIdOrThrow(id, req.user.orgId);
+    const coords = this.repoCoords(session);
+    if (!coords) return [];
+    return this.github.getTree(req.user.orgId, coords.owner, coords.repo, ref || session.integration_branch || 'develop');
+  }
+
+  /** Read-only file content at a path/ref (decoded UTF-8; large/binary flagged). */
+  @Get('sessions/:id/repo/file')
+  async repoFile(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('path') path: string | undefined,
+    @Query('ref') ref: string | undefined,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const session = await this.sessions.findByIdOrThrow(id, req.user.orgId);
+    const coords = this.repoCoords(session);
+    if (!coords || !path) throw new BadRequestException('Repo no conectado o path faltante');
+    return this.github.getContent(req.user.orgId, coords.owner, coords.repo, path, ref || session.integration_branch || 'develop');
+  }
+
+  /** Diff (changed files + patches) for the PR backing a merge proposal. */
+  @Get('merge-proposals/:id/files')
+  async mergeProposalFiles(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthenticatedRequest) {
+    const proposal = await this.sessions.getMergeProposal(id, req.user.orgId);
+    if (!proposal?.pr_number) return [];
+    const session = await this.sessions.findByIdOrThrow(proposal.session_id, req.user.orgId);
+    const coords = this.repoCoords(session);
+    if (!coords) return [];
+    return this.github.getPullRequestFiles(req.user.orgId, coords.owner, coords.repo, proposal.pr_number);
+  }
+
+  /** Resolve owner/repo from stored columns, falling back to parsing repo_url. */
+  private repoCoords(session: { repo_owner: string | null; repo_name: string | null; repo_url: string | null }):
+    | { owner: string; repo: string }
+    | null {
+    if (session.repo_owner && session.repo_name) return { owner: session.repo_owner, repo: session.repo_name };
+    if (session.repo_url) {
+      try {
+        return GithubService.parseRepoUrl(session.repo_url);
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   // ── Orchestrator manual tick (debug/resume) ────────────────────────────────

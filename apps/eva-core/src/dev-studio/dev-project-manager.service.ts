@@ -4,7 +4,7 @@ import { DevSessionService } from './dev-session.service';
 import { DevSession, DevGoal, DevIteration, AGENT_SYSTEM_PROMPTS, SuccessCriterion, TeamTier } from './dev-studio.types';
 import { extractJson } from './dev-studio.utils';
 
-interface NorthStarResult {
+export interface NorthStarResult {
   northStar: string;
   definitionOfDone: SuccessCriterion[];
   goals: Array<{

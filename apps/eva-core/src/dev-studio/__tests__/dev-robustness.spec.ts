@@ -193,7 +193,7 @@ describe('DevStudioController manual Claude login reconciliation', () => {
       hasContainer: jest.fn().mockReturnValue(true),
       verifyAuth: jest.fn().mockResolvedValue({ ok: true }),
     };
-    const controller = new DevStudioController(sessions as any, orchestrator as any, claudeCode as any);
+    const controller = new DevStudioController(sessions as any, orchestrator as any, claudeCode as any, {} as any, {} as any);
 
     await expect(controller.checkAgentAuth('session1', 'backend', {
       user: { orgId: 'org1' },
@@ -237,7 +237,7 @@ describe('DevOrchestratorService queued task resumption', () => {
     };
     const svc = new DevOrchestratorService(
       {} as any, {} as any, {} as any, {} as any, db as any,
-      sessions as any, {} as any, {} as any, {} as any, {} as any,
+      sessions as any, {} as any, {} as any, {} as any, {} as any, {} as any,
     );
     const internals = svc as unknown as {
       runAgentTask: (...args: unknown[]) => Promise<boolean>;

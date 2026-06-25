@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { IntegrationsService } from '../integrations/integrations.service';
 import { PersistentShell, ShellProcess } from '../agent/sandbox-shell';
 import { imageCandidates, machineSpecForRole } from './agent-machines';
+import { GithubService } from './github/github.service';
 
 const execFileAsync = promisify(execFile);
 
@@ -138,6 +139,49 @@ export interface BootMachineResult {
   containerName?: string;
   /** Resolved image actually used. */
   image?: string;
+  error?: string;
+}
+
+/** Stable git author identity for an agent (who did the change in history). */
+export interface GitIdentity {
+  name: string;
+  email: string;
+}
+
+export interface SetupAgentRepoOptions {
+  orgId: string;
+  /** Stable machine key (dev_agents.id) — the agent's persistent container. */
+  machineKey: string;
+  role: string;
+  /** https://github.com/owner/repo */
+  repoUrl: string;
+  /** Org GitHub PAT — embedded in the origin remote, never logged. */
+  token: string;
+  /** Agent branch to check out / continue (e.g. agent/ada/iter-1-x). */
+  branch: string;
+  /** Integration branch new agent branches fork from (e.g. develop). */
+  baseBranch: string;
+  identity: GitIdentity;
+}
+
+export interface CommitPushOptions {
+  machineKey: string;
+  token: string;
+  branch: string;
+  message: string;
+  identity: GitIdentity;
+}
+
+export interface GitOpResult {
+  ok: boolean;
+  error?: string;
+}
+
+export interface CommitPushResult {
+  ok: boolean;
+  pushed: boolean;
+  headSha?: string;
+  /** 'NO_CHANGES' when the agent produced no file changes (ok=true, pushed=false). */
   error?: string;
 }
 
@@ -1040,6 +1084,126 @@ export class ClaudeCodeRunnerService implements OnModuleInit, OnModuleDestroy {
     // until the session ends (destroyMachine) or the process exits.
     if (!container.sessionScoped) this.scheduleReap(key);
     return result;
+  }
+
+  // ── Git operations (real repo per agent) ─────────────────────────────────────
+
+  /**
+   * Clone/refresh the session repo inside the agent's machine and check out the
+   * agent's branch — continuing it if it already exists on origin, else forking
+   * from the integration branch. The token is embedded in the origin remote so
+   * push works; it lives only inside this isolated, network-segmented container
+   * (destroyed at session end) and is redacted from any surfaced output.
+   */
+  async setupAgentRepo(opts: SetupAgentRepoOptions): Promise<GitOpResult> {
+    if (!(await this.dockerAvailable())) return { ok: false, error: 'Docker no disponible en este nodo' };
+    const container = await this.getOrCreateContainerForKey(opts.machineKey, opts.orgId, opts.role);
+    if (!container) return { ok: false, error: 'NO_MACHINE: no se pudo preparar la máquina del agente' };
+
+    const name = container.name;
+    const token = opts.token;
+    const remote = GithubService.tokenizedRemote(opts.repoUrl, token);
+
+    // Trust the mounted /work regardless of the container uid.
+    await this.gitExec(name, ['config', '--global', '--add', 'safe.directory', '/work'], token);
+
+    const isRepo = (await this.gitExec(name, ['rev-parse', '--is-inside-work-tree'], token)).ok;
+    if (!isRepo) {
+      const init = await this.gitExec(name, ['init'], token);
+      if (!init.ok) return { ok: false, error: `git init: ${init.error}` };
+      await this.gitExec(name, ['remote', 'add', 'origin', remote], token);
+    } else {
+      await this.gitExec(name, ['remote', 'set-url', 'origin', remote], token);
+    }
+
+    await this.gitExec(name, ['config', 'user.name', opts.identity.name], token);
+    await this.gitExec(name, ['config', 'user.email', opts.identity.email], token);
+
+    const fetched = await this.gitExec(
+      name,
+      ['fetch', '--no-tags', 'origin', '+refs/heads/*:refs/remotes/origin/*'],
+      token,
+    );
+    if (!fetched.ok) return { ok: false, error: `git fetch: ${fetched.error}` };
+
+    // Continue the agent's branch if it already exists on origin, else fork develop.
+    const hasBranch = (await this.gitExec(name, ['rev-parse', '--verify', `origin/${opts.branch}`], token)).ok;
+    const startPoint = hasBranch ? `origin/${opts.branch}` : `origin/${opts.baseBranch}`;
+    const checkout = await this.gitExec(name, ['checkout', '-B', opts.branch, startPoint], token);
+    if (!checkout.ok) return { ok: false, error: `git checkout (${startPoint}): ${checkout.error}` };
+
+    return { ok: true };
+  }
+
+  /**
+   * Stage, commit (as the agent identity) and push the agent's branch. Returns
+   * pushed=false with error='NO_CHANGES' when the agent produced no file changes.
+   */
+  async commitAndPushAgentRepo(opts: CommitPushOptions): Promise<CommitPushResult> {
+    const container = this.containers.get(opts.machineKey);
+    if (!container) return { ok: false, pushed: false, error: 'NO_MACHINE' };
+    const name = container.name;
+    const token = opts.token;
+
+    await this.gitExec(name, ['add', '-A'], token);
+    const status = await this.gitExec(name, ['status', '--porcelain'], token);
+    if (status.ok && status.stdout.trim() === '') {
+      const sha = (await this.gitExec(name, ['rev-parse', 'HEAD'], token)).stdout.trim();
+      return { ok: true, pushed: false, headSha: sha || undefined, error: 'NO_CHANGES' };
+    }
+
+    const commit = await this.gitExec(
+      name,
+      ['commit', '-m', opts.message, '--author', `${opts.identity.name} <${opts.identity.email}>`],
+      token,
+    );
+    if (!commit.ok) return { ok: false, pushed: false, error: `git commit: ${commit.error}` };
+
+    const push = await this.gitExec(name, ['push', '-u', 'origin', opts.branch], token);
+    if (!push.ok) return { ok: false, pushed: false, error: `git push: ${push.error}` };
+
+    const headSha = (await this.gitExec(name, ['rev-parse', 'HEAD'], token)).stdout.trim();
+    return { ok: true, pushed: true, headSha: headSha || undefined };
+  }
+
+  private async getOrCreateContainerForKey(
+    key: string,
+    orgId: string,
+    role: string,
+  ): Promise<ClaudeContainer | null> {
+    const existing = this.containers.get(key);
+    if (existing) return existing;
+    const image = await this.resolveImage(role);
+    if (!image) return null;
+    const credential = await this.resolveCredential(orgId);
+    return (await this.createContainer({ key, image, role, sessionScoped: true, credential })) ?? null;
+  }
+
+  /** Run `git <args>` inside the container's /work; redact the token from any error output. */
+  private async gitExec(
+    containerName: string,
+    args: string[],
+    token?: string,
+  ): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+    try {
+      const { stdout, stderr } = await execFileAsync(
+        'docker',
+        ['exec', '-w', '/work', containerName, 'git', ...args],
+        { timeout: 180_000, maxBuffer: 16 * 1024 * 1024, env: process.env },
+      );
+      return { ok: true, stdout: stdout ?? '', stderr: stderr ?? '' };
+    } catch (err) {
+      const e = err as { stdout?: string; stderr?: string; message?: string };
+      const raw = (e.stderr || e.message || '').toString();
+      return { ok: false, stdout: e.stdout ?? '', stderr: raw, error: this.redactToken(raw, token) };
+    }
+  }
+
+  /** Strip the embedded PAT from any git output before it is logged or surfaced. */
+  private redactToken(text: string, token?: string): string {
+    let out = text ?? '';
+    if (token) out = out.split(token).join('***');
+    return out.replace(/x-access-token:[^@\s]+@/g, 'x-access-token:***@');
   }
 
   /**

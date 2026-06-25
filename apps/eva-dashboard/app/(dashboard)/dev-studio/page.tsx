@@ -6,15 +6,13 @@ import { Plus, Code2, Loader2, ChevronRight, Trash2 } from 'lucide-react';
 import { devStudioApi } from '@/lib/dev-studio-api';
 import type { DevSession } from '@/lib/dev-studio-types';
 import { SessionStatusBadge } from '@/components/dev-studio/session-status-badge';
+import { ProjectPlanWizard } from '@/components/dev-studio/project-plan-wizard';
 
 export default function DevStudioPage() {
   const router = useRouter();
   const [sessions, setSessions] = useState<DevSession[]>([]);
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
-  const [showNew, setShowNew] = useState(false);
-  const [prompt, setPrompt] = useState('');
-  const [title, setTitle] = useState('');
+  const [showWizard, setShowWizard] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -31,16 +29,8 @@ export default function DevStudioPage() {
     }
   }
 
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    if (!prompt.trim()) return;
-    setCreating(true);
-    try {
-      const session = await devStudioApi.createSession({ prompt, title: title || undefined });
-      router.push(`/dev-studio/sessions/${session.id}`);
-    } catch {
-      setCreating(false);
-    }
+  function handleSessionCreated(sessionId: string) {
+    router.push(`/dev-studio/sessions/${sessionId}`);
   }
 
   const active = sessions.filter((s) => !['completed', 'cancelled', 'failed'].includes(s.status));
@@ -60,7 +50,7 @@ export default function DevStudioPage() {
           </div>
         </div>
         <button
-          onClick={() => setShowNew((s) => !s)}
+          onClick={() => setShowWizard((s) => !s)}
           className="flex items-center gap-1.5 rounded-md bg-cyan-500/10 border border-cyan-500/20 px-3 py-1.5 text-xs font-medium text-cyan-400 hover:bg-cyan-500/20 transition-colors"
         >
           <Plus className="h-3.5 w-3.5" />
@@ -68,48 +58,12 @@ export default function DevStudioPage() {
         </button>
       </div>
 
-      {/* New session form */}
-      {showNew && (
-        <form
-          onSubmit={handleCreate}
-          className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 space-y-3"
-        >
-          <p className="text-xs font-mono text-zinc-500 uppercase tracking-widest">nuevo proyecto</p>
-
-          <input
-            type="text"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Nombre del proyecto (opcional)"
-            className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
-          />
-
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder={`Describe qué quieres construir con el mayor detalle posible.\n\nEj: Una plataforma SaaS de gestión de inventario con autenticación, roles, catálogo de productos, movimientos de stock, reportes y dashboard analytics. Stack: Next.js 14 + Supabase + TailwindCSS.`}
-            rows={7}
-            className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-700 resize-none focus:outline-none focus:ring-1 focus:ring-cyan-500/50"
-          />
-
-          <div className="flex items-center justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => setShowNew(false)}
-              className="px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
-            >
-              Cancelar
-            </button>
-            <button
-              type="submit"
-              disabled={creating || !prompt.trim()}
-              className="flex items-center gap-1.5 rounded-md bg-cyan-500 px-4 py-1.5 text-xs font-medium text-zinc-950 hover:bg-cyan-400 disabled:opacity-40 transition-colors"
-            >
-              {creating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Code2 className="h-3.5 w-3.5" />}
-              {creating ? 'Creando…' : 'Iniciar proyecto'}
-            </button>
-          </div>
-        </form>
+      {/* New session wizard */}
+      {showWizard && (
+        <ProjectPlanWizard
+          onCreated={handleSessionCreated}
+          onCancel={() => setShowWizard(false)}
+        />
       )}
 
       {loading && (
@@ -145,12 +99,12 @@ export default function DevStudioPage() {
         </section>
       )}
 
-      {!loading && sessions.length === 0 && !showNew && (
+      {!loading && sessions.length === 0 && !showWizard && (
         <div className="flex flex-col items-center justify-center py-24 gap-4 text-center">
           <Code2 className="h-8 w-8 text-zinc-800" />
           <p className="text-xs text-zinc-600">Sin sesiones de desarrollo activas</p>
           <button
-            onClick={() => setShowNew(true)}
+            onClick={() => setShowWizard(true)}
             className="flex items-center gap-1.5 rounded-md border border-zinc-800 px-4 py-2 text-xs text-zinc-400 hover:border-zinc-700 hover:text-zinc-200 transition-colors"
           >
             <Plus className="h-3.5 w-3.5" />

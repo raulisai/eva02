@@ -80,6 +80,30 @@ export class DevSessionService {
     return session;
   }
 
+  /** Bind a GitHub repo (existing or freshly created) to the session. */
+  async setSessionRepo(
+    sessionId: string,
+    orgId: string,
+    input: { repoUrl: string; owner: string; repo: string; baseBranch: string; integrationBranch: string },
+  ): Promise<DevSession> {
+    const { data, error } = await this.db.admin
+      .from('dev_sessions')
+      .update({
+        repo_url: input.repoUrl,
+        repo_owner: input.owner,
+        repo_name: input.repo,
+        repo_provider: 'github',
+        base_branch: input.baseBranch,
+        integration_branch: input.integrationBranch,
+      })
+      .eq('id', sessionId)
+      .eq('org_id', orgId)
+      .select()
+      .single();
+    if (error) this.fail('dev_sessions.setRepo', error);
+    return data as DevSession;
+  }
+
   async list(orgId: string, userId?: string): Promise<DevSession[]> {
     let q = this.db.admin
       .from('dev_sessions')
@@ -506,6 +530,13 @@ export class DevSessionService {
     targetBranch: string;
     diffSummary?: string;
     riskLevel?: 'low' | 'medium' | 'high';
+    prNumber?: number;
+    prUrl?: string;
+    prState?: string;
+    headSha?: string;
+    kind?: 'feature' | 'release';
+    approvalId?: string;
+    testResult?: Record<string, unknown>;
   }): Promise<DevMergeProposal> {
     const { data, error } = await this.db.admin
       .from('dev_merge_proposals')
@@ -518,6 +549,13 @@ export class DevSessionService {
         diff_summary: input.diffSummary ?? null,
         risk_level: input.riskLevel ?? null,
         status: 'pending',
+        pr_number: input.prNumber ?? null,
+        pr_url: input.prUrl ?? null,
+        pr_state: input.prState ?? null,
+        head_sha: input.headSha ?? null,
+        kind: input.kind ?? 'feature',
+        approval_id: input.approvalId ?? null,
+        test_result: input.testResult ?? {},
       })
       .select()
       .single();
@@ -526,9 +564,33 @@ export class DevSessionService {
     await this.events.publish({
       type: 'dev.merge.proposed',
       orgId: input.orgId,
-      payload: { sessionId: input.sessionId, proposalId: proposal.id, sourceBranch: input.sourceBranch },
+      payload: {
+        sessionId: input.sessionId, proposalId: proposal.id,
+        sourceBranch: input.sourceBranch, prUrl: input.prUrl, kind: input.kind ?? 'feature',
+      },
     });
     return proposal;
+  }
+
+  async getMergeProposal(proposalId: string, orgId: string): Promise<DevMergeProposal | null> {
+    const { data } = await this.db.admin
+      .from('dev_merge_proposals')
+      .select('*')
+      .eq('id', proposalId)
+      .eq('org_id', orgId)
+      .maybeSingle();
+    return (data as DevMergeProposal) ?? null;
+  }
+
+  /** Find the merge proposal tied to an Approval Engine approval (release gate). */
+  async getMergeProposalByApproval(approvalId: string, orgId: string): Promise<DevMergeProposal | null> {
+    const { data } = await this.db.admin
+      .from('dev_merge_proposals')
+      .select('*')
+      .eq('approval_id', approvalId)
+      .eq('org_id', orgId)
+      .maybeSingle();
+    return (data as DevMergeProposal) ?? null;
   }
 
   async updateMergeProposal(proposalId: string, orgId: string, patch: Partial<DevMergeProposal>): Promise<DevMergeProposal> {

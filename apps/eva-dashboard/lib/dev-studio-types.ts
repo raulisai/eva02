@@ -32,6 +32,10 @@ export interface DevSession {
   repo_url: string | null;
   base_branch: string;
   session_branch: string | null;
+  repo_owner: string | null;
+  repo_name: string | null;
+  repo_provider: string | null;
+  integration_branch: string | null;
   current_goal_id: string | null;
   current_iteration_id: string | null;
   continuation_policy: Record<string, unknown>;
@@ -91,6 +95,9 @@ export interface DevAgent {
   runtime: string;
   current_task_id: string | null;
   branch_name: string | null;
+  git_author_name: string | null;
+  git_author_email: string | null;
+  github_login: string | null;
   last_heartbeat_at: string | null;
 }
 
@@ -122,7 +129,48 @@ export interface DevMergeProposal {
   risk_level: string | null;
   test_result: Record<string, unknown>;
   reviewer_notes: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  pr_state: string | null;
+  head_sha: string | null;
+  kind: 'feature' | 'release' | null;
+  approval_id: string | null;
   created_at: string;
+}
+
+// ── GitHub connection + read-only viewer ──────────────────────────────────────
+
+export interface GithubStatus {
+  connected: boolean;
+  login?: string;
+  scopes?: string[];
+  error?: string;
+}
+
+export interface GithubTreeEntry {
+  path: string;
+  type: 'blob' | 'tree';
+  sha: string;
+  size?: number;
+}
+
+export interface GithubContent {
+  path: string;
+  encoding: string;
+  content: string;
+  sha: string;
+  size: number;
+  truncated: boolean;
+  tooLarge: boolean;
+}
+
+export interface GithubPrFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  changes: number;
+  patch?: string;
 }
 
 export interface DevEvent {
@@ -209,6 +257,35 @@ export const GOAL_STATUS_LABEL: Record<DevGoalStatus, string> = {
   completed: 'Completado',
   paused: 'Pausado',
   cancelled: 'Cancelado',
+};
+
+// ── Project Planning (wizard) ─────────────────────────────────────────────────
+
+export interface PlanSuccessCriterion {
+  id: string;
+  description: string;
+  verifiable: boolean;
+}
+
+export interface PlanGoal {
+  title: string;
+  description: string;
+  priority: number;
+  successCriteria: PlanSuccessCriterion[];
+}
+
+export interface ProjectPlan {
+  northStar: string;
+  definitionOfDone: PlanSuccessCriterion[];
+  goals: PlanGoal[];
+  teamTier: 'small' | 'medium' | 'large';
+  teamTierReason: string;
+}
+
+export const TEAM_TIER_AGENTS: Record<'small' | 'medium' | 'large', string[]> = {
+  small: ['project_manager', 'full_stack'],
+  medium: ['project_manager', 'architect', 'backend', 'frontend'],
+  large: ['project_manager', 'architect', 'backend', 'frontend', 'testing', 'deployment', 'reviewer'],
 };
 
 export const AGENT_ROLE_EMOJI: Record<string, string> = {

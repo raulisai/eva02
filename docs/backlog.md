@@ -4,6 +4,19 @@ This backlog keeps only relevant, actionable improvements. Completed work moves 
 
 ---
 
+## 0gh. Dev Studio — repositorio Git real + flujo de PRs (shipped 2026-06-24)
+Antes Dev Studio **simulaba** el trabajo por ramas: `branch_name`/`dev_merge_proposals` eran solo strings, `createMergeProposal()` nunca se llamaba, `/work` era un tmpdir vacío y no había Git ni GitHub. Ahora todo se controla por un repositorio: cada agente crea su rama (con su nombre), commitea con su identidad, abre PR a `develop`, el arquitecto lo revisa/mergea, y un PR `develop → main` requiere tu aprobación humana para ir a prod.
+- [x] **GithubService** ([github.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/github/github.service.ts)): cliente REST con `fetch`, token org desde `org_integrations` (provider `github`, ya existente), nunca logueado, errores saneados. validate/getRepo/createRepo/ensureBranch(idempotente 422)/createPR/mergePR/closePR/getPullRequestFiles/getTree/getContent.
+- [x] **Git real por agente** ([claude-code-runner.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/claude-code-runner.service.ts)): `setupAgentRepo` (clone/init + checkout `-B agent/<nombre>/iter-N-slug` desde `origin/develop`, identidad git por agente) y `commitAndPushAgentRepo` (NO_CHANGES detectado); token embebido en el remote tokenizado, redactado en logs.
+- [x] **Orquestación** ([dev-orchestrator.service.ts](file:///Users/djoker/code/eva02/apps/eva-core/src/dev-studio/dev-orchestrator.service.ts)): `runAgentTask` prepara repo→corre Claude→commit/push→abre PR→`openAndReviewFeaturePr` (arquitecto `reviewPullRequest` → merge squash a develop o changes_requested). Falta token GitHub → human task `github_connect`. `connectRepo` (existente/crear).
+- [x] **Gate de release**: al completar goals, PR `develop → main` (kind=`release`) gated por Approval Engine (level 2, `dev_studio.release_merge`); `approval.resolved` → `handleReleaseApprovalResolved` mergea a main + sesión `completed`. `approveMergeProposal` rehúsa releases (solo Approvals).
+- [x] **UI**: indicador de fase, panel de conexión de repo (existente/crear + estado GitHub), visor de código solo-lectura (árbol + archivo + diffs de PR), tarjeta GitHub por agente (rama+identidad+tarea), `merge-proposal-panel` con PRs reales.
+- [x] **Esquema**: migración [041_dev_studio_github.sql](file:///Users/djoker/code/eva02/supabase/migrations/041_dev_studio_github.sql) (repo_owner/name/provider/integration_branch en sessions; git_author_* en agents; pr_number/url/state/head_sha/kind/approval_id en merge_proposals). **Pendiente: el usuario debe aplicarla en Supabase.**
+- [ ] **Aplicar migración 041** en Supabase cloud (el usuario la aplica; eva-core no la auto-aplica).
+- [ ] **Live smoke GitHub end-to-end**: con un PAT real (contents:write, pull_requests:write) y un repo de prueba, correr una sesión y confirmar en GitHub: ramas `agent/<nombre>/…`, commits con autor por agente, PRs → develop, merge del arquitecto, y el PR `develop → main` apareciendo como approval; al aprobarlo, merge a main + sesión `completed`.
+
+---
+
 ## 0ad. ask_user vía Telegram — pregunta + respuesta end-to-end (shipped 2026-06-23)
 Síntoma: una tarea de Telegram ("Envíame un mensaje de voz") hacía `ask_user`, pero la pregunta **nunca llegaba a Telegram**; el loop no se detenía, re-preguntaba en cada paso, fallaba parseos y acababa **inventando** un mensaje genérico. Raíz: `ask_user` solo emitía `task.waiting_input`/`task.form_request`, eventos que solo consume el WebSocket del dashboard; y el loop trataba `WAITING_FOR_INPUT` como observación normal y seguía.
 - [x] **Pregunta → canal de origen**: `CommunicationService` ahora reenvía `task.waiting_input` a `deliverToOriginatingChannel` (Telegram/WearOS/Playground), con opciones numeradas y nota "responde aquí mismo". El dashboard sigue recibiéndola por `task.form_request`.

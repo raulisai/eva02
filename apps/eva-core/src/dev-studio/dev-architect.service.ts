@@ -23,6 +23,45 @@ interface ArchitectPlan {
   humanApprovalReason?: string;
 }
 
+export interface PrReviewFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+}
+
+export interface PrReviewInput {
+  orgId: string;
+  taskTitle: string;
+  taskPrompt: string;
+  acceptanceCriteria: SuccessCriterion[];
+  files: PrReviewFile[];
+  testResult?: Record<string, unknown>;
+}
+
+export interface PrReviewDecision {
+  decision: 'approve' | 'changes_requested';
+  summary: string;
+  notes?: string;
+  riskLevel: 'low' | 'medium' | 'high';
+}
+
+const PR_REVIEW_SYSTEM = `${AGENT_SYSTEM_PROMPTS.architect}
+
+Tu tarea ahora es REVISAR un Pull Request de un agente hacia la rama de integración (develop).
+Decides si se integra o si se piden cambios. develop NO es producción: sé pragmático, integra trabajo razonable y reserva "changes_requested" para problemas reales (criterios de aceptación incumplidos, código roto, riesgos de seguridad/multi-tenant, o ausencia total de cambios).
+
+Considera: el diff, los criterios de aceptación de la tarea y el resultado de tests si existe.
+
+Responde SOLO en JSON:
+{
+  "decision": "approve" | "changes_requested",
+  "summary": "1-2 frases sobre qué hace el PR y por qué se aprueba o no",
+  "notes": "si changes_requested: instrucciones concretas (archivo/razón) para el agente; si approve: null",
+  "riskLevel": "low" | "medium" | "high"
+}`;
+
 const TASK_DERIVATION_BASE = `${AGENT_SYSTEM_PROMPTS.architect}
 
 Tu tarea ahora es: dado un goal de producto y el objetivo de una iteración, genera las tareas técnicas concretas que los agentes especializados deben ejecutar.
@@ -251,4 +290,76 @@ Genera las tareas técnicas para esta iteración.`.trim();
     }
   }
 
+  /**
+   * Architect review of a feature Pull Request (head → develop). Returns an
+   * approve / changes_requested decision. On model failure it falls back to a
+   * conservative heuristic: approve when there are changes and no failing tests,
+   * else request changes (develop is integration, not production).
+   */
+  async reviewPullRequest(input: PrReviewInput): Promise<PrReviewDecision> {
+    const diff = input.files
+      .map((f) => `### ${f.filename} (${f.status}, +${f.additions}/-${f.deletions})\n${(f.patch ?? '').slice(0, 2000)}`)
+      .join('\n\n')
+      .slice(0, 12000);
+
+    const criteria = (input.acceptanceCriteria ?? [])
+      .map((c) => `- ${c.description}`)
+      .join('\n') || '- (sin criterios explícitos)';
+
+    const testsFailed = DevArchitectService.testResultFailed(input.testResult);
+
+    const prompt = `
+Tarea: "${input.taskTitle}"
+Descripción: ${input.taskPrompt?.slice(0, 1000) ?? 'N/A'}
+
+Criterios de aceptación:
+${criteria}
+
+Resultado de tests: ${testsFailed === null ? 'no disponible' : testsFailed ? 'HAY TESTS FALLANDO' : 'tests en verde'}
+
+Diff del PR (${input.files.length} archivo(s)):
+${diff || '(sin cambios en archivos)'}
+
+Revisa e indica si se integra a develop.`.trim();
+
+    try {
+      const result = await this.modelRouter.generate(prompt, {
+        orgId: input.orgId,
+        budget: 'balanced',
+        systemPrompt: PR_REVIEW_SYSTEM,
+        responseFormat: 'json',
+        temperature: 0.1,
+        maxTokens: 1024,
+      });
+      const parsed = extractJson<PrReviewDecision>(result.text);
+      const decision = parsed.decision === 'approve' ? 'approve' : 'changes_requested';
+      const riskLevel = ['low', 'medium', 'high'].includes(parsed.riskLevel) ? parsed.riskLevel : 'low';
+      return { decision, summary: parsed.summary ?? '', notes: parsed.notes, riskLevel };
+    } catch (err) {
+      this.logger.warn(`Architect reviewPullRequest fallback: ${(err as Error).message}`);
+      if (input.files.length > 0 && testsFailed !== true) {
+        return {
+          decision: 'approve',
+          summary: 'Aprobado por heurística (revisor LLM no disponible): hay cambios y sin tests fallando.',
+          riskLevel: 'low',
+        };
+      }
+      return {
+        decision: 'changes_requested',
+        summary: 'No se pudo revisar automáticamente y no hay cambios verificables / hay tests fallando.',
+        notes: 'Revisión automática no concluyente; requiere atención del agente.',
+        riskLevel: 'medium',
+      };
+    }
+  }
+
+  /** true=failing, false=passing, null=unknown, from a loose test_result shape. */
+  private static testResultFailed(testResult?: Record<string, unknown>): boolean | null {
+    if (!testResult || Object.keys(testResult).length === 0) return null;
+    const failed = Number(testResult.failed ?? testResult.failures ?? 0);
+    if (Number.isFinite(failed) && failed > 0) return true;
+    if (typeof testResult.passed === 'boolean') return !testResult.passed;
+    if (typeof testResult.ok === 'boolean') return !testResult.ok;
+    return null;
+  }
 }

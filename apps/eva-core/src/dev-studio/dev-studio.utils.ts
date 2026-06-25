@@ -61,3 +61,46 @@ export function extractJson<T>(text: string): T {
     throw new Error(`extractJson failed: ${(e as Error).message}\nInput (first 300): ${text.slice(0, 300)}`);
   }
 }
+
+/**
+ * URL/branch-safe slug: lowercase, ASCII, hyphen-separated, bounded length.
+ * Strips diacritics so "Diseño Inicial" → "diseno-inicial".
+ */
+export function slugify(input: string, maxLen = 40): string {
+  const base = (input ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, maxLen)
+    .replace(/-+$/g, '');
+  return base || 'task';
+}
+
+/**
+ * Branch name for an agent's task. Carries the agent's NAME (not just role) so
+ * every branch and its commits are attributable to who did the work:
+ *   agent/<name-slug>/iter-<N>-<task-slug>
+ */
+export function agentBranchName(agentName: string, taskTitle: string, iteration: number): string {
+  const who = slugify(agentName || 'agent', 24);
+  const what = slugify(taskTitle || 'task', 32);
+  const n = Number.isFinite(iteration) && iteration > 0 ? iteration : 1;
+  return `agent/${who}/iter-${n}-${what}`;
+}
+
+/**
+ * Stable git author identity for an agent. The commit author shows who did the
+ * change in GitHub history; the email is a non-routable noreply address keyed by
+ * the agent id so it stays unique per agent within the org.
+ */
+export function agentGitIdentity(agent: { id: string; name: string; role: string }): {
+  name: string;
+  email: string;
+} {
+  const id8 = (agent.id ?? '').replace(/-/g, '').slice(0, 8) || 'agent';
+  const roleSlug = slugify(agent.role || 'agent', 16);
+  const name = agent.name?.trim() || `EVA ${agent.role}`;
+  return { name, email: `${roleSlug}+${id8}@eva-agents.local` };
+}

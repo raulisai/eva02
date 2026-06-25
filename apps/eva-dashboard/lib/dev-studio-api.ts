@@ -4,6 +4,7 @@ import { coreFetch } from './core-api';
 import type {
   DevSession, DevGoal, DevIteration, DevAgent,
   DevHumanTask, DevMergeProposal, DevEvent, ClaudeAuthOption, FlowState,
+  ProjectPlan, GithubStatus, GithubTreeEntry, GithubContent, GithubPrFile,
 } from './dev-studio-types';
 
 const BASE = '/dev-studio';
@@ -11,8 +12,24 @@ const BASE = '/dev-studio';
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
 export const devStudioApi = {
+  // Planning preview (no session created)
+  planSession: (description: string) =>
+    coreFetch<ProjectPlan>(`${BASE}/sessions/plan`, { method: 'POST', body: JSON.stringify({ description }) }),
+
   // Sessions
-  createSession: (data: { prompt: string; title?: string; project_id?: string }) =>
+  createSession: (data: {
+    prompt: string;
+    title?: string;
+    project_id?: string;
+    preplan?: {
+      northStar?: string;
+      teamTier?: 'small' | 'medium' | 'large';
+      teamTierReason?: string;
+      definitionOfDone?: Array<{ id: string; description: string; verifiable: boolean }>;
+      goals: Array<{ title: string; description: string; priority: number; successCriteria: Array<{ id: string; description: string; verifiable: boolean }> }>;
+      autoApprove?: boolean;
+    };
+  }) =>
     coreFetch<DevSession>(`${BASE}/sessions`, { method: 'POST', body: JSON.stringify(data) }),
 
   listSessions: () => coreFetch<DevSession[]>(`${BASE}/sessions`),
@@ -184,4 +201,31 @@ export const devStudioApi = {
       method: 'POST',
       body: JSON.stringify({ reviewer_notes: notes }),
     }),
+
+  mergeProposalFiles: (proposalId: string) =>
+    coreFetch<GithubPrFile[]>(`${BASE}/merge-proposals/${proposalId}/files`),
+
+  // ── GitHub connection + read-only repo viewer ────────────────────────────────
+
+  githubStatus: () => coreFetch<GithubStatus>(`${BASE}/github/status`),
+
+  connectRepo: (
+    sessionId: string,
+    data: { repoUrl?: string; create?: boolean; name?: string; owner?: string; private?: boolean },
+  ) =>
+    coreFetch<DevSession>(`${BASE}/sessions/${sessionId}/repo/connect`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  repoTree: (sessionId: string, ref?: string) => {
+    const qs = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+    return coreFetch<GithubTreeEntry[]>(`${BASE}/sessions/${sessionId}/repo/tree${qs}`);
+  },
+
+  repoFile: (sessionId: string, path: string, ref?: string) => {
+    const qs = new URLSearchParams({ path });
+    if (ref) qs.set('ref', ref);
+    return coreFetch<GithubContent>(`${BASE}/sessions/${sessionId}/repo/file?${qs.toString()}`);
+  },
 };

@@ -40,6 +40,9 @@ import { useAuthToken } from '@/hooks/use-auth-token';
 import { SessionStatusBadge } from './session-status-badge';
 import { SessionTimeline } from './session-timeline';
 import { MergeProposalPanel } from './merge-proposal-panel';
+import { PhaseIndicator } from './phase-indicator';
+import { RepoConnectPanel } from './repo-connect-panel';
+import { CodeViewer } from './code-viewer';
 import { AgentFlowDiagram } from './agent-flow-diagram';
 import { TaskDetailPanel } from './task-detail-panel';
 import { cn } from '@/lib/utils';
@@ -70,7 +73,7 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
   const [loading, setLoading] = useState(false);
   const [steerText, setSteerText] = useState('');
   const [selectedGoals, setSelectedGoals] = useState<Set<string>>(new Set());
-  const [bottomView, setBottomView] = useState<'dashboard' | 'timeline' | 'all_tasks'>('dashboard');
+  const [bottomView, setBottomView] = useState<'dashboard' | 'timeline' | 'all_tasks' | 'code'>('dashboard');
   const [expandedGoalId, setExpandedGoalId] = useState<string | null>(null);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [submittingTaskId, setSubmittingTaskId] = useState<string | null>(null);
@@ -448,9 +451,15 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
           </div>
         )}
 
-        {pendingMerges.length > 0 && (
+        {/* Repo-centric: development phase + GitHub repo connection */}
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_minmax(0,22rem)] gap-3">
+          <PhaseIndicator session={session} proposals={proposals} />
+          <RepoConnectPanel session={session} onConnected={refresh} />
+        </div>
+
+        {proposals.some((p) => ['pending', 'conflicted', 'approved'].includes(p.status)) && (
           <div className="animate-fade-in">
-            <MergeProposalPanel proposals={pendingMerges} onUpdated={refresh} />
+            <MergeProposalPanel proposals={proposals} onUpdated={refresh} />
           </div>
         )}
 
@@ -569,6 +578,15 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
               )}
             >
               Tareas
+            </button>
+            <button
+              onClick={() => setBottomView('code')}
+              className={cn(
+                "px-2.5 py-1 text-[10px] font-mono rounded-md transition-all",
+                bottomView === 'code' ? "bg-[#0b1224] text-cyan-400 border border-white/5" : "text-zinc-600 hover:text-zinc-400"
+              )}
+            >
+              Código
             </button>
           </div>
         </div>
@@ -1019,6 +1037,11 @@ export function SessionDetail({ session: initial, onUpdate }: SessionDetailProps
               )}
             </div>
           </div>
+        )}
+
+        {/* Alternate bottom view: read-only code viewer (file tree + PR diffs) */}
+        {bottomView === 'code' && (
+          <CodeViewer session={session} proposals={proposals} />
         )}
 
       </main>
